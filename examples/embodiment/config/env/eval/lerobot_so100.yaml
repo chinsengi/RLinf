@@ -1,0 +1,82 @@
+simulator_type: lerobot
+
+auto_reset: ${algorithm.auto_reset}
+ignore_terminations: ${algorithm.ignore_terminations}
+max_episode_steps: ${algorithm.max_episode_steps}
+
+use_rel_reward: ${algorithm.use_rel_reward}
+reward_coef: ${algorithm.reward_coef}
+only_eval: True
+
+seed: 0
+num_group: 1
+group_size: 1
+use_fixed_reset_state_ids: False
+num_envs: 1
+
+video_cfg:
+  save_video: False
+  info_on_video: False
+  video_base_dir: ${runner.logger.log_path}/video/eval
+
+lerobot:
+  device: cpu
+  policy_device: cpu
+  fps: 10
+  task_prompt: ""
+  primary_camera_key: observation.images.base_0_rgb
+  wrist_camera_keys:
+    - observation.images.left_wrist_0_rgb
+    - observation.images.right_wrist_0_rgb
+  state_key: observation.state
+  use_gripper: True
+  calibrate_on_start: False
+  reset_time_s: 5.0
+  reset_joint_positions: null
+  robot:
+    type: so100_follower
+    port: "/dev/ttyUSB0"
+    id: "so100_follower"
+    use_degrees: False
+    cameras:
+      base_0_rgb:
+        type: opencv
+        index_or_path: 0
+        width: 640
+        height: 480
+        fps: 30
+      left_wrist_0_rgb:
+        type: opencv
+        index_or_path: 1
+        width: 640
+        height: 480
+        fps: 30
+      right_wrist_0_rgb:
+        type: opencv
+        index_or_path: 2
+        width: 640
+        height: 480
+        fps: 30
+  processor:
+    control_mode: policy
+    gripper:
+      use_gripper: True
+      gripper_penalty: 0.0
+    reset:
+      control_time_s: ${algorithm.max_episode_steps}
+      terminate_on_success: True
+    inverse_kinematics:
+      urdf_path: "/path/to/so100/robot.urdf"
+      target_frame_name: "tool0"
+      end_effector_bounds:
+        min: [-0.30, -0.30, 0.05]
+        max: [0.30, 0.30, 0.40]
+      end_effector_step_sizes:
+        x: 0.01
+        y: 0.01
+        z: 0.01
+        wx: 0.05
+        wy: 0.05
+        wz: 0.05
+        gripper_vel: 1.0
+    max_gripper_pos: 100.0

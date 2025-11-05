@@ -185,6 +185,33 @@ class EnvWorker(Worker):
                             enable_offload=enable_offload,
                         )
                     )
+        elif self.cfg.env.train.simulator_type == "lerobot":
+            from rlinf.envs.lerobot.so100_env import LeRobotSo100Env
+
+            if not only_eval:
+                for stage_id in range(self.stage_num):
+                    self.simulator_list.append(
+                        EnvManager(
+                            self.cfg.env.train,
+                            rank=self._rank,
+                            seed_offset=self._rank * self.stage_num + stage_id,
+                            total_num_processes=self._world_size * self.stage_num,
+                            env_cls=LeRobotSo100Env,
+                            enable_offload=enable_offload,
+                        )
+                    )
+            if self.cfg.runner.val_check_interval > 0 or only_eval:
+                for stage_id in range(self.stage_num):
+                    self.eval_simulator_list.append(
+                        EnvManager(
+                            self.cfg.env.eval,
+                            rank=self._rank,
+                            seed_offset=self._rank * self.stage_num + stage_id,
+                            total_num_processes=self._world_size * self.stage_num,
+                            env_cls=LeRobotSo100Env,
+                            enable_offload=enable_offload,
+                        )
+                    )
         else:
             raise NotImplementedError(
                 f"Simulator type {self.cfg.env.train.simulator_type} not implemented"

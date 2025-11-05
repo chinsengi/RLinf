@@ -71,6 +71,7 @@ RLinf is a flexible and scalable open-source infrastructure designed for post-tr
       <td>
         <ul style="margin-left: 0; padding-left: 16px;">
           <li>Franka Arm</li>
+          <li><a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/lerobot_so100.html">SO-100 Follower</a> ✅</li>
           <li>More...</li>
         </ul>
       </td>

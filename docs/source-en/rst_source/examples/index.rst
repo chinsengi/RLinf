@@ -12,6 +12,8 @@ Embodied Intelligence Scenarios
 This category includes embodied training examples with SOTA models (e.g., pi0, pi0.5, OpenVLA-OFT) and different simulators (e.g., LIBERO, ManiSkill, RoboTwin),
 as well as reinforcement learning training examples on real robots.
 
+For a detailed walkthrough of running π-based RL on a real SO-100 arm, see :doc:`lerobot_so100`.
+
 .. raw:: html
 
    <div style="display: flex; justify-content: center; gap: 20px; align-items: flex-start; flex-wrap: wrap;">
@@ -201,5 +203,6 @@ Thanks to this decoupled design, workers can be flexibly and dynamically schedul
    libero
    behavior
    pi0
+   lerobot_so100
    reasoning
    coding_online_rl
