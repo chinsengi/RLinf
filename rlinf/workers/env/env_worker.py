@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import asyncio
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Literal
 
 import numpy as np
@@ -31,6 +31,7 @@ from rlinf.data.embodied_io_struct import (
 from rlinf.envs import get_env_cls
 from rlinf.envs.action_utils import prepare_actions
 from rlinf.envs.wrappers import RecordVideo
+from rlinf.integrations.marl import MarlClient, MarlImage
 from rlinf.scheduler import Channel, Cluster, Worker
 from rlinf.utils.comm_mapping import CommMapper
 from rlinf.utils.metric_utils import compute_split_num
@@ -57,25 +58,75 @@ class EnvWorker(Worker):
         self.collect_transitions = self.cfg.rollout.get("collect_transitions", False)
         self.collect_prev_infos = self.cfg.rollout.get("collect_prev_infos", True)
         self.stage_num = self.cfg.rollout.pipeline_stage_num
+        self._marl_cfg = self.cfg.get("marl", None)
+        self._marl_enabled: bool = bool(
+            self._marl_cfg is not None and self._marl_cfg.get("enabled", True)
+        )
+        marl_planner_cfg = self._marl_cfg.get("planner", {}) if self._marl_enabled else {}
+        marl_topreward_cfg = (
+            self._marl_cfg.get("topreward", {}) if self._marl_enabled else {}
+        )
 
         # Env configurations
         self.enable_offload = self.cfg.env.train.get("enable_offload", False)
         # VLM planner integration (optional stage-aware subtask updates).
         # When subtask_interval > 0 the env worker calls the VLM planner every
         # subtask_interval chunk steps and updates env.task_description.
-        self._subtask_interval: int = int(self.cfg.env.train.get("subtask_interval", 0))
+        self._subtask_interval: int = int(
+            marl_planner_cfg.get("interval", self.cfg.env.train.get("subtask_interval", 0))
+        )
         self._steps_since_subtask_update: int = 0
         self._vlm_planner = None  # set via set_vlm_planner() after construction
 
         # TOPReward dense reward state
         self._top_reward_enabled: bool = bool(
-            self.cfg.env.train.get("top_reward_enabled", False)
+            marl_topreward_cfg.get(
+                "enabled", self.cfg.env.train.get("top_reward_enabled", False)
+            )
         )
         self._top_reward_max_frames: int = int(
-            self.cfg.env.train.get("top_reward_max_frames", 16)
+            marl_topreward_cfg.get(
+                "max_frames", self.cfg.env.train.get("top_reward_max_frames", 16)
+            )
         )
         self._episode_frames: list[np.ndarray] = []
         self._prev_top_score: float = 0.0
+        self._marl_client: MarlClient | None = None
+        self._marl_run_ids = (
+            [self._build_marl_run_id(stage_id) for stage_id in range(self.stage_num)]
+            if self._marl_enabled
+            else []
+        )
+        self._marl_episode_indices = [0 for _ in range(self.stage_num)]
+        self._marl_episode_ids = ["" for _ in range(self.stage_num)]
+        self._marl_step_ids = [-1 for _ in range(self.stage_num)]
+        self._marl_topreward_start_step_ids = [0 for _ in range(self.stage_num)]
+        self._marl_prev_top_scores = [0.0 for _ in range(self.stage_num)]
+        self._marl_image_format = (
+            str(self._marl_cfg.get("image_format", "jpeg"))
+            if self._marl_enabled
+            else "jpeg"
+        )
+        self._marl_topreward_camera_name = (
+            marl_topreward_cfg.get("camera_name", "main")
+            if self._marl_enabled
+            else None
+        )
+        self._marl_topreward_fps = (
+            float(marl_topreward_cfg.get("fps", 2.0))
+            if self._marl_enabled
+            else 2.0
+        )
+        marl_memory_entries = (
+            int(marl_planner_cfg.get("max_memory_entries", 20))
+            if self._marl_enabled
+            else 0
+        )
+        self._marl_memories = (
+            [deque(maxlen=marl_memory_entries) for _ in range(self.stage_num)]
+            if self._marl_enabled
+            else []
+        )
         self.only_eval = getattr(self.cfg.runner, "only_eval", False)
         self.enable_eval = self.cfg.runner.val_check_interval > 0 or self.only_eval
         if not self.only_eval:
@@ -95,6 +146,137 @@ class EnvWorker(Worker):
             // self.cfg.actor.model.num_action_chunks
         )
         self.actor_split_num = self.get_actor_split_num()
+
+    def _build_marl_run_id(self, stage_id: int) -> str:
+        """Build a stable marl run id for this worker and pipeline stage."""
+        experiment_name = str(
+            getattr(getattr(self.cfg.runner, "logger", {}), "experiment_name", "rlinf")
+        )
+        return f"{experiment_name}-rank{self._rank}-stage{stage_id}"
+
+    @staticmethod
+    def _to_numpy_image_array(image: Any) -> np.ndarray:
+        """Convert a tensor-like image payload into a numpy array."""
+        if isinstance(image, torch.Tensor):
+            image = image.detach().cpu().numpy()
+        return np.asarray(image)
+
+    def _obs_to_marl_images(self, obs: dict[str, Any]) -> list[MarlImage]:
+        """Extract marl ingress images from an observation dict."""
+        images: list[MarlImage] = []
+
+        main_images = obs.get("main_images")
+        if main_images is not None:
+            main_array = self._to_numpy_image_array(main_images)
+            if main_array.ndim == 4:
+                images.append(MarlImage(camera_name="main", image=main_array[0]))
+            elif main_array.ndim == 3:
+                images.append(MarlImage(camera_name="main", image=main_array))
+
+        wrist_images = obs.get("wrist_images")
+        if wrist_images is not None:
+            wrist_array = self._to_numpy_image_array(wrist_images)
+            if wrist_array.ndim == 5:
+                for index, image in enumerate(wrist_array[0]):
+                    images.append(MarlImage(camera_name=f"wrist_{index}", image=image))
+
+        extra_view_images = obs.get("extra_view_images")
+        if extra_view_images is not None:
+            extra_array = self._to_numpy_image_array(extra_view_images)
+            if extra_array.ndim == 5:
+                for index, image in enumerate(extra_array[0]):
+                    images.append(MarlImage(camera_name=f"extra_{index}", image=image))
+
+        return images
+
+    def _get_marl_memory_text(self, stage_id: int) -> str:
+        """Return the joined planner memory text for one stage."""
+        memory = self._marl_memories[stage_id]
+        return "\n".join(memory) if memory else "(no history yet)"
+
+    def _get_current_task_descriptions(self, stage_id: int) -> list[str] | None:
+        """Read the current task text from the live env object."""
+        env = self.env_list[stage_id]
+        inner_env = getattr(env, "unwrapped", env)
+
+        task_descriptions = getattr(inner_env, "task_descriptions", None)
+        if task_descriptions is not None:
+            if isinstance(task_descriptions, list):
+                return list(task_descriptions)
+            return [str(task_descriptions)]
+
+        task_description = getattr(inner_env, "task_description", None)
+        if task_description is not None:
+            return [str(task_description)]
+
+        return None
+
+    def _sync_task_descriptions_to_obs(
+        self, *, stage_id: int, env_output: EnvOutput | None = None
+    ) -> None:
+        """Make the live task text visible in the next rollout observation."""
+        task_descriptions = self._get_current_task_descriptions(stage_id)
+        if task_descriptions is None:
+            return
+
+        env = self.env_list[stage_id]
+        last_obs = getattr(env, "last_obs", None)
+        if isinstance(last_obs, dict):
+            last_obs["task_descriptions"] = list(task_descriptions)
+
+        if env_output is not None and isinstance(env_output.obs, dict):
+            env_output.obs["task_descriptions"] = list(task_descriptions)
+        if env_output is not None and isinstance(env_output.final_obs, dict):
+            env_output.final_obs["task_descriptions"] = list(task_descriptions)
+
+    def _start_marl_episode(self, stage_id: int) -> None:
+        """Start a new marl logical episode for one stage."""
+        self._marl_episode_ids[stage_id] = (
+            f"ep_{self._marl_episode_indices[stage_id]:06d}"
+        )
+        self._marl_episode_indices[stage_id] += 1
+        self._marl_step_ids[stage_id] = -1
+        self._marl_topreward_start_step_ids[stage_id] = 0
+        self._marl_prev_top_scores[stage_id] = 0.0
+        self._marl_memories[stage_id].clear()
+
+    def _record_marl_step(self, stage_id: int, env_output: EnvOutput) -> bool:
+        """Upload the latest observation as one marl image set."""
+        if not self._marl_enabled or self._marl_client is None or env_output.obs is None:
+            return False
+
+        images = self._obs_to_marl_images(env_output.obs)
+        if not images:
+            return False
+
+        env = self.env_list[stage_id]
+        inner_env = getattr(env, "unwrapped", env)
+        task_description = str(getattr(inner_env, "task_description", ""))
+        next_step_id = self._marl_step_ids[stage_id] + 1
+        try:
+            self._marl_client.create_image_set(
+                run_id=self._marl_run_ids[stage_id],
+                episode_id=self._marl_episode_ids[stage_id],
+                step_id=next_step_id,
+                task_description=task_description,
+                images=images,
+                metadata={
+                    "worker_rank": self._rank,
+                    "stage_id": stage_id,
+                },
+            )
+        except Exception as exc:  # pragma: no cover - network/service failure
+            self.log_warning(
+                f"[EnvWorker] marl create_image_set failed for stage {stage_id}: {exc}"
+            )
+            return False
+
+        self._marl_step_ids[stage_id] = next_step_id
+        if task_description:
+            self._marl_memories[stage_id].append(
+                f"Step {next_step_id}: task={task_description}"
+            )
+        return True
 
     def init_worker(self):
         self.dst_ranks = {
@@ -143,6 +325,18 @@ class EnvWorker(Worker):
                 num_envs_per_stage=self.eval_num_envs_per_stage,
             )
 
+        if self._marl_enabled:
+            base_url = str(self._marl_cfg.get("base_url", "http://127.0.0.1:8080"))
+            timeout_s = float(self._marl_cfg.get("timeout_s", 30.0))
+            self._marl_client = MarlClient(
+                base_url=base_url,
+                timeout_s=timeout_s,
+                image_format=self._marl_image_format,
+            )
+            if bool(self._marl_cfg.get("healthcheck", True)):
+                self._marl_client.healthz()
+            self.log_info(f"[EnvWorker] marl enabled at {base_url}.")
+
         if not self.only_eval:
             self._init_env()
 
@@ -183,7 +377,7 @@ class EnvWorker(Worker):
             stage_id: Pipeline stage index (used to select the correct env
                 from ``self.env_list``).
         """
-        if self._subtask_interval <= 0 or self._vlm_planner is None:
+        if self._subtask_interval <= 0:
             return
 
         self._steps_since_subtask_update += 1
@@ -192,6 +386,41 @@ class EnvWorker(Worker):
 
         self._steps_since_subtask_update = 0
         env = self.env_list[stage_id]
+
+        if self._marl_enabled:
+            if self._marl_client is None or self._marl_step_ids[stage_id] < 0:
+                return
+
+            try:
+                response = self._marl_client.plan(
+                    run_id=self._marl_run_ids[stage_id],
+                    episode_id=self._marl_episode_ids[stage_id],
+                    step_id=self._marl_step_ids[stage_id],
+                    memory_text=self._get_marl_memory_text(stage_id),
+                )
+                new_subtask = str(response.get("subtask_text", "")).strip()
+            except Exception as exc:  # pragma: no cover - network/service failure
+                self.log_warning(
+                    f"[EnvWorker] marl planner request failed: {exc}. "
+                    "Keeping current task description."
+                )
+                return
+
+            inner_env = getattr(env, "unwrapped", env)
+            if new_subtask and hasattr(inner_env, "task_description"):
+                inner_env.task_description = new_subtask
+                if self._top_reward_enabled:
+                    self._reset_top_reward_state(stage_id)
+                self._marl_memories[stage_id].append(
+                    f"Planner updated task to: {new_subtask}"
+                )
+                self.log_info(
+                    f"[EnvWorker] Subtask updated for stage {stage_id}: '{new_subtask}'"
+                )
+            return
+
+        if self._vlm_planner is None:
+            return
 
         # Collect the most recent observation image for the planner.
         import ray
@@ -227,7 +456,7 @@ class EnvWorker(Worker):
             # Without this reset, r_{t+1} = score_new(t+1) - score_old(t),
             # comparing log-probs from two different instructions.
             if self._top_reward_enabled:
-                self._reset_top_reward_state()
+                self._reset_top_reward_state(stage_id)
             self.log_info(
                 f"[EnvWorker] Subtask updated for stage {stage_id}: '{new_subtask}'"
             )
@@ -245,7 +474,46 @@ class EnvWorker(Worker):
         Returns:
             Modified env_output with dense reward injected.
         """
-        if not self._top_reward_enabled or self._vlm_planner is None:
+        if not self._top_reward_enabled:
+            return env_output
+
+        if self._marl_enabled:
+            if self._marl_client is None or self._marl_step_ids[stage_id] < 0:
+                return env_output
+
+            env = self.env_list[stage_id]
+            inner_env = getattr(env, "unwrapped", env)
+            instruction = getattr(inner_env, "task_description", "")
+
+            try:
+                score_response = self._marl_client.score_topreward(
+                    run_id=self._marl_run_ids[stage_id],
+                    episode_id=self._marl_episode_ids[stage_id],
+                    start_step_id=self._marl_topreward_start_step_ids[stage_id],
+                    end_step_id=self._marl_step_ids[stage_id],
+                    instruction=instruction,
+                    max_frames=self._top_reward_max_frames,
+                    camera_name=self._marl_topreward_camera_name,
+                    fps=self._marl_topreward_fps,
+                )
+                score_t = float(score_response["reward"])
+            except Exception as exc:  # pragma: no cover - network/service failure
+                self.log_warning(
+                    f"[EnvWorker] marl TOPReward failed for stage {stage_id}: {exc}"
+                )
+                return env_output
+
+            reward = float(score_t) - self._marl_prev_top_scores[stage_id]
+            self._marl_prev_top_scores[stage_id] = float(score_t)
+
+            if env_output.rewards is not None:
+                env_output.rewards[:, -1] = reward
+            self.log_info(
+                f"[EnvWorker] marl TOPReward: score={score_t:.4f}, delta={reward:.4f}"
+            )
+            return env_output
+
+        if self._vlm_planner is None:
             return env_output
 
         # Extract current frame from observation.
@@ -282,8 +550,22 @@ class EnvWorker(Worker):
 
         return env_output
 
-    def _reset_top_reward_state(self) -> None:
+    def _reset_top_reward_state(self, stage_id: int | None = None) -> None:
         """Reset TOPReward episode state for a new episode."""
+        if self._marl_enabled:
+            if stage_id is None:
+                for stage_index in range(self.stage_num):
+                    self._marl_prev_top_scores[stage_index] = 0.0
+                    self._marl_topreward_start_step_ids[stage_index] = (
+                        self._marl_step_ids[stage_index] + 1
+                    )
+            else:
+                self._marl_prev_top_scores[stage_id] = 0.0
+                self._marl_topreward_start_step_ids[stage_id] = (
+                    self._marl_step_ids[stage_id] + 1
+                )
+            return
+
         self._episode_frames = []
         self._prev_top_score = 0.0
 
@@ -437,12 +719,17 @@ class EnvWorker(Worker):
             intervene_flags=intervene_flags,
         )
 
+        if self._marl_enabled:
+            self._record_marl_step(stage_id, env_output)
+
         # Inject TOPReward dense reward if enabled.
         env_output = self._compute_top_reward(env_output, stage_id)
 
         # Reset TOPReward state on episode done.
         if self._top_reward_enabled and chunk_dones[:, -1].any():
-            self._reset_top_reward_state()
+            self._reset_top_reward_state(stage_id)
+            if self._marl_enabled and self.cfg.env.train.auto_reset:
+                self._start_marl_episode(stage_id)
 
         return env_output, env_info
 
@@ -713,6 +1000,9 @@ class EnvWorker(Worker):
         # Reset TOPReward episode state for new rollout epoch.
         if self._top_reward_enabled:
             self._reset_top_reward_state()
+        if self._marl_enabled:
+            for stage_id in range(self.stage_num):
+                self._start_marl_episode(stage_id)
 
         def get_zero_dones() -> torch.Tensor:
             return (
@@ -783,6 +1073,23 @@ class EnvWorker(Worker):
             for env_output in env_output_list
         ]
 
+    def _log_task_text_for_rollout(
+        self, *, stage_id: int, obs: dict[str, Any] | None, phase: str
+    ) -> None:
+        """Log the task text attached to the observation sent to rollout."""
+        if not self._marl_enabled or obs is None:
+            return
+        task_descriptions = obs.get("task_descriptions", None)
+        if not task_descriptions:
+            self.log_info(
+                f"[EnvWorker] Rollout obs stage={stage_id} phase={phase} has no task_descriptions."
+            )
+            return
+        self.log_info(
+            f"[EnvWorker] Rollout obs stage={stage_id} phase={phase} "
+            f"task={task_descriptions[0]!r}"
+        )
+
     async def send_rollout_trajectories(
         self, rollout_result: EmbodiedRolloutResult, channel: Channel
     ):
@@ -813,6 +1120,11 @@ class EnvWorker(Worker):
             for stage_id in range(self.stage_num):
                 env_output: EnvOutput = env_outputs[stage_id]
                 env_batch = env_output.to_dict()
+                self._log_task_text_for_rollout(
+                    stage_id=stage_id,
+                    obs=env_batch["obs"],
+                    phase="bootstrap",
+                )
                 self.send_env_batch(
                     output_channel,
                     {
@@ -861,7 +1173,15 @@ class EnvWorker(Worker):
                         rollout_result.actions, stage_id
                     )
                     self._maybe_update_subtask(stage_id)
+                    self._sync_task_descriptions_to_obs(
+                        stage_id=stage_id, env_output=env_output
+                    )
                     env_batch = env_output.to_dict()
+                    self._log_task_text_for_rollout(
+                        stage_id=stage_id,
+                        obs=env_batch["obs"],
+                        phase="post_step",
+                    )
                     self.send_env_batch(
                         output_channel,
                         {
