@@ -27,6 +27,7 @@ from omegaconf import DictConfig
 
 from rlinf.models.embodiment.openpi.adarms_expert import (
     AdaRMSGemmaRMSNorm,
+    enable_openpi_adarms_expert,
     enable_openpi_transformers_compat,
 )
 
@@ -138,7 +139,12 @@ def _ensure_openpi_transformers_overlay() -> None:
 
 
 def ensure_openpi_runtime_compat() -> None:
-    """Install OpenPI's Transformers compatibility shims before OpenPI imports."""
+    """Public compatibility hook used before importing OpenPI runtime modules.
+
+    Some worker paths import and call this symbol before importing
+    ``openpi.training.data_loader`` or related runtime modules. Keep the public
+    wrapper stable and delegate to the current internal compatibility shim.
+    """
 
     _ensure_openpi_transformers_overlay()
 
@@ -306,10 +312,10 @@ def get_model(cfg: DictConfig, torch_dtype=None):
         model: OpenPi0ForRLActionPrediction = OpenPi0ForRLActionPrediction(
             actor_model_config
         )
-    enable_openpi_transformers_compat(
-        model.paligemma_with_expert,
-        enable_adarms=getattr(actor_model_config, "pi05", False),
-    )
+    if getattr(actor_model_config, "pi05", False):
+        enable_openpi_adarms_expert(model.paligemma_with_expert)
+    else:
+        enable_openpi_transformers_compat(model.paligemma_with_expert)
     # train expert only
     if actor_model_config.train_expert_only:
         model.freeze_vlm()
