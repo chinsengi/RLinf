@@ -62,7 +62,9 @@ class EnvWorker(Worker):
         self._marl_enabled: bool = bool(
             self._marl_cfg is not None and self._marl_cfg.get("enabled", True)
         )
-        marl_planner_cfg = self._marl_cfg.get("planner", {}) if self._marl_enabled else {}
+        marl_planner_cfg = (
+            self._marl_cfg.get("planner", {}) if self._marl_enabled else {}
+        )
         marl_topreward_cfg = (
             self._marl_cfg.get("topreward", {}) if self._marl_enabled else {}
         )
@@ -73,7 +75,9 @@ class EnvWorker(Worker):
         # When subtask_interval > 0 the env worker calls the VLM planner every
         # subtask_interval chunk steps and updates env.task_description.
         self._subtask_interval: int = int(
-            marl_planner_cfg.get("interval", self.cfg.env.train.get("subtask_interval", 0))
+            marl_planner_cfg.get(
+                "interval", self.cfg.env.train.get("subtask_interval", 0)
+            )
         )
         self._steps_since_subtask_update: int = 0
         self._vlm_planner = None  # set via set_vlm_planner() after construction
@@ -113,9 +117,7 @@ class EnvWorker(Worker):
             else None
         )
         self._marl_topreward_fps = (
-            float(marl_topreward_cfg.get("fps", 2.0))
-            if self._marl_enabled
-            else 2.0
+            float(marl_topreward_cfg.get("fps", 2.0)) if self._marl_enabled else 2.0
         )
         marl_memory_entries = (
             int(marl_planner_cfg.get("max_memory_entries", 20))
@@ -242,7 +244,11 @@ class EnvWorker(Worker):
 
     def _record_marl_step(self, stage_id: int, env_output: EnvOutput) -> bool:
         """Upload the latest observation as one marl image set."""
-        if not self._marl_enabled or self._marl_client is None or env_output.obs is None:
+        if (
+            not self._marl_enabled
+            or self._marl_client is None
+            or env_output.obs is None
+        ):
             return False
 
         images = self._obs_to_marl_images(env_output.obs)

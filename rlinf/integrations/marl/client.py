@@ -166,8 +166,7 @@ class MarlClient:
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(
-                f"marl request {method} {path} failed with status "
-                f"{exc.code}: {detail}"
+                f"marl request {method} {path} failed with status {exc.code}: {detail}"
             ) from exc
         except error.URLError as exc:
             raise RuntimeError(
