@@ -21,7 +21,11 @@ import ray
 import torch
 from omegaconf.omegaconf import DictConfig
 
-from rlinf.data.embodied_io_struct import ChunkStepResult, EmbodiedRolloutResult, EnvOutput
+from rlinf.data.embodied_io_struct import (
+    ChunkStepResult,
+    EmbodiedRolloutResult,
+    EnvOutput,
+)
 from rlinf.envs.action_utils import prepare_actions
 from rlinf.scheduler import Channel, Worker
 from rlinf.workers.env.env_worker import EnvWorker
@@ -43,12 +47,8 @@ class AsyncEnvWorker(EnvWorker):
         self._async_episode_frames: list[list[np.ndarray]] = [
             [] for _ in range(self.stage_num)
         ]
-        self._async_prev_top_scores: list[float] = [
-            0.0 for _ in range(self.stage_num)
-        ]
-        self._subtask_steps_since_update: list[int] = [
-            0 for _ in range(self.stage_num)
-        ]
+        self._async_prev_top_scores: list[float] = [0.0 for _ in range(self.stage_num)]
+        self._subtask_steps_since_update: list[int] = [0 for _ in range(self.stage_num)]
         self._pending_subtask_refs: list = [None for _ in range(self.stage_num)]
 
     def bootstrap_step(self) -> list[EnvOutput]:
@@ -173,8 +173,8 @@ class AsyncEnvWorker(EnvWorker):
             else:
                 images.append(main_images)
 
-        self._pending_subtask_refs[stage_id] = self._vlm_planner.get_next_subtask.remote(
-            images
+        self._pending_subtask_refs[stage_id] = (
+            self._vlm_planner.get_next_subtask.remote(images)
         )
 
     @Worker.timer("env_interact_step")

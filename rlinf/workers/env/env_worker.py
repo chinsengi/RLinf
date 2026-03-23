@@ -88,7 +88,8 @@ class EnvWorker(Worker):
         self._episode_frames: list[np.ndarray] = []
         self._prev_top_score: float = 0.0
         self._initial_task_descriptions: list[str] = [
-            str(self.cfg.env.train.get("task_description", "")) for _ in range(self.stage_num)
+            str(self.cfg.env.train.get("task_description", ""))
+            for _ in range(self.stage_num)
         ]
         self.only_eval = getattr(self.cfg.runner, "only_eval", False)
         self.enable_eval = self.cfg.runner.val_check_interval > 0 or self.only_eval

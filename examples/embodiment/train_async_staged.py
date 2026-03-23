@@ -19,8 +19,8 @@ import json
 import hydra
 import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf
-
 from staged_utils import launch_vlm_planner
+
 from rlinf.config import validate_cfg
 from rlinf.envs.remote.simulated_desktop import (
     launch_simulated_desktop_server,
