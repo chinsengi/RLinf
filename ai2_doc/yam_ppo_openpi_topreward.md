@@ -123,6 +123,15 @@ vlm_planner:
   success_threshold: 0.5
 ```
 
+Subtask-planner prompt:
+
+- the planner now requires the overarching task from
+  `env.train.task_description` explicitly
+- it uses that main goal together with recent images and planner memory when
+  generating the next subtask
+- this avoids asking the VLM for a "next subtask" without telling it the
+  episode-level objective
+
 ## Local Simulated Desktop Mode
 
 `train_embodied_agent_staged.py` now supports simulating the remote desktop
