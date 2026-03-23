@@ -346,7 +346,7 @@ def _manual_pali_gemma_with_expert_forward(
                 )
             out_emb = layer.self_attn.o_proj(layer_attn_output)
             out_emb = _gated_residual(hidden_states, out_emb, gates[i])
-            residual = out_emb
+            residual = out_emb.clone()
             out_emb, gate = _normalize_with_optional_cond(
                 layer.post_attention_layernorm, out_emb, conds[i]
             )
