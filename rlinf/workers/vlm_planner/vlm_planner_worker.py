@@ -364,6 +364,7 @@ class VLMPlannerWorker:
         self,
         images: list[np.ndarray],
         memory: Optional[str] = None,
+        main_task: Optional[str] = None,
     ) -> str:
         """Generate the next subtask instruction from observations.
 
@@ -371,6 +372,7 @@ class VLMPlannerWorker:
             images: List of uint8 RGB images (H, W, 3) from robot cameras.
             memory: Optional explicit memory string.  If None, uses internal
                 rolling buffer.
+            main_task: Optional overarching task description for the episode.
 
         Returns:
             Subtask instruction string, e.g. "pick up the red block".
@@ -378,10 +380,14 @@ class VLMPlannerWorker:
         if memory is None:
             memory = self.get_memory_text()
 
-        user_text = (
-            f"History of past steps:\n{memory}\n\n"
+        user_text_parts = []
+        if main_task:
+            user_text_parts.append(f"Overall task:\n{main_task}")
+        user_text_parts.append(f"History of past steps:\n{memory}")
+        user_text_parts.append(
             "What is the single best next subtask for the robot to execute?"
         )
+        user_text = "\n\n".join(user_text_parts)
         messages = self._build_qwen_messages(_SUBTASK_SYSTEM_PROMPT, images, user_text)
 
         try:
