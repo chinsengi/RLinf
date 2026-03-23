@@ -1,149 +1,156 @@
-# YAM + marl End-to-End Runbook
+# YAM + marl Runbook
 
-This is the current end-to-end runbook for the YAM real-world training stack:
+This document describes the exact setup for the current YAM + `marl` stack.
 
-- `RLinf` runs actor, rollout, and env workers on Beaker
-- `marl` runs as a sidecar service on Beaker GPU 2
-- the desktop runs only `RobotServer` (and optional follower servers)
-- `RemoteEnv` connects to the desktop through a reverse SSH tunnel on `localhost:50051`
+Use this setup if you want all of these at once:
 
-This guide assumes the current repo state on `csr/dev` plus the marl PRs, but
-does **not** assume any local `uv` changes inside `RLinf`. When you need the
-local `openpi` checkout instead of the default `RLinf/openpi` install path, use
-the explicit `uv run ... --with-editable ../openpi` flow described below.
+- `RLinf` on Beaker
+- `marl` as a Beaker sidecar
+- desktop `RobotServer` over reverse SSH
+- local forked `openpi`
+- local forked `sglang`
 
-For the high-level network picture, see [network_infrastructure](network_infrastructure.md).
-For the older config-specific notes, see [yam_ppo_openpi](yam_ppo_openpi.md) and
-[yam_ppo_openpi_topreward](yam_ppo_openpi_topreward.md).
+This runbook assumes `RLinf`'s `uv` config is unchanged.
 
-## Repo Layout
+## 1. Repo Layout
 
-The expected multi-repo layout is:
+The required sibling layout is:
 
 ```text
-<workspace>/
+<root>/
   RLinf/
   marl/
-  openpi/     # needed for local/manual runs when RLinf uv is unchanged
-  sglang/     # patched fork required by marl, sibling of marl
+  openpi/
+  sglang/
 ```
 
-`marl` expects the patched `sglang` checkout at `../sglang/python` relative to
-the `marl` repo. See [marl README](../../marl/README.md).
+Clone exactly these repos:
 
-## Models And Secrets
+```bash
+git clone https://github.com/xslingcn/marl
+git clone -b marl https://github.com/xslingcn/openpi
+git clone -b marl https://github.com/xslingcn/sglang
+```
+
+Use exactly these sources:
+
+- `marl`: `https://github.com/xslingcn/marl`
+- `openpi`: `https://github.com/xslingcn/openpi/tree/marl`
+- `sglang`: `https://github.com/xslingcn/sglang/tree/marl`
+
+Why the sibling layout matters:
+
+- `RLinf` manual training command uses `--with-editable ../openpi`
+- `marl` expects the patched `sglang` checkout at `../sglang/python`
+- `submit_yam_training.sh` defaults `MARL_REPO_DIR` to the sibling repo `../marl`
+
+## 2. Models And Secrets
 
 You need:
 
-- an OpenPI checkpoint for policy inference/training
-  - e.g. `thomas0829/folding_towel_pi05`
+- an OpenPI checkpoint `thomas0829/folding_towel_pi05`
 - a Qwen3-VL checkpoint for `marl`
-  - configured through `marl.yaml`
+  - configured in `marl/marl.yaml`
 - Beaker secrets:
   - `hf_token_shirui`
   - `tailscale_authkey_shirui`
 
-The Beaker scripts in `RLinf` already assume those secret names.
+## 3. Use Interactive Beaker Mode
 
-## Canonical Production Topology
+Do **not** use the default non-interactive training path if you want this exact
+fork-based stack.
 
-Use this when you want the standard Beaker + desktop setup:
+Reason:
 
-- GPU 0: actor
-- GPU 1: rollout
-- GPU 2: `marl`
-- CPU: `EnvWorker` + `RemoteEnv`
-- desktop: `RobotServer` + optional YAM follower servers
+- `submit_yam_training.sh` in normal mode installs `openpi` through
+  `requirements/install.sh`
+- with unchanged `uv`, that means `git+https://github.com/RLinf/openpi`
+- it does not use your sibling `../openpi` checkout
 
-The current YAM configs are:
-
-- [yam_ppo_openpi.yaml](../examples/embodiment/config/yam_ppo_openpi.yaml)
-  - TOPReward only, no subtask planning
-- [yam_ppo_openpi_topreward.yaml](../examples/embodiment/config/yam_ppo_openpi_topreward.yaml)
-  - TOPReward + subtask planning
-
-Both configs use the `marl` sidecar. The difference is only whether planner
-updates are enabled.
-
-## Recommended Path: Beaker Job + Desktop RobotServer
-
-### 1. Submit the Beaker job
-
-From the `RLinf` repo root:
+For the exact setup in this document, start an interactive Beaker session:
 
 ```bash
+cd RLinf
+
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi_topreward \
-    --model-path thomas0829/folding_towel_pi05 \
-    --allow-dirty
+  --config yam_ppo_openpi_topreward \
+  --interactive \
+  --allow-dirty
 ```
 
-What this script does today:
+Then attach to the session:
 
-- installs `RLinf` deps through `bash requirements/install.sh embodied --model openpi --env remote`
-- starts Tailscale and SSH on the Beaker node
-- starts Ray
-- starts `marl` automatically as a sidecar on GPU 2
-- runs [train_embodied_agent_marl.py](../examples/embodiment/train_embodied_agent_marl.py)
+```bash
+beaker session attach <session-id>
+```
 
-Important detail:
-
-- this automatic path uses the `openpi` package installed by `requirements/install.sh`
-- with `uv` unchanged, that means `git+https://github.com/RLinf/openpi`
-- it does **not** automatically use your local sibling `../openpi` checkout
-
-### 2. Get the Beaker Tailscale address
-
-Watch the Beaker logs for:
+Inside the container, the expected repo layout is still sibling-based, for
+example:
 
 ```text
-=== Tailscale IP ===
-100.a.b.c
-==================
+/weka/oe-training-default/shiruic/
+  RLinf/
+  marl/
+  openpi/
+  sglang/
 ```
 
-### 3. Start the desktop-side RobotServer
+## 4. Start the Desktop RobotServer
 
-On the robot desktop:
+On the desktop:
 
 ```bash
+cd RLinf
+
 bash scripts/start_robot_server.sh \
-    --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --use-follower-servers \
-    --remote-host beaker-0
+  --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+  --use-follower-servers \
+  --remote-host beaker-0
 ```
 
 Dummy hardware mode:
 
 ```bash
 bash scripts/start_robot_server.sh \
-    --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --dummy
+  --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+  --dummy
 ```
 
-This script:
+This starts:
 
-- resets CAN
-- optionally starts follower servers
-- starts `RobotServer`
-- starts a persistent reverse SSH tunnel with `autossh`
+- follower servers, if requested
+- `RobotServer`
+- a persistent reverse SSH tunnel to Beaker
 
-The training job always talks to `localhost:50051` on Beaker. The reverse SSH
-tunnel maps that back to the desktop `RobotServer`.
+`RLinf` always connects to `localhost:50051` on Beaker. The tunnel maps that
+back to the desktop `RobotServer`.
 
-## Manual Path: Keep RLinf uv Unchanged But Use Local openpi
+## 5. Start marl on Beaker
 
-If you need the local sibling `../openpi` checkout without changing
-`RLinf/pyproject.toml`, do **not** rely on the default Beaker training command.
-Instead:
-
-1. start an idle Beaker cluster or interactive session
-2. SSH into the Beaker container
-3. run training manually with `uv run`
-
-Example from the `RLinf` repo root:
+Inside the attached Beaker shell:
 
 ```bash
+cd /weka/oe-training-default/shiruic/RLinf
+
+export MARL_REPO_DIR=/weka/oe-training-default/shiruic/marl
+export MARL_CONFIG_PATH=${MARL_REPO_DIR}/marl.yaml
+export MARL_BASE_URL=http://127.0.0.1:8080
+
+nohup env CUDA_VISIBLE_DEVICES=2 \
+  uv run --project ${MARL_REPO_DIR} --python 3.12 \
+  python -m marl --config ${MARL_CONFIG_PATH} --log-level info \
+  > ${MARL_REPO_DIR}/marl_server.log 2>&1 &
+
+curl -fsS ${MARL_BASE_URL}/healthz
+```
+
+## 6. Start Training on Beaker
+
+Still inside the attached Beaker shell:
+
+```bash
+cd /weka/oe-training-default/shiruic/RLinf
+
 export MARL_BASE_URL=http://127.0.0.1:8080
 export EMBODIED_PATH=examples/embodiment
 
@@ -156,26 +163,60 @@ uv run --project . --extra embodied \
   rollout.model.model_path=thomas0829/folding_towel_pi05
 ```
 
-Why the explicit extras are needed when `uv` is unchanged:
-
-- `--with-editable ../openpi`
-  - uses the local `openpi` checkout instead of the default installed package
-- `--with 'chex==0.1.90'`
-  - keeps `jax/jaxlib` aligned with the current `openpi` path
-  - plain `--with chex` can resolve to newer `jax/jaxlib` versions that break
-    `orbax-checkpoint` during actor initialization
-
-## Local 5-Step Smoke Test
-
-For local plumbing checks without hardware:
-
-1. start the dummy `marl` server
-2. run `train_embodied_agent_marl.py` with dummy remote-desktop simulation
-3. force a 5-step rollout and single-GPU placement
-
-Start dummy `marl` from the `marl` repo:
+If you want the reward-only variant, switch the config:
 
 ```bash
+--config-name yam_ppo_openpi
+```
+
+Why these flags are required with unchanged `uv`:
+
+- `--with-editable ../openpi`
+  - forces the sibling `openpi` fork
+- `--with 'chex==0.1.90'`
+  - keeps `jax/jaxlib` aligned with the current `openpi` path
+  - plain `--with chex` can resolve to a newer `jax/jaxlib` pair that breaks
+    `orbax-checkpoint` during actor initialization
+
+## 7. Actual Runtime Topology
+
+This exact setup gives:
+
+- GPU 0: actor
+- GPU 1: rollout
+- GPU 2: `marl`
+- CPU: `EnvWorker` + `RemoteEnv`
+- desktop: `RobotServer` + optional follower servers
+
+The runtime path is:
+
+```text
+OpenPI rollout -> EnvWorker -> RemoteEnv -> RobotServer -> YAMEnv
+                                 |
+                                 +-> marl /image-sets
+                                 +-> marl /topreward
+                                 +-> marl /plan
+```
+
+For `yam_ppo_openpi_topreward`:
+
+- `/topreward` is used for dense reward
+- `/plan` is used for subtask planning
+
+For `yam_ppo_openpi`:
+
+- `/topreward` is used
+- `/plan` is not used
+
+## 8. Local 5-Step Smoke Test
+
+Use this only for pipeline validation, not real training.
+
+Start dummy `marl`:
+
+```bash
+cd marl
+
 uv run --project . python -m marl.dummy_server \
   --host 127.0.0.1 \
   --port 18080 \
@@ -183,7 +224,7 @@ uv run --project . python -m marl.dummy_server \
   --reward-mode global_step
 ```
 
-Then from the `RLinf` repo:
+Then from `RLinf`:
 
 ```bash
 export MARL_BASE_URL=http://127.0.0.1:18080
@@ -212,7 +253,7 @@ uv run --project . --extra embodied \
   actor.global_batch_size=5
 ```
 
-This smoke test validates:
+This validates:
 
 - `obs -> marl /image-sets`
 - `obs -> marl /topreward`
@@ -220,18 +261,4 @@ This smoke test validates:
 - `subtask -> next VLA input`
 - `action -> RemoteEnv -> RobotServer -> YAMEnv`
 
-It does **not** guarantee numerically healthy actor updates; the current actor
-training path can still hit non-finite gradients after rollout completes.
-
-## Current Caveats
-
-- The current `quickstart.md`, `yam_ppo_openpi.md`, and
-  `yam_ppo_openpi_topreward.md` still contain some older `VLMPlannerWorker` /
-  `train_embodied_agent_staged.py` wording.
-- The canonical runtime path is now:
-  - [train_embodied_agent_marl.py](../examples/embodiment/train_embodied_agent_marl.py)
-  - [submit_yam_training.sh](../scripts/submit_yam_training.sh)
-  - [start_robot_server.sh](../scripts/start_robot_server.sh)
-- The current known training blocker after rollout is actor-side non-finite
-  gradients in the OpenPI training path. That is separate from the `marl`
-  transport and runbook flow documented here.
+It does not guarantee numerically healthy actor updates.
