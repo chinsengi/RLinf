@@ -140,9 +140,7 @@ def test_instruction_source_initial_task():
     worker._top_reward_instruction_source = "initial_task"
     worker._initial_task_descriptions = ["fold the towel"]
     worker.env_list = [
-        SimpleNamespace(
-            unwrapped=SimpleNamespace(task_description="grasp the corner")
-        )
+        SimpleNamespace(unwrapped=SimpleNamespace(task_description="grasp the corner"))
     ]
     assert worker._get_top_reward_instruction(0) == "fold the towel"
 
@@ -152,8 +150,6 @@ def test_instruction_source_current_task():
     worker._top_reward_instruction_source = "current_task"
     worker._initial_task_descriptions = ["fold the towel"]
     worker.env_list = [
-        SimpleNamespace(
-            unwrapped=SimpleNamespace(task_description="grasp the corner")
-        )
+        SimpleNamespace(unwrapped=SimpleNamespace(task_description="grasp the corner"))
     ]
     assert worker._get_top_reward_instruction(0) == "grasp the corner"

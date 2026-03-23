@@ -229,7 +229,6 @@ class VLMPlannerWorker:
             )
             self._logger.info("[VLMPlannerWorker] TOPReward enabled.")
 
-
     # ------------------------------------------------------------------
     # Backend loading
     # ------------------------------------------------------------------
