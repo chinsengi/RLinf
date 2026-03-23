@@ -146,6 +146,19 @@ class AsyncEnvWorker(EnvWorker):
 
         new_subtask = str(ray.get(subtask_ref))
         self._pending_subtask_refs[stage_id] = None
+        if (
+            self._top_reward_enabled
+            and self._top_reward_instruction_source == "current_task"
+            and self._pending_top_reward_refs[stage_id] is not None
+        ):
+            pending_output = self._pending_top_reward_outputs[stage_id]
+            if pending_output is None:
+                pending_output = EnvOutput(obs={})
+            self._resolve_pending_top_reward(
+                stage_id,
+                pending_output,
+                wait=True,
+            )
         self._apply_subtask_update(stage_id, new_subtask)
 
     def _maybe_update_subtask(self, stage_id: int) -> None:

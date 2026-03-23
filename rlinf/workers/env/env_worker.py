@@ -207,7 +207,7 @@ class EnvWorker(Worker):
             self._top_reward_enabled
             and self._top_reward_instruction_source == "current_task"
         ):
-            self._reset_top_reward_state()
+            self._reset_top_reward_state(stage_id)
         self.log_info(
             f"[EnvWorker] Subtask updated for stage {stage_id}: '{new_subtask}'"
         )
