@@ -171,9 +171,13 @@ override the template default of 7 would silently truncate actions to single-arm
 
 The episode-done and subtask-change resets both clear `_episode_frames` as well, giving the VLM a clean context window for each new episode / subtask phase.
 
-### Subtask planner image context
+### Subtask planner context
 
-`_maybe_update_subtask()` reads `env.last_obs` to supply the VLM subtask planner with the most recent camera frame. `RemoteEnv` maintains `self.last_obs` and updates it on every `reset()` and `chunk_step()` call. If `last_obs` is `None` (before the first step) or the env wrapper doesn't expose the attribute, `_maybe_update_subtask()` falls back to text-only subtask generation using only the memory buffer — the planner still produces a subtask but without visual context.
+`_maybe_update_subtask()` reads `env.last_obs` to supply the VLM subtask planner with the most recent camera frame, and passes the episode-level main task (`_initial_task_descriptions[stage_id]`). The planner prompt includes the main goal and the current image — there is no planner memory buffer.
+
+`RemoteEnv` maintains `self.last_obs` and updates it on every `reset()` and `chunk_step()` call. If `last_obs` is `None` (before the first step) or the env wrapper doesn't expose the attribute, `_maybe_update_subtask()` sends an empty image list — the planner still produces a subtask but without visual context.
+
+Subtask planning requires a non-empty `env.train.task_description`. The `EnvWorker` fails fast at construction if `subtask_interval > 0` and no task description is set.
 
 `gym.Wrapper.__getattr__` delegates non-private attribute reads to the inner env, so `getattr(env, "last_obs", None)` propagates transparently through `RecordVideo` and `CollectEpisode` wrappers.
 

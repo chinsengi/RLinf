@@ -63,18 +63,18 @@ def test_subtask_update_does_not_reset_top_reward_for_initial_task_anchor():
     assert reset_calls == []
 
 
-def test_subtask_update_resets_only_the_updated_stage():
+def test_subtask_update_resets_reward_state_for_current_task_source():
     inner_env = SimpleNamespace(task_description="fold the towel")
     worker = EnvWorker.__new__(EnvWorker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
     worker._top_reward_enabled = True
     worker._top_reward_instruction_source = "current_task"
     reset_calls = []
-    worker._reset_top_reward_state = lambda stage_id=None: reset_calls.append(stage_id)
+    worker._reset_top_reward_state = lambda: reset_calls.append(True)
     worker.log_info = lambda *_args, **_kwargs: None
 
     assert worker._apply_subtask_update(0, "grasp the left corner")
-    assert reset_calls == [0]
+    assert reset_calls == [True]
 
 
 def test_async_pending_top_reward_is_resolved_into_env_output(monkeypatch):

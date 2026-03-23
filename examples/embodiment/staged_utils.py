@@ -14,8 +14,6 @@
 
 """Shared helpers for staged embodied entrypoints."""
 
-import ray
-
 from rlinf.scheduler import AcceleratorUtil, Cluster, PackedPlacementStrategy
 from rlinf.workers.vlm_planner import VLMPlannerWorker
 
@@ -150,5 +148,4 @@ def launch_vlm_planner(cfg, cluster: Cluster):
         cls_kwargs={},
     )
 
-    ray.get(vlm_actor.get_memory_text.remote())
     return vlm_actor
