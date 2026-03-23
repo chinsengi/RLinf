@@ -67,15 +67,40 @@ class EnvWorker(Worker):
         self._steps_since_subtask_update: int = 0
         self._vlm_planner = None  # set via set_vlm_planner() after construction
 
-        # TOPReward dense reward state
+        # TOPReward dense reward state.
+        # NOTE: _episode_frames and _prev_top_score are worker-global (not
+        # per-stage). This is correct for pipeline_stage_num=1.
         self._top_reward_enabled: bool = bool(
             self.cfg.env.train.get("top_reward_enabled", False)
         )
+        self._top_reward_instruction_source: str = str(
+            self.cfg.env.train.get("top_reward_instruction_source", "current_task")
+        ).lower()
+        if self._top_reward_instruction_source not in {
+            "current_task",
+            "initial_task",
+        }:
+            raise ValueError(
+                "env.train.top_reward_instruction_source must be either "
+                "'current_task' or 'initial_task'."
+            )
         self._top_reward_max_frames: int = int(
             self.cfg.env.train.get("top_reward_max_frames", 16)
         )
         self._episode_frames: list[np.ndarray] = []
         self._prev_top_score: float = 0.0
+        # there can be a sequence of tasks
+        # TODO: make task_description a list to avoid uniform stage task descriptions
+        self._initial_task_descriptions: list[str] = [
+            str(self.cfg.env.train.get("task_description", ""))
+            for _ in range(self.stage_num)
+        ]
+        if self._subtask_interval > 0 and not any(self._initial_task_descriptions):
+            raise ValueError(
+                "Subtask planning (subtask_interval > 0) requires a non-empty "
+                "env.train.task_description. Set it to a concrete episode goal "
+                "(e.g. 'fold the towel')."
+            )
         self.only_eval = getattr(self.cfg.runner, "only_eval", False)
         self.enable_eval = self.cfg.runner.val_check_interval > 0 or self.only_eval
         if not self.only_eval:
@@ -158,8 +183,9 @@ class EnvWorker(Worker):
            dense progress reward from log P("True" | frames, instruction).
         2. **Subtask planning** (when ``subtask_interval > 0``): every
            ``subtask_interval`` chunk steps calls
-           ``planner_handle.get_next_subtask.remote()`` and updates
-           ``env.task_description`` (and ``SetTaskDescription`` on the server).
+           ``planner_handle.get_next_subtask.remote(images, main_task)``
+           and updates ``env.task_description`` (and ``SetTaskDescription``
+           on the server).
 
         Args:
             planner_handle: A VLMPlannerWorker Ray actor handle, or None to
@@ -170,6 +196,33 @@ class EnvWorker(Worker):
             f"[EnvWorker] VLM planner handle set (subtask_interval="
             f"{self._subtask_interval})."
         )
+
+    def _get_current_task_description(self, stage_id: int) -> str:
+        env = self.env_list[stage_id]
+        inner_env = getattr(env, "unwrapped", env)
+        return str(getattr(inner_env, "task_description", ""))
+
+    def _get_top_reward_instruction(self, stage_id: int) -> str:
+        if self._top_reward_instruction_source == "initial_task":
+            return self._initial_task_descriptions[stage_id]
+        return self._get_current_task_description(stage_id)
+
+    def _apply_subtask_update(self, stage_id: int, new_subtask: str) -> bool:
+        env = self.env_list[stage_id]
+        inner_env = getattr(env, "unwrapped", env)
+        if not new_subtask or not hasattr(inner_env, "task_description"):
+            return False
+
+        inner_env.task_description = new_subtask
+        if (
+            self._top_reward_enabled
+            and self._top_reward_instruction_source == "current_task"
+        ):
+            self._reset_top_reward_state()
+        self.log_info(
+            f"[EnvWorker] Subtask updated for stage {stage_id}: '{new_subtask}'"
+        )
+        return True
 
     def _maybe_update_subtask(self, stage_id: int) -> None:
         """Optionally call the VLM planner to refresh the current subtask.
@@ -208,29 +261,11 @@ class EnvWorker(Worker):
             else:
                 images.append(main_images)
 
-        memory_ref = self._vlm_planner.get_memory_text.remote()
-        memory = ray.get(memory_ref)
-
-        subtask_ref = self._vlm_planner.get_next_subtask.remote(images, memory)
+        main_task = self._initial_task_descriptions[stage_id]
+        subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
         new_subtask: str = ray.get(subtask_ref)
 
-        # Use the unwrapped env so that setting task_description reaches the
-        # property setter on the actual env class (e.g. RemoteEnv), which also
-        # calls SetTaskDescription gRPC.  On a gym.Wrapper, plain attribute
-        # assignment would shadow the inner env's property without calling the
-        # setter or the gRPC RPC.
-        inner_env = getattr(env, "unwrapped", env)
-        if new_subtask and hasattr(inner_env, "task_description"):
-            inner_env.task_description = new_subtask
-            # Reset TOPReward baseline so the first delta under the new
-            # subtask is not contaminated by the previous subtask's score.
-            # Without this reset, r_{t+1} = score_new(t+1) - score_old(t),
-            # comparing log-probs from two different instructions.
-            if self._top_reward_enabled:
-                self._reset_top_reward_state()
-            self.log_info(
-                f"[EnvWorker] Subtask updated for stage {stage_id}: '{new_subtask}'"
-            )
+        self._apply_subtask_update(stage_id, new_subtask)
 
     def _compute_top_reward(self, env_output: EnvOutput, stage_id: int) -> EnvOutput:
         """Compute TOPReward dense progress reward and inject into env_output.
@@ -263,9 +298,7 @@ class EnvWorker(Worker):
 
         # Get instruction from the unwrapped env so wrapper attribute shadowing
         # can never return a stale value.
-        env = self.env_list[stage_id]
-        inner_env = getattr(env, "unwrapped", env)
-        instruction = getattr(inner_env, "task_description", "")
+        instruction = self._get_top_reward_instruction(stage_id)
 
         score_ref = self._vlm_planner.compute_top_reward.remote(
             self._episode_frames, instruction

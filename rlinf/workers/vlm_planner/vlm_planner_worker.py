@@ -17,8 +17,8 @@
 This Ray actor runs on the Beaker GPU node and exposes three methods:
 
 1. **Subtask generation** ``get_next_subtask()`` - given recent robot
-   observations (images) and a rolling text memory of past actions, generates
-   the next subtask instruction (e.g. "pick up the red block").
+   observations (images) and the episode-level main task, generates the next
+   subtask instruction (e.g. "pick up the red block").
    Called by ``EnvWorker._maybe_update_subtask()`` when ``subtask_interval > 0``.
 
 2. **Subtask reward evaluation** ``evaluate_subtask()`` - given the same
@@ -42,7 +42,7 @@ Architecture (active call paths for YAM)
 
     EnvWorker (YAM node)
         │  every subtask_interval steps          (subtask_interval > 0 only)
-        │  images + memory ──────────────────▶  VLMPlannerWorker (Beaker)
+        │  images + main_task ───────────────▶  VLMPlannerWorker (Beaker)
         │                                           │
         │  ◀── new subtask text ─────────────────  │  get_next_subtask()
         │                                           │
@@ -63,8 +63,6 @@ Configuration (under ``vlm_planner`` in the top-level YAML):
         Maximum tokens to generate for subtask instructions (default: 64).
     max_new_tokens_reward: int
         Maximum tokens to generate for reward verdicts (default: 16).
-    max_memory_entries: int
-        Maximum number of text entries kept in the rolling memory buffer.
     success_threshold: float
         Confidence threshold [0, 1] above which the VLM vote counts as success.
     top_reward_enabled: bool
@@ -83,7 +81,6 @@ Example YAML::
       dtype: "bfloat16"
       max_new_tokens_subtask: 64
       max_new_tokens_reward: 16
-      max_memory_entries: 20
       success_threshold: 0.5
       top_reward_enabled: True
       top_reward_max_frames: 16
@@ -92,7 +89,6 @@ Example YAML::
 import os
 import sys
 import warnings
-from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -104,7 +100,7 @@ from rlinf.utils.logging import get_logger
 
 _SUBTASK_SYSTEM_PROMPT = """\
 You are an AI assistant controlling a bimanual robot arm. \
-You will be shown images from the robot's cameras along with a history of past actions. \
+You will be shown images from the robot's cameras and the overall episode goal. \
 Your job is to identify the single most appropriate next subtask for the robot to execute. \
 Reply with ONLY the subtask instruction as a short imperative sentence (5-15 words). \
 Do not add any explanation or formatting."""
@@ -205,7 +201,6 @@ class VLMPlannerWorker:
         self._max_new_tokens_reward: int = int(
             planner_cfg.get("max_new_tokens_reward", 16)
         )
-        self._max_memory_entries: int = int(planner_cfg.get("max_memory_entries", 20))
         self._success_threshold: float = float(
             planner_cfg.get("success_threshold", 0.5)
         )
@@ -233,9 +228,6 @@ class VLMPlannerWorker:
                 planner_cfg, model=self._model, processor=self._processor
             )
             self._logger.info("[VLMPlannerWorker] TOPReward enabled.")
-
-        # Rolling text memory: deque of text entries logged each step.
-        self._memory: deque[str] = deque(maxlen=self._max_memory_entries)
 
     # ------------------------------------------------------------------
     # Backend loading
@@ -336,51 +328,37 @@ class VLMPlannerWorker:
         self._logger.info("[VLMPlannerWorker] SGLang engine ready.")
 
     # ------------------------------------------------------------------
-    # Memory management
-    # ------------------------------------------------------------------
-
-    def append_memory(self, entry: str) -> None:
-        """Append a text entry to the rolling memory buffer.
-
-        Args:
-            entry: A brief description of what happened this step, e.g.
-                "Step 5: moved left arm toward red block (joint delta: 0.12 rad)".
-        """
-        self._memory.append(entry)
-
-    def clear_memory(self) -> None:
-        """Clear the rolling memory buffer (call at episode start)."""
-        self._memory.clear()
-
-    def get_memory_text(self) -> str:
-        """Return the current memory as a single newline-joined string."""
-        return "\n".join(self._memory) if self._memory else "(no history yet)"
-
-    # ------------------------------------------------------------------
     # Subtask generation
     # ------------------------------------------------------------------
 
     def get_next_subtask(
         self,
         images: list[np.ndarray],
-        memory: Optional[str] = None,
+        main_task: str = "",
     ) -> str:
         """Generate the next subtask instruction from observations.
 
         Args:
             images: List of uint8 RGB images (H, W, 3) from robot cameras.
-            memory: Optional explicit memory string.  If None, uses internal
-                rolling buffer.
+            main_task: The episode-level goal (e.g. "fold the towel").
+                Required for meaningful subtask planning.
 
         Returns:
             Subtask instruction string, e.g. "pick up the red block".
+
+        Raises:
+            ValueError: If *main_task* is empty.
         """
-        if memory is None:
-            memory = self.get_memory_text()
+        if not main_task:
+            raise ValueError(
+                "get_next_subtask() requires a non-empty main_task. "
+                "Set env.train.task_description to a concrete episode goal."
+            )
 
         user_text = (
-            f"History of past steps:\n{memory}\n\n"
-            "What is the single best next subtask for the robot to execute?"
+            f"The overall episode goal is: {main_task}\n\n"
+            "Given the current observation, what is the single best next "
+            "subtask for the robot to execute?"
         )
         messages = self._build_qwen_messages(_SUBTASK_SYSTEM_PROMPT, images, user_text)
 
@@ -404,24 +382,17 @@ class VLMPlannerWorker:
         self,
         images: list[np.ndarray],
         subtask: str,
-        memory: Optional[str] = None,
     ) -> float:
         """Evaluate whether a subtask was completed, returning a binary reward.
 
         Args:
             images: List of uint8 RGB images from robot cameras (post-subtask).
             subtask: The subtask instruction that was attempted.
-            memory: Optional explicit memory string.  If None, uses internal
-                rolling buffer.
 
         Returns:
             1.0 if the subtask was completed, 0.0 otherwise.
         """
-        if memory is None:
-            memory = self.get_memory_text()
-
         user_text = (
-            f"History of steps during the subtask:\n{memory}\n\n"
             f'Subtask attempted: "{subtask}"\n\n'
             "Did the robot successfully complete this subtask?"
         )

@@ -100,12 +100,12 @@ vlm_planner:
   model_path: "Qwen/Qwen3-VL-8B-Instruct"
 ```
 
-Task description:
+Task description (must be a concrete episode goal, not a generic capability label):
 
 ```yaml
 env:
   train:
-    task_description: "pick up the red block and place it in the bowl"
+    task_description: "fold the towel"
 ```
 
 Reward / planner settings:
@@ -115,6 +115,9 @@ env:
   train:
     top_reward_enabled: True
     top_reward_max_frames: 16
+    # Anchor TOPReward to the episode-level goal (stable across subtask changes).
+    # Use "current_task" only if stage-conditioned dense reward is needed.
+    top_reward_instruction_source: initial_task
     subtask_interval: 3
 
 vlm_planner:
@@ -122,6 +125,11 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
 ```
+
+Subtask planning requires a non-empty `task_description`. The planner receives
+the main task and the current observation image — there is no planner memory
+buffer. The prompt asks the VLM for the next subtask given the episode goal and
+the current visual context.
 
 ## Local Simulated Desktop Mode
 

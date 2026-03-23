@@ -153,11 +153,18 @@ env:
     max_steps_per_rollout_epoch: 100
     control_rate_hz: 10.0
 
-    task_description: "bimanual manipulation"
+    # Task description must be a concrete episode goal, not a generic capability
+    # label. Examples: "fold the towel", "pick up the red block and place it in
+    # the bowl". Override via CLI: env.train.task_description="your task here"
+    task_description: "fold the towel"
 
     # Enable TOPReward dense progress signal.
     top_reward_enabled: True
     top_reward_max_frames: 16
+    # Anchor TOPReward to the episode-level goal so reward semantics are stable
+    # across subtask changes. Use "current_task" only if stage-conditioned dense
+    # reward is explicitly desired.
+    top_reward_instruction_source: initial_task
 
     # Subtask update interval in CHUNK STEPS (0 to disable VLM planning).
     # With num_action_chunks=10 and max_steps_per_rollout_epoch=100,
@@ -177,7 +184,7 @@ env:
     max_episode_steps: 100
     max_steps_per_rollout_epoch: 100
     control_rate_hz: 10.0
-    task_description: "bimanual manipulation"
+    task_description: "fold the towel"
 
 # VLM planner: Qwen3-VL-8B for both subtask planning and TOPReward scoring.
 # reward_scale is read from THIS section by TOPReward (not from reward.reward_scale).
@@ -193,7 +200,6 @@ vlm_planner:
   # node_group: "beaker_vlm"
   max_new_tokens_subtask: 64
   max_new_tokens_reward: 16
-  max_memory_entries: 20
   success_threshold: 0.5
   top_reward_enabled: True
   top_reward_max_frames: 16

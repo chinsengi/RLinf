@@ -161,6 +161,7 @@ env:
     # EnvWorker calls VLMPlannerWorker (on Beaker GPU 2) via Ray RPC.
     top_reward_enabled: True
     top_reward_max_frames: 16
+    top_reward_instruction_source: initial_task
 
     # Subtask planning disabled — VLM is used for TOPReward only.
     subtask_interval: 0
@@ -190,7 +191,6 @@ vlm_planner:
   # node_group: "beaker_vlm"
   max_new_tokens_subtask: 64
   max_new_tokens_reward: 16
-  max_memory_entries: 20
   success_threshold: 0.5
   top_reward_enabled: True
   top_reward_max_frames: 16
