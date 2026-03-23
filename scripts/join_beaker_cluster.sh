@@ -87,7 +87,10 @@ fi
 # --- Detect entry script ---
 ENTRY_SCRIPT="train_embodied_agent.py"
 case "$CONFIG_NAME" in
-    *topreward*|*staged*|yam_ppo_openpi)
+    yam_ppo_openpi|yam_ppo_openpi_topreward|*marl*)
+        ENTRY_SCRIPT="train_embodied_agent_marl.py"
+        ;;
+    *topreward*|*staged*)
         ENTRY_SCRIPT="train_embodied_agent_staged.py"
         ;;
 esac

@@ -1,4 +1,4 @@
-# YAM bimanual robot – PPO training with π₀.5 (OpenPI) policy, RemoteEnv, and TOPReward.
+# YAM bimanual robot – PPO training with π₀.5 (OpenPI) policy, RemoteEnv, and marl-backed TOPReward.
 #
 # Algorithm: PPO with GAE advantage and value head.
 # Reward:    TOPReward dense progress signal (Qwen3-VL-8B).
@@ -11,7 +11,7 @@
 # Hardware topology (single Beaker node, 3 GPUs):
 #   GPU 0 – actor (π₀.5 FSDP training with value head)
 #   GPU 1 – rollout (π₀.5 inference)
-#   GPU 2 – VLMPlannerWorker (Qwen3-VL-8B for TOPReward)
+#   GPU 2 – marl sidecar (planner / TOPReward service)
 #   CPU   – EnvWorker (RemoteEnv gRPC client → desktop RobotServer)
 #
 # Desktop:
@@ -131,7 +131,7 @@ algorithm:
 env:
   group_name: "EnvGroup"
   # Optional local simulation of the robot desktop input path.
-  # When enabled, train_embodied_agent_staged.py starts a local dummy
+  # When enabled, train_embodied_agent_marl.py starts a local dummy
   # RobotServer automatically, so RemoteEnv still talks over gRPC but no
   # separate desktop machine or reverse SSH tunnel is required.
   #
@@ -171,8 +171,24 @@ env:
     control_rate_hz: 10.0
     task_description: "bimanual pick and place"
 
-# VLM planner: Qwen3-VL-8B for TOPReward scoring only (no subtask planning).
-# reward_scale is read from THIS section by TOPReward (not from reward.reward_scale).
+# marl sidecar: planner/reward service running out of process on GPU 2.
+marl:
+  enabled: True
+  base_url: "${oc.env:MARL_BASE_URL,http://127.0.0.1:8080}"
+  timeout_s: 30.0
+  healthcheck: True
+  image_format: "jpeg"
+  planner:
+    interval: 0
+    max_memory_entries: 20
+  topreward:
+    enabled: True
+    camera_name: "main"
+    fps: 2.0
+    max_frames: 16
+
+# Legacy in-process VLMPlanner config. The marl entrypoint does not use this
+# block; planner/reward now come from the out-of-process marl sidecar above.
 vlm_planner:
   model_path: "Qwen/Qwen3-VL-8B-Instruct"
   backend: "transformers"

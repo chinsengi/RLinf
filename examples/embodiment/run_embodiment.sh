@@ -27,15 +27,20 @@ else
     CONFIG_NAME=$1
 fi
 
-# Auto-select entry script: configs with a VLM planner need
-# train_embodied_agent_staged.py so that VLMPlannerWorker is launched and wired.
+# Auto-select entry script:
+#   - YAM marl configs use train_embodied_agent_marl.py
+#   - remaining VLM-planner configs use train_embodied_agent_staged.py
 #
 # Patterns:
+#   yam_ppo_openpi            — YAM PPO baseline (TOPReward via marl)
+#   yam_ppo_openpi_topreward  — YAM PPO + subtask planning via marl
 #   *staged*        — configs with VLM subtask planning
 #   *topreward*     — TOPReward configs (VLM dense reward)
-#   yam_ppo_openpi  — YAM PPO baseline (TOPReward, no subtask planning)
 case "$CONFIG_NAME" in
-    *staged*|*topreward*|yam_ppo_openpi)
+    yam_ppo_openpi|yam_ppo_openpi_topreward|*marl*)
+        SRC_FILE="${EMBODIED_PATH}/train_embodied_agent_marl.py"
+        ;;
+    *staged*|*topreward*)
         SRC_FILE="${EMBODIED_PATH}/train_embodied_agent_staged.py"
         ;;
     *)
