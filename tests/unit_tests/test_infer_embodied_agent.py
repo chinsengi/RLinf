@@ -15,6 +15,7 @@
 """Unit tests for the local YAM inference entrypoint."""
 
 import numpy as np
+import pytest
 import torch
 
 from examples.embodiment import infer_embodied_agent as infer
@@ -83,6 +84,21 @@ def test_build_arg_parser_defaults_match_local_follower_workflow():
     assert args.return_home_steps == 50
     assert args.grpc_timeout == 120.0
     assert args.max_episode_steps == 10000
+
+
+def test_load_model_rejects_legacy_pi05_opt_out(monkeypatch):
+    monkeypatch.setenv("RLINF_USE_LEGACY_OPENPI_PI05", "1")
+
+    with pytest.raises(RuntimeError, match="Legacy OpenPI PI05 is disabled"):
+        infer.load_model(
+            model_path="unused",
+            config_name="pi05_yam_follower",
+            action_dim=14,
+            action_chunk=30,
+            num_steps=10,
+        )
+
+    monkeypatch.delenv("RLINF_USE_LEGACY_OPENPI_PI05", raising=False)
 
 
 def test_close_inference_session_resets_then_enters_zero_torque():

@@ -214,6 +214,9 @@ unfixable = []
 [tool.ruff.lint.per-file-ignores]
 # Only enable docstring check for the scheduler module for now.
 "!rlinf/scheduler/**.py" = ["D", "RUF002"]
+"rlinf/vendor/transformers_pi05/**/*.py" = ["CPY001", "DOC102"]
+"rlinf/models/embodiment/pi05/modeling_pi05.py" = ["CPY001", "DOC102"]
+"rlinf/models/embodiment/pi05/processor_pi05.py" = ["CPY001", "DOC102"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

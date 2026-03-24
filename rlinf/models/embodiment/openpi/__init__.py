@@ -254,6 +254,13 @@ def _load_pretrained_state_dict(
 
 
 def get_model(cfg: DictConfig, torch_dtype=None):
+    config_name = getattr(getattr(cfg, "openpi", None), "config_name", None)
+    if isinstance(config_name, str) and config_name.startswith("pi05_"):
+        raise RuntimeError(
+            "Legacy OpenPI PI05 is disabled. "
+            "Use the vendored PI05 runtime in `rlinf.models.embodiment.pi05` instead."
+        )
+
     _ensure_openpi_transformers_overlay()
 
     import openpi.shared.download as download

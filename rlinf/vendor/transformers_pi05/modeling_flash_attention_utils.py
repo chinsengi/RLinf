@@ -1,0 +1,3 @@
+import transformers.modeling_flash_attention_utils as _modeling_flash_attention_utils
+
+globals().update(vars(_modeling_flash_attention_utils))

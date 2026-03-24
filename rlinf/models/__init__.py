@@ -18,6 +18,12 @@ from rlinf.config import SupportedModel, get_supported_model, torch_dtype_from_p
 from rlinf.scheduler import Worker
 
 
+def _is_pi05_openpi_config(cfg: DictConfig) -> bool:
+    openpi_cfg = getattr(cfg, "openpi", None)
+    config_name = getattr(openpi_cfg, "config_name", None)
+    return isinstance(config_name, str) and config_name.startswith("pi05_")
+
+
 def get_model(cfg: DictConfig):
     model_type = get_supported_model(cfg.model_type)
     if model_type == SupportedModel.OPENVLA:
@@ -25,7 +31,10 @@ def get_model(cfg: DictConfig):
     elif model_type == SupportedModel.OPENVLA_OFT:
         from rlinf.models.embodiment.openvla_oft import get_model
     elif model_type == SupportedModel.OPENPI:
-        from rlinf.models.embodiment.openpi import get_model
+        if _is_pi05_openpi_config(cfg):
+            from rlinf.models.embodiment.pi05 import get_model
+        else:
+            from rlinf.models.embodiment.openpi import get_model
     elif model_type == SupportedModel.DEXBOTIC_PI:
         from rlinf.models.embodiment.dexbotic_pi import get_model
     elif model_type == SupportedModel.MLP_POLICY:
