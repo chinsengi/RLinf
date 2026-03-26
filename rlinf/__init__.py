@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+# RLinf manages Ray worker interpreters explicitly via `runtime_env.py_executable`.
+# When the driver itself is launched with `uv run`, Ray's automatic uv
+# propagation creates a second temporary environment for workers, which can
+# drift from the driver's pinned Ray version. Keep that hook disabled by
+# default unless the user explicitly opts back in.
+os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
+
 from .utils.omega_resolver import omegaconf_register
 
 omegaconf_register()

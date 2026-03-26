@@ -244,9 +244,10 @@ actor:
     openpi:
       value_after_vlm: True
       value_vlm_mode: mean_token
-      config_name: "pi05_libero"
-      num_images_in_input: 1
-      noise_method: "flow_noise"
+      config_name: "pi05_yam_follower"
+      num_images_in_input: 3
+      discrete_state_input: True
+      noise_method: "flow_sde"
       action_horizon: 30
       noise_params: [0.16, 0.12, 200]
       joint_logprob: True

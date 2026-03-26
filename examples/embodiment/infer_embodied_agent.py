@@ -307,14 +307,14 @@ def load_model(
     logger.info(f"Loading model from {model_path} ...")
     logger.info(f"OpenPI runtime overrides: {openpi_overrides}")
     if str(config_name).startswith("pi05_"):
-        from rlinf.models.embodiment.pi05 import get_model as get_vendored_model
-
         use_legacy_openpi = os.environ.get("RLINF_USE_LEGACY_OPENPI_PI05", "0") == "1"
         if use_legacy_openpi:
             raise RuntimeError(
                 "Legacy OpenPI PI05 is disabled for PI05 configs. "
                 "Unset RLINF_USE_LEGACY_OPENPI_PI05 and use the vendored PI05 runtime."
             )
+        from rlinf.models.embodiment.pi05 import get_model as get_vendored_model
+
         logger.info("Using transplanted LeRobot-style PI05 runtime by default.")
         model = get_vendored_model(cfg)
     else:
