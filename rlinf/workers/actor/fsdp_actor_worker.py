@@ -125,6 +125,20 @@ def process_nested_dict_for_train(nested_dict, shuffle_id):
     return ret_dict
 
 
+def _normalize_floating_parameter_dtypes(
+    model: nn.Module, target_dtype: torch.dtype
+) -> list[str]:
+    converted_names = []
+    for name, param in model.named_parameters():
+        if not param.dtype.is_floating_point:
+            continue
+        if param.dtype == target_dtype:
+            continue
+        param.data = param.data.to(dtype=target_dtype)
+        converted_names.append(name)
+    return converted_names
+
+
 class FSDPActor(FSDPModelManager, Worker):
     def __init__(
         self,
@@ -1056,6 +1070,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.cfg.runner.get("ckpt_path", None):
             model_dict = torch.load(self.cfg.runner.ckpt_path)
             model.load_state_dict(model_dict)
+
+        target_dtype = torch_dtype_from_precision(self.cfg.actor.model.precision)
+        if target_dtype is not None:
+            converted_names = _normalize_floating_parameter_dtypes(model, target_dtype)
+            if converted_names:
+                self.log_info(
+                    "Normalized actor floating parameter dtypes for FSDP: "
+                    f"{len(converted_names)} params -> {target_dtype}. "
+                    f"Names: {', '.join(converted_names)}"
+                )
 
         return model
 

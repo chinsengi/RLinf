@@ -186,11 +186,6 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         super().__init__()
         self.checkpoint_dir = checkpoint_dir
         self.config = _build_config(checkpoint_dir)
-        # RLinf trains the PI05 policy under FSDP, which requires each wrapped
-        # module to have a uniform parameter dtype when flattening parameters.
-        # The checkpoint config may request mixed bf16/fp32 weights, so force
-        # the runtime model construction to use full fp32 here.
-        self.config.dtype = "float32"
         self.runtime_action_chunk = action_chunk or self.config.n_action_steps
         self.requested_action_horizon = action_horizon or self.config.chunk_size
         self.runtime_action_horizon = self.config.chunk_size
@@ -417,7 +412,10 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
             adarms_cond=[None, adarms_cond],
         )
         suffix_out = outputs_embeds[1]
-        suffix_out = suffix_out[:, -x_t.shape[1] :].to(dtype=torch.float32)
+        suffix_out = suffix_out[:, -x_t.shape[1] :]
+        target_dtype = self.model.action_out_proj.weight.dtype
+        if suffix_out.dtype != target_dtype:
+            suffix_out = suffix_out.to(dtype=target_dtype)
         return suffix_out
 
     def _get_value_from_vlm(self, prefix_output: torch.Tensor) -> torch.Tensor:
@@ -429,7 +427,9 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
             prefix_out_value = prefix_output[:, 0]
         else:
             prefix_out_value = prefix_output.mean(dim=1)
-        prefix_out_value = prefix_out_value.to(dtype=torch.float32)
+        target_dtype = self.value_head.mlp[0].weight.dtype
+        if prefix_out_value.dtype != target_dtype:
+            prefix_out_value = prefix_out_value.to(dtype=target_dtype)
         return self.value_head(prefix_out_value)[:, 0]
 
     def _gaussian_entropy(self, sigma: torch.Tensor) -> torch.Tensor:
@@ -485,7 +485,10 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
 
         if self.add_value_head and compute_values and not self.value_after_vlm:
             suffix_out_value = torch.mean(suffix_out, dim=1)
-            value_t = self.value_head(suffix_out_value.to(dtype=torch.float32))[:, 0]
+            target_dtype = self.value_head.mlp[0].weight.dtype
+            if suffix_out_value.dtype != target_dtype:
+                suffix_out_value = suffix_out_value.to(dtype=target_dtype)
+            value_t = self.value_head(suffix_out_value)[:, 0]
         else:
             value_t = torch.zeros((batch_size), device=device, dtype=torch.float32)
 

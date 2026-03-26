@@ -756,7 +756,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             max_period=self.config.max_period,
             device=timestep.device,
         )
-        time_emb = time_emb.type(dtype=timestep.dtype)
+        time_emb = time_emb.to(dtype=self.time_mlp_in.weight.dtype)
+        noisy_actions = noisy_actions.to(dtype=self.action_in_proj.weight.dtype)
 
         # Fuse timestep + action information using an MLP
         def action_proj_func(noisy_actions):
@@ -852,7 +853,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         )
 
         suffix_out = suffix_out[:, -self.config.chunk_size :]
-        suffix_out = suffix_out.to(dtype=torch.float32)
+        target_dtype = self.action_out_proj.weight.dtype
+        if suffix_out.dtype != target_dtype:
+            suffix_out = suffix_out.to(dtype=target_dtype)
 
         def action_out_proj_func(suffix_out):
             return self.action_out_proj(suffix_out)

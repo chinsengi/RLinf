@@ -226,6 +226,7 @@ actor:
   model:
     model_path: "thomas0829/folding_towel_pi05"
     model_type: "openpi"
+    precision: "bf16"
     add_value_head: True
     num_action_chunks: 30
     action_dim: 14
