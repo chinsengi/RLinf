@@ -205,7 +205,7 @@ EOF
 
 install_flash_attn() {
     # Base release info – adjust when bumping flash-attn
-    local flash_ver="2.7.4.post1"
+    local flash_ver="2.8.3"
     local base_url="${GITHUB_PREFIX}https://github.com/Dao-AILab/flash-attention/releases/download/v${flash_ver}"
 
     # Detect Python tags
