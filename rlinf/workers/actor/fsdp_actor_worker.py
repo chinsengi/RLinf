@@ -1041,12 +1041,29 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         Initialize the actor worker. build the model and use corresponding training backend,
         if needed, offload model parameters and optimizer states to CPU.
         """
+        self.log_info(
+            "[EmbodiedFSDPActor] init_worker: starting "
+            f"(rank={self._rank}, world_size={self._world_size}, "
+            f"model_path={self.cfg.actor.model.get('model_path', None)})"
+        )
+        self.log_info(
+            "[EmbodiedFSDPActor] init_worker: calling setup_model_and_optimizer"
+        )
         self.setup_model_and_optimizer()
+        self.log_info("[EmbodiedFSDPActor] init_worker: setup_model_and_optimizer done")
 
         if self.enable_offload:
+            self.log_info(
+                "[EmbodiedFSDPActor] init_worker: offloading params and optimizer"
+            )
             self.offload_param_and_grad()
             self.offload_optimizer()
+            self.log_info("[EmbodiedFSDPActor] init_worker: offload done")
+        self.log_info(
+            "[EmbodiedFSDPActor] init_worker: computing rollout weight destination ranks"
+        )
         self._setup_rollout_weight_dst_ranks()
+        self.log_info("[EmbodiedFSDPActor] init_worker: completed")
 
     def model_provider_func(self) -> nn.Module:
         model = get_model(self.cfg.actor.model)
