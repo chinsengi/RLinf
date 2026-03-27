@@ -17,11 +17,8 @@ env_type: yam
 total_num_envs: null
 
 # Episode settings
-# Keep the desktop-side limit comfortably larger than the training-side return-
-# home cadence. The real return-home timer is controlled from
-# examples/embodiment/config/yam_ppo_openpi.yaml via env.return_home_minutes.
-max_episode_steps: 1000000
-max_steps_per_rollout_epoch: 1000000
+max_episode_steps: 10000
+max_steps_per_rollout_epoch: 10000
 
 # Robot control
 control_rate_hz: 30.0
@@ -45,12 +42,6 @@ is_dummy: False
 # Auto-reset and termination handling (matches RealWorldEnv contract).
 auto_reset: False
 ignore_terminations: True
-# Let training start from the robot's current pose. Later resets (for the
-# 40-minute rest window) still return to startup home.
-skip_home_on_initial_reset: True
-# On clean shutdown or interrupt, move both arms back to the captured startup
-# home pose before closing the robot clients.
-return_home_on_close: True
 
 # TOPReward dense reward configuration.
 top_reward_enabled: False

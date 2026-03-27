@@ -20,18 +20,10 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-tf = None
-
-
-def _get_tensorflow():
-    global tf
-    if tf is None:
-        try:
-            import tensorflow as tf_module
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError("tensorflow is required for crop_and_resize") from exc
-        tf = tf_module
-    return tf
+try:
+    import tensorflow as tf
+except ImportError:  # pragma: no cover
+    tf = None
 
 
 def to_tensor(
@@ -281,7 +273,8 @@ def crop_and_resize(image, crop_scale, batch_size):
     to original size. We use the same logic seen in the `dlimp` RLDS datasets wrapper to avoid
     distribution shift at test time.
     """
-    tf = _get_tensorflow()
+    if tf is None:
+        raise ImportError("tensorflow is required for crop_and_resize")
 
     assert image.shape.ndims == 3 or image.shape.ndims == 4
     expanded_dims = False
@@ -319,7 +312,8 @@ def crop_and_resize(image, crop_scale, batch_size):
 
 
 def center_crop_image(image):
-    tf = _get_tensorflow()
+    if tf is None:
+        raise ImportError("tensorflow is required for crop_and_resize")
 
     batch_size = 1
     crop_scale = 0.9

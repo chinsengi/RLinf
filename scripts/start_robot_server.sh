@@ -30,10 +30,8 @@
 #   --gripper-open VAL    Optional gripper open limit for follower startup
 #   --gripper-close VAL   Optional gripper close limit for follower startup
 #   --allow-plain-ssh     Allow fallback to plain ssh if autossh is unavailable
-#   --kill-video-holders  Kill stale processes holding /dev/video* before startup
 #   --no-tunnel           Start RobotServer only, no SSH tunnel
 #   --dummy               Run without real hardware (zero observations)
-#   --verbose             Show robot state before serving and log every chunk step
 #   --help                Show this help
 
 set -euo pipefail
@@ -47,10 +45,8 @@ USE_FOLLOWER_SERVERS=false
 GRIPPER_OPEN=""
 GRIPPER_CLOSE=""
 ALLOW_PLAIN_SSH=false
-KILL_VIDEO_HOLDERS=false
 NO_TUNNEL=false
 DUMMY=false
-VERBOSE=false
 FOLLOWER_PID=""
 TUNNEL_PID=""
 TUNNEL_LOG=""
@@ -73,10 +69,8 @@ Options:
   --gripper-open VAL    Optional gripper open limit for follower startup
   --gripper-close VAL   Optional gripper close limit for follower startup
   --allow-plain-ssh     Allow fallback to plain ssh if autossh is unavailable
-  --kill-video-holders  Kill stale processes holding /dev/video* before startup
   --no-tunnel           Start RobotServer only, without SSH tunnel
   --dummy               Run without real hardware (zero observations)
-  --verbose             Show robot state before serving and log every chunk step
   --help                Show this help
 
 Examples:
@@ -114,10 +108,8 @@ while [[ $# -gt 0 ]]; do
         --gripper-open) GRIPPER_OPEN="$2"; shift 2 ;;
         --gripper-close) GRIPPER_CLOSE="$2"; shift 2 ;;
         --allow-plain-ssh) ALLOW_PLAIN_SSH=true; shift ;;
-        --kill-video-holders) KILL_VIDEO_HOLDERS=true; shift ;;
         --no-tunnel)    NO_TUNNEL=true; shift ;;
         --dummy)        DUMMY=true; shift ;;
-        --verbose)      VERBOSE=true; shift ;;
         *)              echo "Unknown option: $1"; usage ;;
     esac
 done
@@ -128,129 +120,14 @@ if [ -z "$CONFIG" ]; then
 fi
 
 CLEANING_UP=false
-SERVER_SHUTDOWN_WAIT_S=30
-cleanup_stale_port_listener() {
-    local port="$1"
-    if ! command -v lsof >/dev/null 2>&1; then
-        return 0
-    fi
-    local pids
-    pids="$(lsof -ti TCP:${port} -sTCP:LISTEN 2>/dev/null || true)"
-    if [ -n "$pids" ]; then
-        echo "Cleaning stale listener(s) on TCP:${port}: $pids"
-        kill $pids 2>/dev/null || true
-        sleep 1
-        kill -9 $pids 2>/dev/null || true
-    fi
-}
-
-video_devices_exist() {
-    compgen -G "/dev/video*" >/dev/null 2>&1
-}
-
-video_device_holder_pids() {
-    if ! video_devices_exist; then
-        return 0
-    fi
-
-    if command -v lsof >/dev/null 2>&1; then
-        lsof -t /dev/video* 2>/dev/null | sort -u | tr '\n' ' '
-        return 0
-    fi
-
-    if command -v fuser >/dev/null 2>&1; then
-        fuser /dev/video* 2>/dev/null | tr ' ' '\n' | awk 'NF' | sort -u | tr '\n' ' '
-        return 0
-    fi
-}
-
-report_video_device_holders() {
-    if ! video_devices_exist; then
-        return 0
-    fi
-    local holders
-    if command -v lsof >/dev/null 2>&1; then
-        holders="$(lsof /dev/video* 2>/dev/null || true)"
-    elif command -v fuser >/dev/null 2>&1; then
-        holders="$(fuser -v /dev/video* 2>/dev/null || true)"
-    else
-        return 0
-    fi
-    if [ -n "$holders" ]; then
-        echo "Video device holders detected:"
-        echo "$holders"
-        echo ""
-    fi
-}
-
-kill_video_device_holders() {
-    local pids
-    pids="$(video_device_holder_pids)"
-    if [ -z "$pids" ]; then
-        return 0
-    fi
-    echo "Killing video device holder(s): $pids"
-    kill $pids 2>/dev/null || true
-    sleep 2
-    kill -9 $pids 2>/dev/null || true
-}
-
-cleanup_stale_yam_processes() {
-    echo "=== Cleaning stale RLinf/YAM processes ==="
-    cleanup_stale_port_listener "$PORT"
-    cleanup_stale_port_listener 1234
-    cleanup_stale_port_listener 1235
-
-    pkill -TERM -f "python -m rlinf.envs.remote.robot_server" 2>/dev/null || true
-    pkill -TERM -f "scripts/start_yam_follower_servers.py" 2>/dev/null || true
-    pkill -TERM -f "_launch_wrapper" 2>/dev/null || true
-    sleep 2
-    pkill -KILL -f "python -m rlinf.envs.remote.robot_server" 2>/dev/null || true
-    pkill -KILL -f "scripts/start_yam_follower_servers.py" 2>/dev/null || true
-    pkill -KILL -f "_launch_wrapper" 2>/dev/null || true
-    if [ "$KILL_VIDEO_HOLDERS" = true ]; then
-        kill_video_device_holders
-    fi
-    report_video_device_holders
-    if [ "$KILL_VIDEO_HOLDERS" = false ] && [ -n "$(video_device_holder_pids)" ]; then
-        echo "TIP: rerun with --kill-video-holders to terminate stale /dev/video* holders automatically."
-        echo ""
-    fi
-    echo ""
-}
-
 cleanup() {
     if [ "$CLEANING_UP" = true ]; then return; fi
     CLEANING_UP=true
     echo "Shutting down..."
-
-    if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill "$SERVER_PID" 2>/dev/null || true
-        for ((i=0; i<SERVER_SHUTDOWN_WAIT_S; i++)); do
-            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                break
-            fi
-            sleep 1
-        done
-    fi
-
-    [ -n "${FOLLOWER_PID:-}" ] && kill "$FOLLOWER_PID" 2>/dev/null || true
-    [ -n "${TUNNEL_PID:-}" ] && kill "$TUNNEL_PID" 2>/dev/null || true
-
-    sleep 2
-
-    [ -n "${SERVER_PID:-}" ] && kill -9 "$SERVER_PID" 2>/dev/null || true
-    [ -n "${FOLLOWER_PID:-}" ] && kill -9 "$FOLLOWER_PID" 2>/dev/null || true
-    [ -n "${TUNNEL_PID:-}" ] && kill -9 "$TUNNEL_PID" 2>/dev/null || true
-
-    pkill -9 -P $$ 2>/dev/null || true
-
+    kill 0 2>/dev/null || true
     wait 2>/dev/null || true
-    echo "Cleanup complete."
 }
 trap cleanup EXIT INT TERM
-
-cleanup_stale_yam_processes
 
 is_ipv4_address() {
     [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
@@ -343,13 +220,11 @@ print_tunnel_failure_hint() {
     echo "RobotServer is still running (PID ${SERVER_PID}). Tunnel is NOT active."
 }
 
-if [ "$DUMMY" = false ]; then
-    echo "=== Resetting CAN interfaces ==="
-    bash third_party/yam_realtime/yam_realtime/scripts/reset_all_can.sh
-    echo ""
-fi
+echo "=== Resetting CAN interfaces ==="
+bash YAM/yam_realtime/yam_realtime/scripts/reset_all_can.sh
+echo ""
 
-if [ "$USE_FOLLOWER_SERVERS" = true ] && [ "$DUMMY" = false ]; then
+if [ "$USE_FOLLOWER_SERVERS" = true ]; then
     echo "=== Starting YAM follower servers ==="
     FOLLOWER_ARGS=()
     [ -n "$GRIPPER_OPEN" ] && FOLLOWER_ARGS+=(--gripper-open "$GRIPPER_OPEN")
@@ -380,36 +255,9 @@ SERVER_ARGS=(
     --max-message-size "${MAX_MESSAGE_SIZE}"
 )
 [ "$DUMMY" = true ] && SERVER_ARGS+=(--dummy)
-[ "$VERBOSE" = true ] && SERVER_ARGS+=(--verbose)
 
-if [ "$VERBOSE" = true ]; then
-    READY_FLAG=$(mktemp /tmp/rlinf_robot_ready.XXXX)
-    rm -f "$READY_FLAG"
-    RLINF_ROBOT_SERVER_READY_FLAG="$READY_FLAG" \
-        python -m rlinf.envs.remote.robot_server "${SERVER_ARGS[@]}" &
-    SERVER_PID=$!
-
-    while [ ! -f "$READY_FLAG" ]; do
-        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-            echo "ERROR: RobotServer exited before becoming ready."
-            report_video_device_holders
-            exit 1
-        fi
-        sleep 0.5
-    done
-    rm -f "$READY_FLAG"
-else
-    python -m rlinf.envs.remote.robot_server "${SERVER_ARGS[@]}" &
-    SERVER_PID=$!
-fi
-
-sleep 1
-if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo "ERROR: RobotServer exited shortly after launch."
-    report_video_device_holders
-    wait "$SERVER_PID" || true
-    exit 1
-fi
+python -m rlinf.envs.remote.robot_server "${SERVER_ARGS[@]}" &
+SERVER_PID=$!
 
 if [ "$NO_TUNNEL" = false ]; then
     validate_tunnel_prereqs
@@ -470,4 +318,4 @@ while true; do
     sleep 10
 done
 
-exit 0
+wait

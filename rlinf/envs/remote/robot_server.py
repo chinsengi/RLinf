@@ -24,10 +24,8 @@ SSH tunnel (Tailscale).
 """
 
 import argparse
-import os
 import signal
 import threading
-import time
 from concurrent import futures
 
 import grpc
@@ -135,44 +133,13 @@ def _obs_to_proto(
     )
 
 
-def _print_robot_state(env) -> None:
-    """Print current robot joint states for pre-flight inspection."""
-    if env._is_dummy:
-        logger.info("[RobotServer] Running in dummy mode — no real robot state.")
-        return
-
-    robot_env = env._robot_env
-    if robot_env is None:
-        logger.warning("[RobotServer] Robot environment not initialized.")
-        return
-
-    print("\n" + "=" * 60)
-    print("  Current Robot State")
-    print("=" * 60)
-    for name in robot_env.get_all_robots().keys():
-        joint_pos = env._read_robot_joint_position(name)
-        print(f"  [{name}] joint positions ({len(joint_pos)}D):")
-        print(f"    {np.array2string(joint_pos, precision=4, suppress_small=True)}")
-    print("=" * 60)
-
-
 class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
     """gRPC servicer wrapping a YAMEnv instance."""
 
-    def __init__(
-        self,
-        env,
-        compress: bool = True,
-        jpeg_quality: int = _JPEG_QUALITY,
-        verbose: bool = False,
-        request_shutdown=None,
-    ):
+    def __init__(self, env, compress: bool = True, jpeg_quality: int = _JPEG_QUALITY):
         self._env = env
         self._compress = compress
         self._jpeg_quality = jpeg_quality
-        self._verbose = verbose
-        self._first_chunk_approved = not verbose
-        self._request_shutdown = request_shutdown
 
     def GetSpaces(self, request, context):
         obs_space = self._env.observation_space
@@ -202,40 +169,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             ),
         )
 
-    _APPROVAL_FILE = "/tmp/rlinf_approve_chunk"
-
-    def _wait_for_first_chunk_approval(self, actions: np.ndarray) -> None:
-        """Block until the user approves the first chunk by creating a file."""
-        if os.path.exists(self._APPROVAL_FILE):
-            os.remove(self._APPROVAL_FILE)
-
-        print("\n" + "=" * 60, flush=True)
-        print("  FIRST CHUNK — waiting for approval before executing", flush=True)
-        print("=" * 60, flush=True)
-        print(
-            f"  chunk_size={actions.shape[1]}, action_dim={actions.shape[2]}",
-            flush=True,
-        )
-        for i in range(actions.shape[1]):
-            print(
-                f"  step {i}: {np.array2string(actions[0, i], precision=4, suppress_small=True)}",
-                flush=True,
-            )
-        print("=" * 60, flush=True)
-        print(
-            f"  To approve, run:  touch {self._APPROVAL_FILE}",
-            flush=True,
-        )
-        print("  To abort, Ctrl+C the server.", flush=True)
-        print("=" * 60 + "\n", flush=True)
-
-        while not os.path.exists(self._APPROVAL_FILE):
-            time.sleep(0.5)
-
-        os.remove(self._APPROVAL_FILE)
-        self._first_chunk_approved = True
-        logger.info("[ChunkStep] First chunk approved. Executing...")
-
     def Reset(self, request, context):
         seed = request.seed if request.HasField("seed") else None
         obs, _ = self._env.reset(seed=seed)
@@ -251,20 +184,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
         )
-        if self._verbose:
-            logger.info(
-                f"[ChunkStep] Received chunk: num_envs={request.num_envs}, "
-                f"chunk_size={request.chunk_size}, action_dim={request.action_dim}"
-            )
-            for i in range(request.chunk_size):
-                logger.info(
-                    f"[ChunkStep]   step {i}/{request.chunk_size}: "
-                    f"action={np.array2string(actions[0, i], precision=4, suppress_small=True)}"
-                )
-
-        if not self._first_chunk_approved:
-            self._wait_for_first_chunk_approval(actions)
-
         obs_list, chunk_rewards, chunk_terminations, chunk_truncations, infos_list = (
             self._env.chunk_step(actions)
         )
@@ -292,12 +211,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 )
             )
 
-        if self._verbose:
-            logger.info(
-                f"[ChunkStep] Done. rewards={[float(chunk_rewards[0, i]) for i in range(chunk_size)]}, "
-                f"terminated={[bool(chunk_terminations[0, i]) for i in range(chunk_size)]}, "
-                f"truncated={[bool(chunk_truncations[0, i]) for i in range(chunk_size)]}"
-            )
         return robot_env_pb2.ChunkStepResponse(step_results=step_results)
 
     def SetTaskDescription(self, request, context):
@@ -309,9 +222,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         return robot_env_pb2.Empty()
 
     def Close(self, request, context):
-        logger.info("[RobotServer] Close RPC received. Scheduling shutdown.")
-        if self._request_shutdown is not None:
-            self._request_shutdown(return_home=True)
+        self._env.close()
         return robot_env_pb2.Empty()
 
 
@@ -320,7 +231,6 @@ def serve(
     port: int = _DEFAULT_PORT,
     max_message_size: int = _DEFAULT_MAX_MESSAGE_SIZE,
     dummy: bool = False,
-    verbose: bool = False,
 ):
     """Start the gRPC server with a YAMEnv instance."""
     from rlinf.envs.yam.yam_env import YAMEnv
@@ -341,23 +251,6 @@ def serve(
         worker_info=None,
     )
 
-    if verbose:
-        _print_robot_state(env)
-        ready_flag = os.environ.get("RLINF_ROBOT_SERVER_READY_FLAG")
-        if ready_flag:
-            with open(ready_flag, "w") as f:
-                f.write("ready\n")
-
-    stop_event = threading.Event()
-    shutdown_lock = threading.Lock()
-    shutdown_state = {"return_home": False}
-
-    def _request_shutdown(return_home: bool) -> None:
-        with shutdown_lock:
-            if return_home:
-                shutdown_state["return_home"] = True
-            stop_event.set()
-
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=4),
         options=[
@@ -365,44 +258,27 @@ def serve(
             ("grpc.max_receive_message_length", max_message_size),
         ],
     )
-    servicer = RobotEnvServicer(
-        env,
-        compress=compress,
-        jpeg_quality=jpeg_quality,
-        verbose=verbose,
-        request_shutdown=_request_shutdown,
-    )
+    servicer = RobotEnvServicer(env, compress=compress, jpeg_quality=jpeg_quality)
     robot_env_pb2_grpc.add_RobotEnvServiceServicer_to_server(servicer, server)
 
     server.add_insecure_port(f"[::]:{port}")
     server.start()
     logger.info(f"[RobotServer] Serving on port {port}")
 
+    stop_event = threading.Event()
+
     def _shutdown(signum, frame):
-        _request_shutdown(return_home=True)
+        if stop_event.is_set():
+            return
+        stop_event.set()
+        logger.info("[RobotServer] Shutting down...")
+        env.close()
+        server.stop(grace=0)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
     stop_event.wait()
-
-    logger.info("[RobotServer] Shutting down...")
-    server.stop(grace=1)
-    try:
-        env.close(return_home=shutdown_state["return_home"])
-    except Exception:
-        pass
-
-    import multiprocessing
-
-    for child in multiprocessing.active_children():
-        logger.info(
-            f"[RobotServer] Killing child process: {child.name} (pid={child.pid})"
-        )
-        child.kill()
-        child.join(timeout=2)
-
-    logger.info("[RobotServer] Cleanup complete.")
 
 
 def main():
@@ -424,19 +300,8 @@ def main():
         action="store_true",
         help="Run in dummy mode (no real hardware, zero observations)",
     )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Show robot state before serving and log every chunk step",
-    )
     args = parser.parse_args()
-    serve(
-        args.config_path,
-        args.port,
-        args.max_message_size,
-        dummy=args.dummy,
-        verbose=args.verbose,
-    )
+    serve(args.config_path, args.port, args.max_message_size, dummy=args.dummy)
 
 
 if __name__ == "__main__":
