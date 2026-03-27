@@ -177,6 +177,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # Track last client RPC time for disconnect detection.
         self._last_rpc_time: float = time.monotonic()
         self._client_connected: bool = False
+        self._chunk_count: int = 0
         # Protects all env operations so that safe_recover() and gRPC
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
@@ -290,6 +291,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 chunk_truncations,
                 infos_list,
             ) = self._env.chunk_step(actions)
+        self._chunk_count += 1
 
         step_results = []
         chunk_size = request.chunk_size
@@ -374,6 +376,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
             self._env.prepare_for_reconnection()
             self._client_connected = False
+            self._chunk_count = 0
             self._first_chunk_approved = not self._verbose
             logger.info(
                 "[RobotServer] Safe recovery complete. "
@@ -381,8 +384,9 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             )
 
 
-_DEFAULT_CLIENT_IDLE_TIMEOUT_S = 30.0
+_DEFAULT_CLIENT_IDLE_TIMEOUT_S = 120.0
 _WATCHDOG_POLL_INTERVAL_S = 5.0
+_TIMER_DISPLAY_INTERVAL_S = 10.0
 
 
 def serve(
@@ -456,12 +460,14 @@ def serve(
     logger.info(f"[RobotServer] Serving on port {port}")
 
     # ---- Watchdog: detect client disconnect and trigger safe recovery ----
+    # Only activates after the first ChunkStep has been processed so that
+    # slow model loading on the Beaker side does not trigger a false alarm.
     def _watchdog() -> None:
         while not stop_event.is_set():
             stop_event.wait(timeout=_WATCHDOG_POLL_INTERVAL_S)
             if stop_event.is_set():
                 break
-            if not servicer._client_connected:
+            if not servicer._client_connected or servicer._chunk_count == 0:
                 continue
             idle_s = time.monotonic() - servicer._last_rpc_time
             if idle_s >= client_idle_timeout_s:
@@ -477,6 +483,33 @@ def serve(
         target=_watchdog, name="robot-server-watchdog", daemon=True
     )
     watchdog_thread.start()
+
+    # ---- Timer display: log remaining episode time independently ----
+    def _timer_display() -> None:
+        while not stop_event.is_set():
+            stop_event.wait(timeout=_TIMER_DISPLAY_INTERVAL_S)
+            if stop_event.is_set():
+                break
+            start = env._episode_start_time
+            if start is None:
+                continue
+            elapsed_s = time.monotonic() - start
+            duration_s = env._episode_duration_s
+            remaining_s = max(0.0, duration_s - elapsed_s)
+            rem_m, rem_s = divmod(int(remaining_s), 60)
+            tot_m, tot_s = divmod(int(duration_s), 60)
+            logger.info(
+                "[RobotServer] Episode timer: %d:%02d remaining (of %d:%02d)",
+                rem_m,
+                rem_s,
+                tot_m,
+                tot_s,
+            )
+
+    timer_thread = threading.Thread(
+        target=_timer_display, name="robot-server-timer", daemon=True
+    )
+    timer_thread.start()
 
     # ---- Signal handler: local Ctrl+C triggers real shutdown ----
     def _shutdown(signum, frame):

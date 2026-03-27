@@ -169,8 +169,6 @@ class YAMEnv(gym.Env):
         else:
             self._episode_duration_s = self._max_episode_steps / self._control_rate_hz
         self._episode_start_time: float | None = None
-        self._timer_log_interval_s: float = 10.0
-        self._last_timer_log_time: float | None = None
 
         # Metrics (mirrors RealWorldEnv for compatibility)
         self._init_metrics()
@@ -312,7 +310,6 @@ class YAMEnv(gym.Env):
         self._num_steps = 0
         self._elapsed_steps[:] = 0
         self._episode_start_time = None
-        self._last_timer_log_time = None
         self._reset_metrics()
         self._is_start = True
 
@@ -583,23 +580,6 @@ class YAMEnv(gym.Env):
         if self._episode_start_time is not None:
             elapsed_s = time.monotonic() - self._episode_start_time
             truncated = np.array([elapsed_s >= self._episode_duration_s], dtype=bool)
-            # Periodic countdown log on the local terminal.
-            now = time.monotonic()
-            if (
-                self._last_timer_log_time is None
-                or now - self._last_timer_log_time >= self._timer_log_interval_s
-            ):
-                remaining_s = max(0.0, self._episode_duration_s - elapsed_s)
-                rem_m, rem_s = divmod(int(remaining_s), 60)
-                tot_m, tot_s = divmod(int(self._episode_duration_s), 60)
-                self._logger.info(
-                    "[YAMEnv] Episode timer: %d:%02d remaining (of %d:%02d)",
-                    rem_m,
-                    rem_s,
-                    tot_m,
-                    tot_s,
-                )
-                self._last_timer_log_time = now
         else:
             truncated = np.zeros(self.num_envs, dtype=bool)
 
@@ -625,7 +605,6 @@ class YAMEnv(gym.Env):
             self._num_steps = 0
             self._elapsed_steps[:] = 0
             self._episode_start_time = None
-            self._last_timer_log_time = None
 
         return obs, reward, terminated, truncated, infos
 
@@ -787,7 +766,6 @@ class YAMEnv(gym.Env):
         self._num_steps = 0
         self._elapsed_steps[:] = 0
         self._episode_start_time = None
-        self._last_timer_log_time = None
         self._reset_metrics()
         self._is_start = True
         self._logger.info("[YAMEnv] State cleared — ready for new client connection.")
