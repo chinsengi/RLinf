@@ -349,7 +349,16 @@ class FSDPModelManager:
         """
         Setup model, lr_scheduler, optimizer and grad_scaler.
         """
+        self._logger.info(
+            "[FSDP] setup_model_and_optimizer: starting "
+            f"(model_type={self._cfg.model.get('model_type', None)}, "
+            f"model_path={self._cfg.model.get('model_path', None)})"
+        )
         module = self.model_provider_func()
+        self._logger.info(
+            "[FSDP] setup_model_and_optimizer: model_provider_func completed "
+            f"(module_cls={module.__class__.__name__})"
+        )
 
         # Enable gradient checkpointing if configured
         if self._cfg.fsdp_config.get("gradient_checkpointing", False):
@@ -359,16 +368,22 @@ class FSDPModelManager:
             self._logger.info("[FSDP] Gradient checkpointing is disabled")
 
         # build model, optimizer, lr_scheduler, grad_scaler
+        self._logger.info("[FSDP] setup_model_and_optimizer: wrapping model with FSDP")
         self.model = self._strategy.wrap_model(
             model=module, device_mesh=self._device_mesh
         )
+        self._logger.info("[FSDP] setup_model_and_optimizer: FSDP wrap completed")
+        self._logger.info("[FSDP] setup_model_and_optimizer: building optimizer")
         self.optimizer = self.build_optimizer(
             model=self.model, enable_critic_warmup=self.critic_warmup_steps > 0
         )
+        self._logger.info("[FSDP] setup_model_and_optimizer: optimizer built")
 
+        self._logger.info("[FSDP] setup_model_and_optimizer: building lr scheduler")
         self.lr_scheduler = self.build_lr_scheduler(
             optimizer=self.optimizer, optim_config=self._cfg.optim
         )
+        self._logger.info("[FSDP] setup_model_and_optimizer: lr scheduler built")
 
         assert self._cfg.fsdp_config.get("grad_scaler") is not None, (
             "fsdp_config.grad_scaler must be initialized before this step."
@@ -379,9 +394,11 @@ class FSDPModelManager:
             value = self._cfg.fsdp_config.grad_scaler.get(key, None)
             if value is not None:
                 kwargs[key] = value
+        self._logger.info("[FSDP] setup_model_and_optimizer: building grad scaler")
         self.grad_scaler = self.build_grad_scaler(
             self._cfg.fsdp_config.grad_scaler.get("enabled", False), **kwargs
         )
+        self._logger.info("[FSDP] setup_model_and_optimizer: completed")
 
     def get_model_state_dict(self, cpu_offload: bool, full_state_dict: bool) -> dict:
         """
