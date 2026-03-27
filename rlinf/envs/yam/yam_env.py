@@ -115,6 +115,11 @@ class YAMEnv(gym.Env):
         self._img_w = int(cfg.get("img_width", _DEFAULT_IMG_W))
         self._main_camera = str(cfg.get("main_camera", "top_camera"))
         self.main_image_key = self._main_camera
+        self._return_home_on_close = bool(cfg.get("return_home_on_close", False))
+        self._skip_home_on_initial_reset = bool(
+            cfg.get("skip_home_on_initial_reset", False)
+        )
+        self._has_reset_once = False
         self._wrist_camera_patterns = self._normalize_camera_patterns(
             cfg.get("wrist_cameras", None)
         )
@@ -294,8 +299,20 @@ class YAMEnv(gym.Env):
         if self._is_dummy:
             raw_obs = self._dummy_obs()
         else:
-            self._move_robots_to_reset_pose()
-            raw_obs = self._robot_env.reset()
+            assert self._robot_env is not None, "Robot environment is not initialized."
+            should_skip_home = (
+                self._skip_home_on_initial_reset and not self._has_reset_once
+            )
+            if should_skip_home:
+                raw_obs = self._robot_env.get_obs()
+                self._logger.info(
+                    "[YAMEnv] Initial reset is using the current robot pose without "
+                    "returning to startup home."
+                )
+            else:
+                self._move_robots_to_reset_pose()
+                raw_obs = self._robot_env.reset()
+            self._has_reset_once = True
 
         return self._wrap_obs(raw_obs), {}
 
@@ -629,7 +646,22 @@ class YAMEnv(gym.Env):
             infos_list,
         )
 
-    def close(self):
+    def return_to_home(self) -> None:
+        """Move the robot back to the captured startup home pose."""
+        if self._is_dummy or self._robot_env is None:
+            return
+        self._move_robots_to_reset_pose()
+
+    def close(self, return_home: bool | None = None):
+        if return_home is None:
+            return_home = self._return_home_on_close
+        if return_home:
+            try:
+                self.return_to_home()
+            except Exception as exc:
+                self._logger.error(
+                    f"[YAMEnv] Failed to return home during close: {exc}"
+                )
         if self._robot_env is not None:
             try:
                 self._robot_env.close()

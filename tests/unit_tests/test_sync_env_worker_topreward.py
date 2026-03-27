@@ -42,6 +42,23 @@ except Exception:
 
 from rlinf.workers.env.env_worker import EnvWorker
 
+
+class _CfgNode(dict):
+    """Minimal config node supporting both attr access and `.get()`."""
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+def _cfg_node(data):
+    if isinstance(data, dict):
+        return _CfgNode({key: _cfg_node(value) for key, value in data.items()})
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Plan step 1: TOPReward reset on subtask update should not raise
 # ---------------------------------------------------------------------------
@@ -153,3 +170,75 @@ def test_instruction_source_current_task():
         SimpleNamespace(unwrapped=SimpleNamespace(task_description="grasp the corner"))
     ]
     assert worker._get_top_reward_instruction(0) == "grasp the corner"
+
+
+def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.cfg = _cfg_node(
+        {
+            "env": {
+                "train": {
+                    "auto_reset": False,
+                    "reset_on_rollout_epoch": False,
+                }
+            }
+        }
+    )
+    worker._top_reward_enabled = False
+    worker.stage_num = 1
+    worker.train_num_envs_per_stage = 1
+    worker.last_obs_list = [{"states": "previous"}]
+    worker.last_intervened_info_list = [("act", "flag")]
+
+    reset_calls = []
+
+    class _Env:
+        is_start = False
+
+        def reset(self):
+            reset_calls.append(True)
+            return {"states": "reset"}, {}
+
+    worker.env_list = [_Env()]
+
+    env_outputs = worker.bootstrap_step()
+
+    assert reset_calls == []
+    assert env_outputs[0].obs == {"states": "previous"}
+    assert env_outputs[0].intervene_actions == "act"
+    assert env_outputs[0].intervene_flags == "flag"
+
+
+def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled():
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.cfg = _cfg_node(
+        {
+            "env": {
+                "train": {
+                    "auto_reset": False,
+                    "reset_on_rollout_epoch": False,
+                }
+            }
+        }
+    )
+    worker._top_reward_enabled = False
+    worker.stage_num = 1
+    worker.train_num_envs_per_stage = 1
+    worker.last_obs_list = []
+    worker.last_intervened_info_list = []
+
+    reset_calls = []
+
+    class _Env:
+        is_start = False
+
+        def reset(self):
+            reset_calls.append(True)
+            return {"states": "reset"}, {}
+
+    worker.env_list = [_Env()]
+
+    env_outputs = worker.bootstrap_step()
+
+    assert reset_calls == [True]
+    assert env_outputs[0].obs == {"states": "reset"}

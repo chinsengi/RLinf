@@ -15,6 +15,7 @@
 import dataclasses
 import importlib.util
 import logging
+import math
 import os
 from dataclasses import asdict
 from enum import Enum
@@ -124,13 +125,7 @@ def openai_gelu(x):
     return gelu_impl(x)
 
 
-try:
-    jit_fuser = torch.compile
-except Exception:
-    jit_fuser = torch.jit.script
-
-
-@jit_fuser
+@torch.jit.script
 def squared_relu(x):
     return torch.pow(torch.nn.functional.relu(x), 2)
 
@@ -743,6 +738,41 @@ def validate_megatron_cfg(cfg: DictConfig) -> DictConfig:
 
 
 def validate_embodied_cfg(cfg):
+    return_home_minutes = cfg.env.get("return_home_minutes", None)
+    if return_home_minutes is not None:
+        return_home_minutes = float(return_home_minutes)
+        if return_home_minutes <= 0:
+            raise ValueError("env.return_home_minutes must be greater than 0.")
+        num_chunks = cfg.actor.model.get("num_action_chunks", None)
+        if num_chunks is None or num_chunks <= 0:
+            raise ValueError(
+                "env.return_home_minutes requires actor.model.num_action_chunks > 0."
+            )
+        with open_dict(cfg):
+            for split in ("train", "eval"):
+                control_rate_hz = float(cfg.env[split].get("control_rate_hz", 0.0))
+                if control_rate_hz <= 0:
+                    raise ValueError(
+                        f"env.{split}.control_rate_hz must be greater than 0 when "
+                        "using env.return_home_minutes."
+                    )
+                raw_steps = int(round(return_home_minutes * 60.0 * control_rate_hz))
+                aligned_steps = int(math.ceil(raw_steps / num_chunks) * num_chunks)
+                if aligned_steps != raw_steps:
+                    logging.warning(
+                        "env.return_home_minutes=%s with env.%s.control_rate_hz=%s "
+                        "produced %s raw steps, which is not divisible by "
+                        "actor.model.num_action_chunks=%s. Rounding up to %s steps.",
+                        return_home_minutes,
+                        split,
+                        control_rate_hz,
+                        raw_steps,
+                        num_chunks,
+                        aligned_steps,
+                    )
+                cfg.env[split].max_episode_steps = aligned_steps
+                cfg.env[split].max_steps_per_rollout_epoch = aligned_steps
+
     assert get_supported_model(cfg.actor.model.model_type).category == "embodied", (
         f"Model type: '{cfg.actor.model.model_type}' is not an embodied model. "
         f"Supported embodied models: {[e.value for e in SupportedModel if e.category == 'embodied']}."
