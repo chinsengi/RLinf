@@ -304,10 +304,14 @@ class YAMEnv(gym.Env):
                 self._skip_home_on_initial_reset and not self._has_reset_once
             )
             if should_skip_home:
+                # On the very first reset we only want to adopt the robot's
+                # current pose as the startup home. Do not send any home/reset
+                # motion commands here.
+                self._capture_reset_joint_positions()
                 raw_obs = self._robot_env.get_obs()
                 self._logger.info(
-                    "[YAMEnv] Initial reset is using the current robot pose without "
-                    "returning to startup home."
+                    "[YAMEnv] Initial reset captured the current robot pose as "
+                    "startup home without commanding any return-home motion."
                 )
             else:
                 self._move_robots_to_reset_pose()
