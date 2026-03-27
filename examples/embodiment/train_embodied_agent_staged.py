@@ -51,6 +51,7 @@ Optional remote-desktop simulation:
 """
 
 import json
+import sys
 
 import hydra
 import torch.multiprocessing as mp
@@ -305,4 +306,8 @@ def main(cfg) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Interrupted by user.", file=sys.stderr)
+        raise SystemExit(130) from None
