@@ -288,7 +288,7 @@ def main(cfg) -> None:
     finally:
         if workers_initialized and env_group is not None:
             try:
-                env_group._close()
+                env_group.close_envs().wait()
             except Exception:
                 pass
         if workers_initialized and rollout_group is not None:

@@ -174,7 +174,7 @@ class EnvWorker(Worker):
 
         self._close_enabled = True
 
-    def _close(self):
+    def close_envs(self):
         if not getattr(self, "_close_enabled", False):
             return
         for env in getattr(self, "env_list", []):
