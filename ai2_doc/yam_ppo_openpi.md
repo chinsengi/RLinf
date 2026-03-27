@@ -105,7 +105,7 @@ Task description:
 ```yaml
 env:
   train:
-    task_description: "pick up the red block"
+    task_description: "Fold the towel."
 ```
 
 Reward / planner settings:

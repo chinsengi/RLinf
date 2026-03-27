@@ -149,7 +149,7 @@ env:
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
 
-    task_description: "bimanual pick and place"
+    task_description: "Fold the towel."
 
     # Enable TOPReward dense progress signal.
     top_reward_enabled: True
@@ -170,7 +170,7 @@ env:
     max_episode_steps: 100
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
-    task_description: "bimanual pick and place"
+    task_description: "Fold the towel."
 
 # VLM planner: Qwen3-VL-8B for TOPReward scoring only (no subtask planning).
 # reward_scale is read from THIS section by TOPReward (not from reward.reward_scale).
@@ -239,8 +239,8 @@ actor:
       joint_logprob: True
 
   optim:
-    lr: 5.0e-6
-    value_lr: 1.55e-4
+    lr: 0
+    value_lr: 0
     adam_beta1: 0.9
     adam_beta2: 0.95
     adam_eps: 1.0e-08

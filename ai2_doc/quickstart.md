@@ -111,8 +111,8 @@ python examples/embodiment/train_embodied_agent_staged.py \
     --config-name yam_ppo_openpi \
     actor.model.model_path=thomas0829/folding_towel_pi05 \
     rollout.model.model_path=thomas0829/folding_towel_pi05 \
-    'env.train.task_description=pick and place' \
-    'env.eval.task_description=pick and place'
+    'env.train.task_description=Fold the towel.' \
+    'env.eval.task_description=Fold the towel.'
 ```
 
 If the run fails or you want to tweak Hydra overrides, re-run the training
@@ -130,8 +130,8 @@ python examples/embodiment/train_embodied_agent_staged.py \
     --config-name yam_ppo_openpi \
     actor.model.model_path=thomas0829/folding_towel_pi05 \
     rollout.model.model_path=thomas0829/folding_towel_pi05 \
-    'env.train.task_description=pick and place' \
-    'env.eval.task_description=pick and place'
+    'env.train.task_description=Fold the towel.' \
+    'env.eval.task_description=Fold the towel.'
 ```
 
 The `RemoteEnv` inside the container connects to `localhost:50051` (routed
