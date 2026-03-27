@@ -58,6 +58,7 @@ import threading
 
 import grpc
 import hydra
+import ray
 import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf
 
@@ -170,6 +171,26 @@ def _request_remote_safe_recovery(cfg) -> None:
         )
     finally:
         channel.close()
+
+
+def _shutdown_worker_group_fast(worker_group) -> None:
+    """Terminate a worker group without waiting for graceful env cleanup."""
+    if worker_group is None:
+        return
+    try:
+        worker_group._close()
+    except Exception:
+        pass
+
+
+def _shutdown_vlm_actor_fast(vlm_actor) -> None:
+    """Terminate the standalone VLM actor immediately."""
+    if vlm_actor is None:
+        return
+    try:
+        ray.kill(vlm_actor)
+    except Exception:
+        pass
 
 
 def _compute_vlm_gpu_index(cfg) -> int:
@@ -347,6 +368,7 @@ def main(cfg) -> None:
     workers_initialized = False
     remote_monitor_stop = None
     remote_monitor_thread = None
+    fast_shutdown = False
     try:
         cluster = Cluster(cluster_cfg=cfg.cluster)
         component_placement = HybridComponentPlacement(cfg, cluster)
@@ -390,27 +412,38 @@ def main(cfg) -> None:
             env_group.set_vlm_planner(vlm_actor).wait()
 
         runner.run()
+    except KeyboardInterrupt:
+        fast_shutdown = True
+        raise
     finally:
         if remote_monitor_stop is not None:
             remote_monitor_stop.set()
         if remote_monitor_thread is not None:
             remote_monitor_thread.join(timeout=1.0)
+        fast_shutdown = fast_shutdown or _REMOTE_DISCONNECT_EVENT.is_set()
         _request_remote_safe_recovery(cfg)
-        if workers_initialized and env_group is not None:
-            try:
-                env_group.close_envs().wait()
-            except Exception:
-                pass
-        if workers_initialized and rollout_group is not None:
-            try:
-                rollout_group._close()
-            except Exception:
-                pass
-        if workers_initialized and actor_group is not None:
-            try:
-                actor_group._close()
-            except Exception:
-                pass
+        if workers_initialized and fast_shutdown:
+            _shutdown_worker_group_fast(env_group)
+            _shutdown_worker_group_fast(rollout_group)
+            _shutdown_worker_group_fast(actor_group)
+            _shutdown_vlm_actor_fast(vlm_actor)
+        else:
+            if workers_initialized and env_group is not None:
+                try:
+                    env_group.close_envs().wait()
+                except Exception:
+                    pass
+            if workers_initialized and rollout_group is not None:
+                try:
+                    rollout_group._close()
+                except Exception:
+                    pass
+            if workers_initialized and actor_group is not None:
+                try:
+                    actor_group._close()
+                except Exception:
+                    pass
+            _shutdown_vlm_actor_fast(vlm_actor)
         stop_process(simulated_desktop_server)
 
 
