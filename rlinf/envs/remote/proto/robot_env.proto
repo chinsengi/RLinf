@@ -6,6 +6,9 @@ service RobotEnvService {
   // Return observation and action space metadata.
   rpc GetSpaces(Empty) returns (SpacesResponse);
 
+  // Return the current observation without resetting or stepping the robot.
+  rpc GetObservation(Empty) returns (Observation);
+
   // Reset the environment and return the initial observation.
   rpc Reset(ResetRequest) returns (Observation);
 

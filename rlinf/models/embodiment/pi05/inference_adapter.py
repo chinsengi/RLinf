@@ -45,6 +45,14 @@ from rlinf.models.embodiment.pi05.modeling_pi05 import (
 )
 
 
+def _config_dtype_from_precision(precision: str | None) -> str | None:
+    if precision in {"bf16", "bf16-mixed", "bfloat16"}:
+        return "bfloat16"
+    if precision in {"fp32", "32", "32-true", "float32"}:
+        return "float32"
+    return None
+
+
 def _resolve_checkpoint_dir(model_path: str) -> str:
     if os.path.exists(model_path):
         return model_path
@@ -182,15 +190,14 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         add_value_head: bool = False,
         value_after_vlm: bool = False,
         value_vlm_mode: str = "mean_token",
+        precision: str | None = None,
     ):
         super().__init__()
         self.checkpoint_dir = checkpoint_dir
         self.config = _build_config(checkpoint_dir)
-        # RLinf trains the PI05 policy under FSDP, which requires each wrapped
-        # module to have a uniform parameter dtype when flattening parameters.
-        # The checkpoint config may request mixed bf16/fp32 weights, so force
-        # the runtime model construction to use full fp32 here.
-        self.config.dtype = "float32"
+        resolved_config_dtype = _config_dtype_from_precision(precision)
+        if resolved_config_dtype is not None:
+            self.config.dtype = resolved_config_dtype
         self.runtime_action_chunk = action_chunk or self.config.n_action_steps
         self.requested_action_horizon = action_horizon or self.config.chunk_size
         self.runtime_action_horizon = self.config.chunk_size
@@ -417,7 +424,10 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
             adarms_cond=[None, adarms_cond],
         )
         suffix_out = outputs_embeds[1]
-        suffix_out = suffix_out[:, -x_t.shape[1] :].to(dtype=torch.float32)
+        suffix_out = suffix_out[:, -x_t.shape[1] :]
+        target_dtype = self.model.action_out_proj.weight.dtype
+        if suffix_out.dtype != target_dtype:
+            suffix_out = suffix_out.to(dtype=target_dtype)
         return suffix_out
 
     def _get_value_from_vlm(self, prefix_output: torch.Tensor) -> torch.Tensor:
@@ -429,7 +439,9 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
             prefix_out_value = prefix_output[:, 0]
         else:
             prefix_out_value = prefix_output.mean(dim=1)
-        prefix_out_value = prefix_out_value.to(dtype=torch.float32)
+        target_dtype = self.value_head.mlp[0].weight.dtype
+        if prefix_out_value.dtype != target_dtype:
+            prefix_out_value = prefix_out_value.to(dtype=target_dtype)
         return self.value_head(prefix_out_value)[:, 0]
 
     def _gaussian_entropy(self, sigma: torch.Tensor) -> torch.Tensor:
@@ -485,7 +497,10 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
 
         if self.add_value_head and compute_values and not self.value_after_vlm:
             suffix_out_value = torch.mean(suffix_out, dim=1)
-            value_t = self.value_head(suffix_out_value.to(dtype=torch.float32))[:, 0]
+            target_dtype = self.value_head.mlp[0].weight.dtype
+            if suffix_out_value.dtype != target_dtype:
+                suffix_out_value = suffix_out_value.to(dtype=target_dtype)
+            value_t = self.value_head(suffix_out_value)[:, 0]
         else:
             value_t = torch.zeros((batch_size), device=device, dtype=torch.float32)
 
@@ -730,7 +745,6 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
 
 
 def get_model(cfg, torch_dtype=None):
-    del torch_dtype
     checkpoint_dir = _resolve_checkpoint_dir(str(cfg.model_path))
     openpi_cfg = getattr(cfg, "openpi", None)
     action_chunk = getattr(openpi_cfg, "action_chunk", None)
@@ -746,6 +760,9 @@ def get_model(cfg, torch_dtype=None):
     value_after_vlm = getattr(openpi_cfg, "value_after_vlm", False)
     value_vlm_mode = getattr(openpi_cfg, "value_vlm_mode", "mean_token")
     train_expert_only = getattr(openpi_cfg, "train_expert_only", False)
+    precision = getattr(cfg, "precision", None)
+    if precision is None and torch_dtype is not None:
+        precision = str(torch_dtype).replace("torch.", "")
     model = PI05PolicyAdapter(
         checkpoint_dir,
         action_chunk=action_chunk,
@@ -761,6 +778,7 @@ def get_model(cfg, torch_dtype=None):
         add_value_head=getattr(cfg, "add_value_head", False),
         value_after_vlm=value_after_vlm,
         value_vlm_mode=value_vlm_mode,
+        precision=precision,
     )
     if train_expert_only:
         model.freeze_vlm()
