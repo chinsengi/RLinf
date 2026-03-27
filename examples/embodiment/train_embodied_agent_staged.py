@@ -241,6 +241,11 @@ def main(cfg) -> None:
     print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))
 
     simulated_desktop_server = launch_simulated_desktop_server(cfg)
+    cluster = None
+    actor_group = None
+    rollout_group = None
+    env_group = None
+    vlm_actor = None
     try:
         cluster = Cluster(cluster_cfg=cfg.cluster)
         component_placement = HybridComponentPlacement(cfg, cluster)
@@ -279,6 +284,21 @@ def main(cfg) -> None:
 
         runner.run()
     finally:
+        if env_group is not None:
+            try:
+                env_group._close()
+            except Exception:
+                pass
+        if rollout_group is not None:
+            try:
+                rollout_group._close()
+            except Exception:
+                pass
+        if actor_group is not None:
+            try:
+                actor_group._close()
+            except Exception:
+                pass
         stop_process(simulated_desktop_server)
 
 
