@@ -26,6 +26,7 @@ SSH tunnel (Tailscale).
 import argparse
 import os
 import signal
+import sys
 import threading
 import time
 from concurrent import futures
@@ -342,6 +343,31 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             self._request_shutdown(return_home=True)
         return robot_env_pb2.Empty()
 
+    def episode_timeout(self) -> None:
+        """Return arms to home when the episode timer expires.
+
+        Called by the timer thread.  Acquires ``_env_lock`` and re-checks
+        the timer to avoid acting on a stale reading.
+        """
+        with self._env_lock:
+            start = self._env._episode_start_time
+            if start is None:
+                return
+            elapsed = time.monotonic() - start
+            if elapsed < self._env._episode_duration_s:
+                return
+            logger.info("[RobotServer] Episode timer expired — returning to home.")
+            try:
+                self._env.return_to_home()
+                logger.info("[RobotServer] Arms returned to home.")
+            except Exception as exc:
+                logger.error(f"[RobotServer] Failed to return home: {exc}")
+            # Reset timer so new ChunkSteps start a fresh episode.
+            self._env._episode_start_time = None
+            self._env._num_steps = 0
+            self._env._elapsed_steps[:] = 0
+            self._env._reset_metrics()
+
     def safe_recover(self, idle_timeout_s: float) -> None:
         """Return arms to home, enter zero-torque, and prepare for reconnection.
 
@@ -386,7 +412,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
 _DEFAULT_CLIENT_IDLE_TIMEOUT_S = 120.0
 _WATCHDOG_POLL_INTERVAL_S = 5.0
-_TIMER_DISPLAY_INTERVAL_S = 10.0
 
 
 def serve(
@@ -484,27 +509,36 @@ def serve(
     )
     watchdog_thread.start()
 
-    # ---- Timer display: log remaining episode time independently ----
+    # ---- Timer: 1-second countdown display + episode timeout handling ----
     def _timer_display() -> None:
+        last_line_len = 0
         while not stop_event.is_set():
-            stop_event.wait(timeout=_TIMER_DISPLAY_INTERVAL_S)
+            time.sleep(1.0)
             if stop_event.is_set():
                 break
             start = env._episode_start_time
             if start is None:
+                # Clear the timer line when no episode is active.
+                if last_line_len > 0:
+                    sys.stdout.write("\r" + " " * last_line_len + "\r")
+                    sys.stdout.flush()
+                    last_line_len = 0
                 continue
             elapsed_s = time.monotonic() - start
             duration_s = env._episode_duration_s
             remaining_s = max(0.0, duration_s - elapsed_s)
+            if remaining_s <= 0:
+                sys.stdout.write("\r" + " " * last_line_len + "\r")
+                sys.stdout.flush()
+                last_line_len = 0
+                servicer.episode_timeout()
+                continue
             rem_m, rem_s = divmod(int(remaining_s), 60)
             tot_m, tot_s = divmod(int(duration_s), 60)
-            logger.info(
-                "[RobotServer] Episode timer: %d:%02d remaining (of %d:%02d)",
-                rem_m,
-                rem_s,
-                tot_m,
-                tot_s,
-            )
+            line = f"  [Timer] {rem_m}:{rem_s:02d} remaining (of {tot_m}:{tot_s:02d})"
+            sys.stdout.write("\r" + line.ljust(last_line_len))
+            sys.stdout.flush()
+            last_line_len = len(line)
 
     timer_thread = threading.Thread(
         target=_timer_display, name="robot-server-timer", daemon=True
@@ -520,10 +554,28 @@ def serve(
 
     stop_event.wait()
 
+    # ---- Shutdown: return home FIRST while portal connections are alive ----
+    sys.stdout.write("\n")  # move past the timer line
+    sys.stdout.flush()
     logger.info("[RobotServer] Shutting down...")
-    server.stop(grace=1)
+    server.stop(grace=2)
+
+    logger.info("[RobotServer] Returning arms to home...")
     try:
-        env.close(return_home=True)
+        env.return_to_home()
+        logger.info("[RobotServer] Arms at home.")
+    except Exception as exc:
+        logger.error(f"[RobotServer] Failed to return home: {exc}")
+
+    logger.info("[RobotServer] Entering zero-torque mode...")
+    try:
+        env.enter_zero_torque_mode()
+        logger.info("[RobotServer] Zero-torque mode.")
+    except Exception as exc:
+        logger.error(f"[RobotServer] Failed to enter zero-torque: {exc}")
+
+    try:
+        env.close(return_home=False)
     except Exception:
         pass
 
