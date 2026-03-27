@@ -101,7 +101,6 @@ def main() -> None:
 
     def _shutdown(_signum: int, _frame: object | None) -> None:
         _close_server()
-        raise SystemExit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
