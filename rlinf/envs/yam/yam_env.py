@@ -155,6 +155,14 @@ class YAMEnv(gym.Env):
         self._num_steps = 0
         self._elapsed_steps = np.zeros(self.num_envs, dtype=np.int32)
 
+        # Wall-clock episode timer.  Starts when the first real action is
+        # executed (not on reset) so that inference latency does not eat into
+        # the episode budget.  _episode_duration_s is derived from config.
+        self._episode_duration_s: float = (
+            self._max_episode_steps / self._control_rate_hz
+        )
+        self._episode_start_time: float | None = None
+
         # Metrics (mirrors RealWorldEnv for compatibility)
         self._init_metrics()
 
@@ -294,6 +302,7 @@ class YAMEnv(gym.Env):
         """
         self._num_steps = 0
         self._elapsed_steps[:] = 0
+        self._episode_start_time = None
         self._reset_metrics()
         self._is_start = True
 
@@ -306,13 +315,17 @@ class YAMEnv(gym.Env):
             )
             if should_skip_home:
                 # On the very first reset we only want to adopt the robot's
-                # current pose as the startup home. Do not send any home/reset
-                # motion commands here.
+                # current pose as the startup home.  After capturing, we
+                # explicitly command each arm to hold at that position so the
+                # low-level controller has a stable target and does not
+                # oscillate while waiting for the first inference action.
                 self._capture_reset_joint_positions()
+                for name, pos in self._reset_joint_positions.items():
+                    self._robot_env.robot(name).command_joint_pos(pos)
                 raw_obs = self._robot_env.get_obs()
                 self._logger.info(
                     "[YAMEnv] Initial reset captured the current robot pose as "
-                    "startup home without commanding any return-home motion."
+                    "startup home and commanded hold-position."
                 )
             else:
                 self._move_robots_to_reset_pose()
@@ -544,9 +557,24 @@ class YAMEnv(gym.Env):
             if actions.ndim == 2:
                 actions = actions[0]  # unwrap batch dim
 
+        # Start the wall-clock episode timer on the first real action so
+        # that inference warm-up latency does not consume episode budget.
+        if actions is not None and self._episode_start_time is None:
+            self._episode_start_time = time.monotonic()
+            self._logger.info(
+                "[YAMEnv] Episode timer started (%.1fs budget).",
+                self._episode_duration_s,
+            )
+
         self._elapsed_steps += 1
         self._num_steps += 1
-        truncated = self._elapsed_steps >= self._max_episode_steps
+
+        # Truncation: wall-clock time since first action execution.
+        if self._episode_start_time is not None:
+            elapsed_s = time.monotonic() - self._episode_start_time
+            truncated = np.array([elapsed_s >= self._episode_duration_s], dtype=bool)
+        else:
+            truncated = np.zeros(self.num_envs, dtype=bool)
 
         if self._is_dummy:
             raw_obs = self._dummy_obs()
@@ -569,6 +597,7 @@ class YAMEnv(gym.Env):
             self._reset_metrics()
             self._num_steps = 0
             self._elapsed_steps[:] = 0
+            self._episode_start_time = None
 
         return obs, reward, terminated, truncated, infos
 

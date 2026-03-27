@@ -121,7 +121,7 @@ Timing / shutdown behavior:
 
 ```yaml
 env:
-  return_home_minutes: 40
+  return_home_minutes: 2
   train:
     control_rate_hz: 10.0
     max_episode_steps: 24000
