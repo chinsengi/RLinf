@@ -19,6 +19,7 @@
 # Desktop:
 #   RobotServer wrapping YAMEnv, exposed via reverse SSH tunnel on :50051.
 #   Start with: bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml \
+#                   --train-config .../yam_ppo_openpi_topreward.yaml \
 #                   --use-follower-servers --remote-host <beaker-tailscale-ip>
 #
 # Submit with:
@@ -133,6 +134,10 @@ algorithm:
     min_length: 1
 
 env:
+  # Single timing source for the YAM home-return cycle.
+  return_home_minutes: 0.1
+  # Desktop RobotServer cooldown after returning home.
+  server_cooldown_minutes: 1
   group_name: "EnvGroup"
   # Optional local simulation of the robot desktop input path.
   # When enabled, train_embodied_agent_staged.py starts a local dummy
@@ -149,6 +154,7 @@ env:
 
   train:
     total_num_envs: 1
+    # Derived automatically from env.return_home_minutes.
     max_episode_steps: 100
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
@@ -181,6 +187,7 @@ env:
 
   eval:
     total_num_envs: 1
+    # Derived automatically from env.return_home_minutes.
     max_episode_steps: 100
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0

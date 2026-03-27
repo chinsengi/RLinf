@@ -22,11 +22,14 @@ total_num_envs: null
 max_episode_steps: 1000000
 max_steps_per_rollout_epoch: 1000000
 
-# Wall-clock episode duration in seconds.  The robot server starts counting
-# from the first action execution.  Set this to match the training-side
-# ``env.return_home_minutes`` (2 min = 120 s).  When absent, the timer falls
-# back to max_episode_steps / control_rate_hz (effectively disabled).
-episode_duration_s: 120
+# Wall-clock episode duration in seconds. The desktop launcher can override
+# this from a top-level training config so you only edit timing in one place.
+episode_duration_s: ${oc.env:RLINF_EPISODE_DURATION_S,120}
+
+# After the server-side episode timer expires, return both arms to home and
+# rest there before accepting a fresh restart from home. Set to 0 to restart
+# immediately, or override to any number of minutes you want.
+episode_cooldown_minutes: ${oc.env:RLINF_EPISODE_COOLDOWN_MINUTES,1}
 
 # Robot control
 control_rate_hz: 30.0

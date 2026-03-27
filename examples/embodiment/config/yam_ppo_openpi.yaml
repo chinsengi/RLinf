@@ -17,6 +17,7 @@
 # Desktop:
 #   RobotServer wrapping YAMEnv, exposed via reverse SSH tunnel on :50051.
 #   Start with: bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml \
+#                   --train-config .../yam_ppo_openpi.yaml \
 #                   --use-follower-servers --remote-host <beaker-tailscale-ip>
 #
 # Submit with:
@@ -133,6 +134,10 @@ env:
   # validate_cfg converts this into train/eval step counts and aligns to the
   # action chunk size automatically.
   return_home_minutes: 2
+  # Desktop RobotServer cooldown after the timer expires and the arms have
+  # already returned home. Keep this at the top level so Beaker and desktop
+  # can share one timing source.
+  server_cooldown_minutes: 1
   group_name: "EnvGroup"
   # Optional local simulation of the robot desktop input path.
   # When enabled, train_embodied_agent_staged.py starts a local dummy

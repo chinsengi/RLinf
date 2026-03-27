@@ -14,6 +14,7 @@
 
 import os
 import queue
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -85,6 +86,24 @@ class EmbodiedRunner:
         self.enable_per_worker_metric_log = bool(
             self.cfg.runner.get("per_worker_log", False)
         )
+        return_home_minutes = self.cfg.env.get("return_home_minutes", None)
+        self._home_cycle_duration_s: float | None = (
+            float(return_home_minutes) * 60.0
+            if return_home_minutes is not None
+            else None
+        )
+        self._countdown_deadline: float | None = None
+        self._countdown_line_len = 0
+        self._countdown_lock = threading.Lock()
+        self._countdown_stop_event = threading.Event()
+        self._countdown_thread = None
+        if self._home_cycle_duration_s and self._home_cycle_duration_s > 0:
+            self._countdown_thread = threading.Thread(
+                target=self._countdown_worker,
+                name="embodied-runner-countdown",
+                daemon=True,
+            )
+            self._countdown_thread.start()
 
         # Async logging setup
         self.stop_logging = False
@@ -105,6 +124,38 @@ class EmbodiedRunner:
             except Exception as e:
                 print(f"Logging error: {e}")
                 continue
+
+    def _set_countdown_deadline(self, duration_s: float | None) -> None:
+        with self._countdown_lock:
+            self._countdown_deadline = (
+                time.monotonic() + duration_s if duration_s and duration_s > 0 else None
+            )
+
+    def _clear_countdown_line(self) -> None:
+        if self._countdown_line_len <= 0:
+            return
+        sys.stdout.write("\r" + (" " * self._countdown_line_len) + "\r")
+        sys.stdout.flush()
+        self._countdown_line_len = 0
+
+    def _countdown_worker(self) -> None:
+        while not self._countdown_stop_event.is_set():
+            with self._countdown_lock:
+                deadline = self._countdown_deadline
+            if deadline is None:
+                self._clear_countdown_line()
+                self._countdown_stop_event.wait(timeout=0.25)
+                continue
+
+            remaining_s = max(0, int(deadline - time.monotonic()))
+            rem_m, rem_s = divmod(remaining_s, 60)
+            line = f"  [Beaker Timer] {rem_m}:{rem_s:02d} before home return"
+            sys.stdout.write("\r" + line.ljust(self._countdown_line_len))
+            sys.stdout.flush()
+            self._countdown_line_len = max(self._countdown_line_len, len(line))
+            self._countdown_stop_event.wait(timeout=1.0)
+
+        self._clear_countdown_line()
 
     def print_metrics_table_async(
         self,
@@ -251,170 +302,179 @@ class EmbodiedRunner:
     def run(self):
         start_step = self.global_step
         start_time = time.time()
-        for _step in range(start_step, self.max_steps):
-            # set global step
-            self.actor.set_global_step(self.global_step)
-            self.rollout.set_global_step(self.global_step)
+        try:
+            for _step in range(start_step, self.max_steps):
+                # set global step
+                self.actor.set_global_step(self.global_step)
+                self.rollout.set_global_step(self.global_step)
 
-            with self.timer("step"):
-                with self.timer("sync_weights"):
-                    if _step % self.weight_sync_interval == 0:
-                        self.update_rollout_weights()
-                with self.timer("generate_rollouts"):
-                    env_handle: Handle = self.env.interact(
-                        input_channel=self.rollout_channel,
-                        output_channel=self.env_channel,
-                        actor_channel=self.actor_channel,
+                with self.timer("step"):
+                    with self.timer("sync_weights"):
+                        if _step % self.weight_sync_interval == 0:
+                            self.update_rollout_weights()
+                    with self.timer("generate_rollouts"):
+                        self._set_countdown_deadline(self._home_cycle_duration_s)
+                        env_handle: Handle = self.env.interact(
+                            input_channel=self.rollout_channel,
+                            output_channel=self.env_channel,
+                            actor_channel=self.actor_channel,
+                        )
+                        rollout_handle: Handle = self.rollout.generate(
+                            input_channel=self.env_channel,
+                            output_channel=self.rollout_channel,
+                        )
+                        self.actor.recv_rollout_trajectories(
+                            input_channel=self.actor_channel
+                        ).wait()
+                        rollout_handle.wait()
+                        self._set_countdown_deadline(None)
+
+                    # compute advantages and returns.
+                    with self.timer("cal_adv_and_returns"):
+                        actor_rollout_metrics = (
+                            self.actor.compute_advantages_and_returns().wait()
+                        )
+
+                    # actor training.
+                    actor_training_handle: Handle = self.actor.run_training()
+
+                    actor_training_metrics = actor_training_handle.wait()
+
+                    self.global_step += 1
+
+                    run_val, save_model, is_train_end = check_progress(
+                        self.global_step,
+                        self.max_steps,
+                        self.cfg.runner.val_check_interval,
+                        self.cfg.runner.save_interval,
+                        1.0,
+                        run_time_exceeded=False,
                     )
-                    rollout_handle: Handle = self.rollout.generate(
-                        input_channel=self.env_channel,
-                        output_channel=self.rollout_channel,
-                    )
-                    self.actor.recv_rollout_trajectories(
-                        input_channel=self.actor_channel
-                    ).wait()
-                    rollout_handle.wait()
 
-                # compute advantages and returns.
-                with self.timer("cal_adv_and_returns"):
-                    actor_rollout_metrics = (
-                        self.actor.compute_advantages_and_returns().wait()
-                    )
+                    eval_metrics = {}
+                    if run_val:
+                        with self.timer("eval"):
+                            self.update_rollout_weights()
+                            eval_metrics = self.evaluate()
+                            eval_metrics = {
+                                f"eval/{k}": v for k, v in eval_metrics.items()
+                            }
+                            self.metric_logger.log(data=eval_metrics, step=_step)
 
-                # actor training.
-                actor_training_handle: Handle = self.actor.run_training()
+                    if save_model:
+                        self._save_checkpoint()
 
-                actor_training_metrics = actor_training_handle.wait()
-
-                self.global_step += 1
-
-                run_val, save_model, is_train_end = check_progress(
-                    self.global_step,
-                    self.max_steps,
-                    self.cfg.runner.val_check_interval,
-                    self.cfg.runner.save_interval,
-                    1.0,
-                    run_time_exceeded=False,
+                time_metrics = self.timer.consume_durations()
+                time_metrics = {f"time/{k}": v for k, v in time_metrics.items()}
+                env_time_metrics, env_time_metrics_per_rank = (
+                    env_handle.consume_durations(return_per_rank=True)
+                )
+                rollout_time_metrics, rollout_time_metrics_per_rank = (
+                    rollout_handle.consume_durations(return_per_rank=True)
+                )
+                actor_time_metrics, actor_time_metrics_per_rank = (
+                    actor_training_handle.consume_durations(return_per_rank=True)
+                )
+                time_metrics.update(
+                    {f"time/env/{k}": v for k, v in env_time_metrics.items()}
+                )
+                time_metrics.update(
+                    {f"time/rollout/{k}": v for k, v in rollout_time_metrics.items()}
+                )
+                time_metrics.update(
+                    {f"time/actor/{k}": v for k, v in actor_time_metrics.items()}
                 )
 
-                eval_metrics = {}
-                if run_val:
-                    with self.timer("eval"):
-                        self.update_rollout_weights()
-                        eval_metrics = self.evaluate()
-                        eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
-                        self.metric_logger.log(data=eval_metrics, step=_step)
+                env_results = env_handle.wait()
+                env_results_list = [
+                    results for results in env_results if results is not None
+                ]
+                env_metrics = compute_evaluate_metrics(env_results_list)
+                env_metrics = {f"env/{k}": v for k, v in env_metrics.items()}
+                ranked_env_results = [
+                    {"rank": rank, "env": rank_metrics}
+                    for rank, rank_metrics in enumerate(env_results)
+                    if rank_metrics is not None
+                ]
+                _, env_metrics_per_rank = self._process_ranked_eval_results(
+                    ranked_env_results, metric_field="env"
+                )
 
-                if save_model:
-                    self._save_checkpoint()
+                rollout_metrics = {
+                    f"rollout/{k}": v
+                    for k, v in self._aggregate_numeric_metrics(
+                        actor_rollout_metrics
+                    ).items()
+                }
 
-            time_metrics = self.timer.consume_durations()
-            time_metrics = {f"time/{k}": v for k, v in time_metrics.items()}
-            env_time_metrics, env_time_metrics_per_rank = env_handle.consume_durations(
-                return_per_rank=True
-            )
-            rollout_time_metrics, rollout_time_metrics_per_rank = (
-                rollout_handle.consume_durations(return_per_rank=True)
-            )
-            actor_time_metrics, actor_time_metrics_per_rank = (
-                actor_training_handle.consume_durations(return_per_rank=True)
-            )
-            time_metrics.update(
-                {f"time/env/{k}": v for k, v in env_time_metrics.items()}
-            )
-            time_metrics.update(
-                {f"time/rollout/{k}": v for k, v in rollout_time_metrics.items()}
-            )
-            time_metrics.update(
-                {f"time/actor/{k}": v for k, v in actor_time_metrics.items()}
-            )
+                training_metrics = {
+                    f"train/{k}": v
+                    for k, v in self._aggregate_numeric_metrics(
+                        actor_training_metrics
+                    ).items()
+                }
 
-            env_results = env_handle.wait()
-            env_results_list = [
-                results for results in env_results if results is not None
-            ]
-            env_metrics = compute_evaluate_metrics(env_results_list)
-            env_metrics = {f"env/{k}": v for k, v in env_metrics.items()}
-            ranked_env_results = [
-                {"rank": rank, "env": rank_metrics}
-                for rank, rank_metrics in enumerate(env_results)
-                if rank_metrics is not None
-            ]
-            _, env_metrics_per_rank = self._process_ranked_eval_results(
-                ranked_env_results, metric_field="env"
-            )
+                self.metric_logger.log(env_metrics, _step)
+                self.metric_logger.log(rollout_metrics, _step)
+                self.metric_logger.log(time_metrics, _step)
+                self.metric_logger.log(training_metrics, _step)
+                self._log_ranked_metrics(
+                    metrics_list=actor_rollout_metrics,
+                    step=_step,
+                    prefix="rollout",
+                    worker_group_name=self.actor.worker_group_name,
+                )
+                self._log_ranked_metrics(
+                    metrics_list=actor_training_metrics,
+                    step=_step,
+                    prefix="train",
+                    worker_group_name=self.actor.worker_group_name,
+                )
+                self._log_ranked_metrics(
+                    metrics_list=actor_time_metrics_per_rank,
+                    step=_step,
+                    prefix="time/actor",
+                    worker_group_name=self.actor.worker_group_name,
+                )
+                self._log_ranked_metrics(
+                    metrics_list=rollout_time_metrics_per_rank,
+                    step=_step,
+                    prefix="time/rollout",
+                    worker_group_name=self.rollout.worker_group_name,
+                )
+                self._log_ranked_metrics(
+                    metrics_list=env_time_metrics_per_rank,
+                    step=_step,
+                    prefix="time/env",
+                    worker_group_name=self.env.worker_group_name,
+                )
+                self._log_ranked_metrics(
+                    metrics_list=env_metrics_per_rank,
+                    step=_step,
+                    prefix="env",
+                    worker_group_name=self.env.worker_group_name,
+                )
 
-            rollout_metrics = {
-                f"rollout/{k}": v
-                for k, v in self._aggregate_numeric_metrics(
-                    actor_rollout_metrics
-                ).items()
-            }
+                logging_metrics = time_metrics
+                logging_metrics.update(eval_metrics)
+                logging_metrics.update(env_metrics)
+                logging_metrics.update(rollout_metrics)
+                logging_metrics.update(training_metrics)
 
-            training_metrics = {
-                f"train/{k}": v
-                for k, v in self._aggregate_numeric_metrics(
-                    actor_training_metrics
-                ).items()
-            }
+                self.print_metrics_table_async(
+                    _step, self.max_steps, start_time, logging_metrics, start_step
+                )
+        finally:
+            self.metric_logger.finish()
+            self._set_countdown_deadline(None)
+            self._countdown_stop_event.set()
+            if self._countdown_thread is not None:
+                self._countdown_thread.join(timeout=1.0)
 
-            self.metric_logger.log(env_metrics, _step)
-            self.metric_logger.log(rollout_metrics, _step)
-            self.metric_logger.log(time_metrics, _step)
-            self.metric_logger.log(training_metrics, _step)
-            self._log_ranked_metrics(
-                metrics_list=actor_rollout_metrics,
-                step=_step,
-                prefix="rollout",
-                worker_group_name=self.actor.worker_group_name,
-            )
-            self._log_ranked_metrics(
-                metrics_list=actor_training_metrics,
-                step=_step,
-                prefix="train",
-                worker_group_name=self.actor.worker_group_name,
-            )
-            self._log_ranked_metrics(
-                metrics_list=actor_time_metrics_per_rank,
-                step=_step,
-                prefix="time/actor",
-                worker_group_name=self.actor.worker_group_name,
-            )
-            self._log_ranked_metrics(
-                metrics_list=rollout_time_metrics_per_rank,
-                step=_step,
-                prefix="time/rollout",
-                worker_group_name=self.rollout.worker_group_name,
-            )
-            self._log_ranked_metrics(
-                metrics_list=env_time_metrics_per_rank,
-                step=_step,
-                prefix="time/env",
-                worker_group_name=self.env.worker_group_name,
-            )
-            self._log_ranked_metrics(
-                metrics_list=env_metrics_per_rank,
-                step=_step,
-                prefix="env",
-                worker_group_name=self.env.worker_group_name,
-            )
-
-            logging_metrics = time_metrics
-            logging_metrics.update(eval_metrics)
-            logging_metrics.update(env_metrics)
-            logging_metrics.update(rollout_metrics)
-            logging_metrics.update(training_metrics)
-
-            self.print_metrics_table_async(
-                _step, self.max_steps, start_time, logging_metrics, start_step
-            )
-
-        self.metric_logger.finish()
-
-        # Stop logging thread
-        self.stop_logging = True
-        self.log_queue.join()  # Wait for all queued logs to be processed
-        self.log_thread.join(timeout=1.0)
+            # Stop logging thread
+            self.stop_logging = True
+            self.log_queue.join()  # Wait for all queued logs to be processed
+            self.log_thread.join(timeout=1.0)
 
     def _save_checkpoint(self):
         self.logger.info(f"Saving checkpoint at step {self.global_step}.")

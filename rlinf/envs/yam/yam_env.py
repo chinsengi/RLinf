@@ -168,6 +168,13 @@ class YAMEnv(gym.Env):
             self._episode_duration_s: float = float(_configured_duration)
         else:
             self._episode_duration_s = self._max_episode_steps / self._control_rate_hz
+        cooldown_minutes = cfg.get("episode_cooldown_minutes", None)
+        if cooldown_minutes is not None:
+            self._episode_cooldown_s = max(0.0, float(cooldown_minutes) * 60.0)
+        else:
+            self._episode_cooldown_s = max(
+                0.0, float(cfg.get("episode_cooldown_s", 0.0))
+            )
         self._episode_start_time: float | None = None
 
         # Metrics (mirrors RealWorldEnv for compatibility)
@@ -586,8 +593,11 @@ class YAMEnv(gym.Env):
         if self._is_dummy:
             raw_obs = self._dummy_obs()
         else:
-            action_dict = self._format_action(actions)
-            raw_obs = self._robot_env.step(action_dict)
+            if np.any(truncated):
+                raw_obs = self._robot_env.get_obs()
+            else:
+                action_dict = self._format_action(actions)
+                raw_obs = self._robot_env.step(action_dict)
 
         reward = np.zeros(self.num_envs, dtype=np.float32)
         terminated = np.zeros(self.num_envs, dtype=bool)
@@ -643,6 +653,15 @@ class YAMEnv(gym.Env):
             raw_chunk_rewards.append(step_reward)
             raw_chunk_terminations.append(terminations)
             raw_chunk_truncations.append(truncations)
+            if np.any(terminations) or np.any(truncations):
+                remaining_steps = chunk_size - i - 1
+                for _ in range(remaining_steps):
+                    obs_list.append(obs)
+                    infos_list.append(infos)
+                    raw_chunk_rewards.append(np.zeros_like(step_reward))
+                    raw_chunk_terminations.append(terminations.copy())
+                    raw_chunk_truncations.append(truncations.copy())
+                break
 
         chunk_rewards = torch.stack(
             [
@@ -769,6 +788,17 @@ class YAMEnv(gym.Env):
         self._reset_metrics()
         self._is_start = True
         self._logger.info("[YAMEnv] State cleared — ready for new client connection.")
+
+    def prepare_for_next_episode(self) -> None:
+        """Reset episode bookkeeping without changing the captured startup home."""
+        self._num_steps = 0
+        self._elapsed_steps[:] = 0
+        self._episode_start_time = None
+        self._reset_metrics()
+        self._is_start = True
+        self._logger.info(
+            "[YAMEnv] Episode state cleared — ready to restart from home."
+        )
 
     # ------------------------------------------------------------------
     # Observation / action helpers

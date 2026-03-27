@@ -251,6 +251,9 @@ def main(cfg) -> None:
     try:
         cluster = Cluster(cluster_cfg=cfg.cluster)
         component_placement = HybridComponentPlacement(cfg, cluster)
+        # Load the VLM planner before worker init so model startup completes
+        # before the desktop-side robot session begins moving.
+        vlm_actor = _launch_vlm_planner(cfg, cluster)
 
         # Create actor worker group (FSDP training on Beaker).
         actor_placement = component_placement.get_strategy("actor")
@@ -281,7 +284,6 @@ def main(cfg) -> None:
         workers_initialized = True
 
         # Wire the VLM planner into env workers after they have initialised.
-        vlm_actor = _launch_vlm_planner(cfg, cluster)
         if vlm_actor is not None:
             env_group.set_vlm_planner(vlm_actor).wait()
 

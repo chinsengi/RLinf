@@ -739,16 +739,22 @@ def validate_megatron_cfg(cfg: DictConfig) -> DictConfig:
 
 def validate_embodied_cfg(cfg):
     return_home_minutes = cfg.env.get("return_home_minutes", None)
+    server_cooldown_minutes = cfg.env.get("server_cooldown_minutes", None)
     if return_home_minutes is not None:
         return_home_minutes = float(return_home_minutes)
         if return_home_minutes <= 0:
             raise ValueError("env.return_home_minutes must be greater than 0.")
+        if server_cooldown_minutes is not None and float(server_cooldown_minutes) < 0:
+            raise ValueError("env.server_cooldown_minutes must be >= 0.")
         num_chunks = cfg.actor.model.get("num_action_chunks", None)
         if num_chunks is None or num_chunks <= 0:
             raise ValueError(
                 "env.return_home_minutes requires actor.model.num_action_chunks > 0."
             )
         with open_dict(cfg):
+            cfg.env.server_episode_duration_s = return_home_minutes * 60.0
+            if server_cooldown_minutes is not None:
+                cfg.env.server_cooldown_s = float(server_cooldown_minutes) * 60.0
             for split in ("train", "eval"):
                 control_rate_hz = float(cfg.env[split].get("control_rate_hz", 0.0))
                 if control_rate_hz <= 0:

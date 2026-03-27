@@ -23,9 +23,13 @@
 #
 # Options:
 #   --config PATH         Path to YAM env YAML config (required)
+#   --train-config PATH   Optional top-level training YAML to source timing from
+#                         (default: examples/embodiment/config/yam_ppo_openpi.yaml)
 #   --port PORT           gRPC server port (default: 50051)
 #   --remote-host HOST    Beaker Tailscale hostname or IP (default: beaker-0)
 #   --remote-user USER    SSH user on the Beaker container (default: shiruic)
+#   --return-home-minutes MIN  Override desktop episode duration from CLI
+#   --cooldown-minutes MIN     Override desktop cooldown from CLI
 #   --use-follower-servers  Launch YAM follower servers on 1234/1235 first
 #   --gripper-open VAL    Optional gripper open limit for follower startup
 #   --gripper-close VAL   Optional gripper close limit for follower startup
@@ -42,10 +46,13 @@
 set -euo pipefail
 
 CONFIG=""
+TRAIN_CONFIG=""
 PORT=50051
 MAX_MESSAGE_SIZE=67108864
 REMOTE_HOST="beaker-0"
 REMOTE_USER="shiruic"
+RETURN_HOME_MINUTES_OVERRIDE=""
+COOLDOWN_MINUTES_OVERRIDE=""
 USE_FOLLOWER_SERVERS=false
 GRIPPER_OPEN=""
 GRIPPER_CLOSE=""
@@ -70,9 +77,13 @@ starts (all jobs register the Tailscale hostname "beaker-0").
 
 Options:
   --config PATH         Path to YAM env YAML config (required)
+  --train-config PATH   Optional top-level training YAML to source timing from
+                        (default: examples/embodiment/config/yam_ppo_openpi.yaml)
   --port PORT           gRPC server port (default: 50051)
   --remote-host HOST    Beaker Tailscale hostname or IP (default: beaker-0)
   --remote-user USER    SSH user on the Beaker container (default: shiruic)
+  --return-home-minutes MIN  Override desktop episode duration from CLI
+  --cooldown-minutes MIN     Override desktop cooldown from CLI
   --use-follower-servers  Launch YAM follower servers on 1234/1235 first
   --gripper-open VAL    Optional gripper open limit for follower startup
   --gripper-close VAL   Optional gripper close limit for follower startup
@@ -90,6 +101,7 @@ Examples:
   # Persistent server + auto-reconnecting tunnel (default beaker-0 hostname):
   bash scripts/start_robot_server.sh \
       --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+      --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
       --use-follower-servers
 
   # Local only (no tunnel, for testing):
@@ -114,9 +126,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --help)         usage ;;
         --config)       CONFIG="$2"; shift 2 ;;
+        --train-config) TRAIN_CONFIG="$2"; shift 2 ;;
         --port)         PORT="$2"; shift 2 ;;
         --remote-host)  REMOTE_HOST="$2"; shift 2 ;;
         --remote-user)  REMOTE_USER="$2"; shift 2 ;;
+        --return-home-minutes) RETURN_HOME_MINUTES_OVERRIDE="$2"; shift 2 ;;
+        --cooldown-minutes) COOLDOWN_MINUTES_OVERRIDE="$2"; shift 2 ;;
         --use-follower-servers) USE_FOLLOWER_SERVERS=true; shift ;;
         --gripper-open) GRIPPER_OPEN="$2"; shift 2 ;;
         --gripper-close) GRIPPER_CLOSE="$2"; shift 2 ;;
@@ -135,6 +150,59 @@ done
 if [ -z "$CONFIG" ]; then
     echo "Error: --config is required"
     exit 1
+fi
+
+if [ -z "$TRAIN_CONFIG" ]; then
+    DEFAULT_TRAIN_CONFIG="examples/embodiment/config/yam_ppo_openpi.yaml"
+    if [ -f "$DEFAULT_TRAIN_CONFIG" ]; then
+        TRAIN_CONFIG="$DEFAULT_TRAIN_CONFIG"
+    fi
+fi
+
+resolve_shared_timing() {
+    local train_cfg="$1"
+    local return_home_override="$2"
+    local cooldown_override="$3"
+    python - "$train_cfg" "$return_home_override" "$cooldown_override" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+train_cfg = sys.argv[1]
+return_home_override = sys.argv[2]
+cooldown_override = sys.argv[3]
+
+return_home = None
+cooldown = None
+
+if train_cfg:
+    path = Path(train_cfg).expanduser().resolve()
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    env_cfg = data.get("env", {}) or {}
+    if env_cfg.get("return_home_minutes") is not None:
+        return_home = float(env_cfg["return_home_minutes"])
+    if env_cfg.get("server_cooldown_minutes") is not None:
+        cooldown = float(env_cfg["server_cooldown_minutes"])
+
+if return_home_override:
+    return_home = float(return_home_override)
+if cooldown_override:
+    cooldown = float(cooldown_override)
+
+if return_home is not None:
+    print(f"RLINF_EPISODE_DURATION_S={return_home * 60.0}")
+if cooldown is not None:
+    print(f"RLINF_EPISODE_COOLDOWN_MINUTES={cooldown}")
+PY
+}
+
+if [ -n "$TRAIN_CONFIG" ] || [ -n "$RETURN_HOME_MINUTES_OVERRIDE" ] || [ -n "$COOLDOWN_MINUTES_OVERRIDE" ]; then
+    while IFS= read -r kv; do
+        [ -n "$kv" ] || continue
+        export "$kv"
+    done < <(resolve_shared_timing "$TRAIN_CONFIG" "$RETURN_HOME_MINUTES_OVERRIDE" "$COOLDOWN_MINUTES_OVERRIDE")
 fi
 
 CLEANING_UP=false
@@ -356,6 +424,15 @@ fi
 
 echo "=== Starting RobotServer ==="
 echo "Config: ${CONFIG}"
+if [ -n "${TRAIN_CONFIG}" ]; then
+    echo "Train timing config: ${TRAIN_CONFIG}"
+fi
+if [ -n "${RLINF_EPISODE_DURATION_S:-}" ]; then
+    echo "Episode duration: ${RLINF_EPISODE_DURATION_S}s"
+fi
+if [ -n "${RLINF_EPISODE_COOLDOWN_MINUTES:-}" ]; then
+    echo "Episode cooldown: ${RLINF_EPISODE_COOLDOWN_MINUTES} min"
+fi
 echo "Port:   ${PORT}"
 echo "Max message size: ${MAX_MESSAGE_SIZE}"
 echo ""

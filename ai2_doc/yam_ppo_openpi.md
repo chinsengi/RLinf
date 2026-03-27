@@ -71,6 +71,7 @@ Then start the desktop-side robot server:
 ```bash
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+    --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
     --use-follower-servers \
     --remote-host <tailscale-ip>
 ```
@@ -80,6 +81,7 @@ For pipeline testing without hardware:
 ```bash
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+    --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
     --dummy
 ```
 
@@ -129,12 +131,30 @@ env:
     reset_on_rollout_epoch: True
 ```
 
+Desktop server timing:
+
+```yaml
+# examples/embodiment/config/env/yam_pi05_follower.yaml
+episode_duration_s: 120
+episode_cooldown_minutes: 1
+```
+
 - Change only `env.return_home_minutes` when you want a different cadence.
+- Change only `env.server_cooldown_minutes` when you want a different restart
+  wait time on the desktop server.
 - At `10 Hz`, `40` minutes becomes `24000` steps.
-- At the end of each rollout epoch, the robot returns to the captured startup
-  home pose so the arms can rest.
-- On clean shutdown or interrupt, the desktop `RobotServer` also returns the
-  robot to home before stopping.
+- `episode_duration_s` is the desktop-side hard stop: once it expires, the
+  server returns to home, starts the cooldown countdown, then restarts from
+  home instead of continuing the old chunk.
+- `episode_cooldown_minutes` controls how long the server waits at home before
+  accepting the restarted episode. Set it to `0` for an immediate restart.
+- A Beaker-side `Ctrl+C` now asks the desktop server to return home and enter
+  zero-torque / zero-gravity while staying alive for the next client.
+- A desktop-side `Ctrl+C` still performs the full local shutdown: return home,
+  enter zero-torque, then stop the server.
+- The Beaker main process now also shows a bottom-line countdown during the
+  rollout phase so you can see the same home-return cycle from the training
+  terminal.
 
 ## Local Simulated Desktop Mode
 

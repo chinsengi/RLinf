@@ -113,11 +113,13 @@ Watch the Beaker logs for:
 # Real hardware — tunnel reconnects automatically when new Beaker jobs start
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+    --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
     --use-follower-servers
 
 # Dummy mode (no CAN bus / robot hardware needed — for pipeline testing)
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+    --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
     --dummy
 ```
 
@@ -128,12 +130,26 @@ approve it by running `touch /tmp/rlinf_approve_chunk` in another terminal:
 ```bash
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+    --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
     --use-follower-servers --verbose
 ```
 
 The server stays running indefinitely. `autossh` reconnects the reverse tunnel
 to each new Beaker job automatically (all jobs register `beaker-0`). You do not
 need to restart the robot server between Beaker job submissions.
+
+Behavior to expect:
+
+- When the desktop-side episode timer expires, the server returns both arms to
+  home, shows the configured cooldown countdown, then restarts from home.
+- `--train-config` makes the desktop server read timing from the same Beaker
+  training YAML, so `env.return_home_minutes` and `env.server_cooldown_minutes`
+  only need to be edited once.
+- If you omit `--train-config`, the launcher now defaults to
+  `examples/embodiment/config/yam_ppo_openpi.yaml`.
+- A Beaker-side `Ctrl+C` returns the robot home and switches to zero-torque
+  waiting mode without shutting down the desktop server.
+- A desktop-side `Ctrl+C` performs the full local shutdown after returning home.
 
 > **Note:** `autossh` must be installed on the desktop. The script prints
 > install instructions if it is missing.
