@@ -24,13 +24,13 @@ The following secrets must exist in the Beaker workspace:
 | Secret Name | Purpose |
 |---|---|
 | `hf_token_shirui` | HuggingFace token for model downloads |
-| `tailscale_authkey_shirui` | Tailscale auth key for container VPN setup |
+| `SHIRUI_TAILSCALE_KEY` | Tailscale auth key for container VPN setup |
 
 Create them with:
 
 ```bash
 beaker secret write hf_token_shirui "hf_..."
-beaker secret write tailscale_authkey_shirui "tskey-auth-..."
+beaker secret write SHIRUI_TAILSCALE_KEY "tskey-auth-..."
 ```
 
 Generate a Tailscale auth key at: Tailscale admin console > Settings > Keys >
@@ -48,6 +48,36 @@ session. Training is not submitted yet.
 bash scripts/submit_yam_training.sh \
     --config yam_ppo_openpi \
     --interactive --allow-dirty
+```
+
+To specify a model checkpoint and/or task description:
+
+```bash
+bash scripts/submit_yam_training.sh \
+    --config yam_ppo_openpi \
+    --model-path thomas0829/folding_towel_pi05 \
+    --task "Fold the towel." \
+    --interactive --allow-dirty
+```
+
+To run inference only (no weight updates), set `algorithm.lr=0`:
+
+```bash
+bash scripts/submit_yam_training.sh \
+    --config yam_ppo_openpi \
+    --model-path thomas0829/folding_towel_pi05 \
+    --task "Fold the towel." \
+    --interactive --allow-dirty \
+    -- algorithm.lr=0
+```
+
+Extra Hydra overrides can be passed after `--`:
+
+```bash
+bash scripts/submit_yam_training.sh \
+    --config yam_ppo_openpi \
+    --interactive --allow-dirty \
+    -- algorithm.update_epoch=2
 ```
 
 Beaker prints a session ID. Keep it for Step 4, where you will attach and start
@@ -89,6 +119,16 @@ bash scripts/start_robot_server.sh \
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
     --dummy
+```
+
+Add `--verbose` to inspect robot joint states before serving and log every
+chunk step action during execution. The first chunk will be paused until you
+approve it by running `touch /tmp/rlinf_approve_chunk` in another terminal:
+
+```bash
+bash scripts/start_robot_server.sh \
+    --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+    --use-follower-servers --verbose
 ```
 
 The server stays running indefinitely. `autossh` reconnects the reverse tunnel
