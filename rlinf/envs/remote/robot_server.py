@@ -385,19 +385,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
         with self._env_lock:
             if self._restart_required:
-                remaining_s = (
-                    self._cooldown_deadline - time.monotonic()
-                    if self._cooldown_deadline is not None
-                    else 0.0
-                )
                 obs = self._finish_restart_if_ready_locked()
                 if obs is None:
-                    if remaining_s > 0:
-                        logger.info(
-                            "[RobotServer] Cooldown active for %.1fs more — "
-                            "discarding stale chunk and holding at home.",
-                            remaining_s,
-                        )
                     obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
                 return self._build_idle_chunk_response(
                     obs, request.chunk_size, truncated=True

@@ -51,13 +51,18 @@ Optional remote-desktop simulation:
 """
 
 import json
+import signal
+import socket
 import sys
+import threading
 
+import grpc
 import hydra
 import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf
 
 from rlinf.config import validate_cfg
+from rlinf.envs.remote.proto import robot_env_pb2, robot_env_pb2_grpc
 from rlinf.envs.remote.simulated_desktop import (
     launch_simulated_desktop_server,
     stop_process,
@@ -73,6 +78,98 @@ from rlinf.workers.vlm_planner import VLMPlannerWorker
 mp.set_start_method("spawn", force=True)
 
 _VLM_PLANNER_NODE_GROUP = "beaker_vlm"
+_REMOTE_MONITOR_POLL_S = 1.0
+_REMOTE_MONITOR_CONNECT_TIMEOUT_S = 0.5
+_REMOTE_MONITOR_FAILURE_THRESHOLD = 3
+_REMOTE_SAFE_RECOVERY_TIMEOUT_S = 5.0
+_REMOTE_DISCONNECT_EVENT = threading.Event()
+
+
+def _parse_host_port(server_url: str) -> tuple[str, int]:
+    host, port_str = str(server_url).rsplit(":", 1)
+    return host, int(port_str)
+
+
+def _start_remote_disconnect_monitor(cfg):
+    """Stop Beaker training when the desktop RobotServer disappears."""
+    if str(cfg.env.train.get("env_type", "")).lower() != "remote":
+        return None, None
+
+    server_url = str(cfg.env.train.get("remote_server_url", "localhost:50051"))
+    host, port = _parse_host_port(server_url)
+    stop_event = threading.Event()
+
+    def _monitor() -> None:
+        consecutive_failures = 0
+        while not stop_event.wait(_REMOTE_MONITOR_POLL_S):
+            try:
+                with socket.create_connection(
+                    (host, port), timeout=_REMOTE_MONITOR_CONNECT_TIMEOUT_S
+                ):
+                    consecutive_failures = 0
+            except OSError:
+                consecutive_failures += 1
+                if consecutive_failures < _REMOTE_MONITOR_FAILURE_THRESHOLD:
+                    continue
+                if _REMOTE_DISCONNECT_EVENT.is_set():
+                    return
+                _REMOTE_DISCONNECT_EVENT.set()
+                print(
+                    "[train_embodied_agent_staged] Detected remote robot server "
+                    f"disconnect at {server_url}. Stopping training.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                signal.raise_signal(signal.SIGINT)
+                return
+
+    thread = threading.Thread(
+        target=_monitor,
+        name="remote-robot-server-monitor",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
+
+
+def _request_remote_safe_recovery(cfg) -> None:
+    """Ask the desktop RobotServer to enter its safe idle recovery path."""
+    if str(cfg.env.train.get("env_type", "")).lower() != "remote":
+        return
+    if _REMOTE_DISCONNECT_EVENT.is_set():
+        return
+
+    server_url = str(cfg.env.train.get("remote_server_url", "localhost:50051"))
+    max_msg = int(cfg.env.train.get("grpc_max_message_size", 64 * 1024 * 1024))
+    grpc_timeout = min(
+        float(cfg.env.train.get("grpc_timeout", _REMOTE_SAFE_RECOVERY_TIMEOUT_S)),
+        _REMOTE_SAFE_RECOVERY_TIMEOUT_S,
+    )
+    channel = grpc.insecure_channel(
+        server_url,
+        options=[
+            ("grpc.max_send_message_length", max_msg),
+            ("grpc.max_receive_message_length", max_msg),
+        ],
+    )
+    try:
+        stub = robot_env_pb2_grpc.RobotEnvServiceStub(channel)
+        stub.Close(robot_env_pb2.Empty(), timeout=grpc_timeout)
+        print(
+            "[train_embodied_agent_staged] Requested remote robot safe recovery "
+            f"at {server_url}.",
+            file=sys.stderr,
+            flush=True,
+        )
+    except grpc.RpcError as error:
+        print(
+            "[train_embodied_agent_staged] Failed to request remote robot safe "
+            f"recovery at {server_url}: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
+    finally:
+        channel.close()
 
 
 def _compute_vlm_gpu_index(cfg) -> int:
@@ -248,6 +345,8 @@ def main(cfg) -> None:
     env_group = None
     vlm_actor = None
     workers_initialized = False
+    remote_monitor_stop = None
+    remote_monitor_thread = None
     try:
         cluster = Cluster(cluster_cfg=cfg.cluster)
         component_placement = HybridComponentPlacement(cfg, cluster)
@@ -282,6 +381,9 @@ def main(cfg) -> None:
 
         runner.init_workers()
         workers_initialized = True
+        remote_monitor_stop, remote_monitor_thread = _start_remote_disconnect_monitor(
+            cfg
+        )
 
         # Wire the VLM planner into env workers after they have initialised.
         if vlm_actor is not None:
@@ -289,6 +391,11 @@ def main(cfg) -> None:
 
         runner.run()
     finally:
+        if remote_monitor_stop is not None:
+            remote_monitor_stop.set()
+        if remote_monitor_thread is not None:
+            remote_monitor_thread.join(timeout=1.0)
+        _request_remote_safe_recovery(cfg)
         if workers_initialized and env_group is not None:
             try:
                 env_group.close_envs().wait()
@@ -311,5 +418,11 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        if _REMOTE_DISCONNECT_EVENT.is_set():
+            print(
+                "Detected remote robot server disconnect. Training stopped.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from None
         print("Interrupted by user.", file=sys.stderr)
         raise SystemExit(130) from None
