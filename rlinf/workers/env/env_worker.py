@@ -171,6 +171,18 @@ class EnvWorker(Worker):
         if not self.only_eval:
             self._init_env()
 
+    def _close(self):
+        for env in getattr(self, "env_list", []):
+            try:
+                env.close()
+            except Exception:
+                pass
+        for env in getattr(self, "eval_env_list", []):
+            try:
+                env.close()
+            except Exception:
+                pass
+
     def set_vlm_planner(self, planner_handle) -> None:
         """Inject a VLMPlannerWorker Ray handle for VLM-driven features.
 
