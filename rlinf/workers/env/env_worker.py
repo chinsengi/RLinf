@@ -405,6 +405,36 @@ class EnvWorker(Worker):
                 if self.enable_offload and hasattr(self.env_list[i], "offload"):
                     self.env_list[i].offload()
 
+    def _get_zero_dones(self) -> torch.Tensor:
+        return (
+            torch.zeros((self.train_num_envs_per_stage,), dtype=bool)
+            .unsqueeze(1)
+            .repeat(1, self.cfg.actor.model.num_action_chunks)
+        )
+
+    def _reset_envs_for_next_rollout_epoch(self) -> list[EnvOutput]:
+        env_outputs: list[EnvOutput] = []
+        dones = self._get_zero_dones()
+        terminations = dones.clone()
+        truncations = dones.clone()
+        for stage_id in range(self.stage_num):
+            self.env_list[stage_id].is_start = True
+            extracted_obs, infos = self.env_list[stage_id].reset()
+            env_outputs.append(
+                EnvOutput(
+                    obs=extracted_obs,
+                    dones=dones,
+                    terminations=terminations,
+                    truncations=truncations,
+                    final_obs=infos["final_observation"]
+                    if "final_observation" in infos
+                    else None,
+                    intervene_actions=None,
+                    intervene_flags=None,
+                )
+            )
+        return env_outputs
+
     @Worker.timer("env_interact_step")
     def env_interact_step(
         self, chunk_actions: torch.Tensor, stage_id: int
@@ -747,19 +777,27 @@ class EnvWorker(Worker):
         if self._top_reward_enabled:
             self._reset_top_reward_state()
 
-        def get_zero_dones() -> torch.Tensor:
-            return (
-                torch.zeros((self.train_num_envs_per_stage,), dtype=bool)
-                .unsqueeze(1)
-                .repeat(1, self.cfg.actor.model.num_action_chunks)
-            )
+        reset_on_rollout_epoch = bool(
+            self.cfg.env.train.get("reset_on_rollout_epoch", True)
+        )
 
         env_outputs: list[EnvOutput] = []
         if not self.cfg.env.train.auto_reset:
             for stage_id in range(self.stage_num):
-                self.env_list[stage_id].is_start = True
-                extracted_obs, infos = self.env_list[stage_id].reset()
-                dones = get_zero_dones()
+                should_reset = (
+                    reset_on_rollout_epoch or len(self.last_obs_list) <= stage_id
+                )
+                if should_reset:
+                    self.env_list[stage_id].is_start = True
+                    extracted_obs, infos = self.env_list[stage_id].reset()
+                    intervene_actions = None
+                    intervene_flags = None
+                else:
+                    extracted_obs = self.last_obs_list[stage_id]
+                    infos = {}
+                    intervene_actions = self.last_intervened_info_list[stage_id][0]
+                    intervene_flags = self.last_intervened_info_list[stage_id][1]
+                dones = self._get_zero_dones()
                 terminations = dones.clone()
                 truncations = dones.clone()
 
@@ -771,12 +809,12 @@ class EnvWorker(Worker):
                     final_obs=infos["final_observation"]
                     if "final_observation" in infos
                     else None,
-                    intervene_actions=None,
-                    intervene_flags=None,
+                    intervene_actions=intervene_actions,
+                    intervene_flags=intervene_flags,
                 )
                 env_outputs.append(env_output)
         else:
-            dones = get_zero_dones()
+            dones = self._get_zero_dones()
             terminations = dones.clone()
             truncations = dones.clone()
 
@@ -937,6 +975,11 @@ class EnvWorker(Worker):
                     rewards=rewards,
                 )
                 self.rollout_results[stage_id].append_step_result(chunk_step_result)
+
+            if not self.cfg.env.train.auto_reset and self.cfg.env.train.get(
+                "reset_on_rollout_epoch_end", False
+            ):
+                env_outputs = self._reset_envs_for_next_rollout_epoch()
 
             self.store_last_obs_and_intervened_info(env_outputs)
             self.finish_rollout()
