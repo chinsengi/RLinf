@@ -50,6 +50,8 @@ def _make_timeout_env() -> tuple[YAMEnv, _FakeRobotEnvForTimeout]:
     env._num_steps = 0
     env._logger = Mock()
     env._task_description = ""
+    env.auto_reset = False
+    env.ignore_terminations = False
     env._reset_metrics = Mock()
     env._record_metrics = lambda reward, terminations, intervene, infos: infos
     env._wrap_obs = lambda raw_obs: raw_obs
@@ -133,6 +135,19 @@ def test_close_rpc_triggers_safe_recovery_without_requesting_shutdown():
     assert env.prepare_for_reconnection_calls == 1
     assert servicer._restart_required is True
     request_shutdown.assert_not_called()
+
+
+def test_get_observation_returns_current_obs_without_resetting_robot():
+    env = _FakeServicerEnv()
+    servicer = RobotEnvServicer(env)
+
+    response = servicer.GetObservation(None, None)
+
+    assert response.img_height == 2
+    assert response.img_width == 2
+    assert env.return_home_calls == 0
+    assert env.zero_torque_calls == 0
+    assert env.chunk_step_calls == 0
 
 
 def test_chunk_step_discards_stale_actions_while_cooldown_is_active():

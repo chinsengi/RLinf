@@ -367,6 +367,18 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             jpeg_quality=self._jpeg_quality,
         )
 
+    def GetObservation(self, request, context):
+        self._touch()
+        with self._env_lock:
+            obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
+        return _obs_to_proto(
+            obs,
+            self._env._img_h,
+            self._env._img_w,
+            compress=self._compress,
+            jpeg_quality=self._jpeg_quality,
+        )
+
     def ChunkStep(self, request, context):
         self._touch()
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(

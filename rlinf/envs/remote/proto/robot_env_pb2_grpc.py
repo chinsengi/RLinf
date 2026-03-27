@@ -39,6 +39,11 @@ class RobotEnvServiceStub(object):
                 request_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.SerializeToString,
                 response_deserializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.SpacesResponse.FromString,
                 _registered_method=True)
+        self.GetObservation = channel.unary_unary(
+                '/robot_env.RobotEnvService/GetObservation',
+                request_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.SerializeToString,
+                response_deserializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Observation.FromString,
+                _registered_method=True)
         self.Reset = channel.unary_unary(
                 '/robot_env.RobotEnvService/Reset',
                 request_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.ResetRequest.SerializeToString,
@@ -71,6 +76,13 @@ class RobotEnvServiceServicer(object):
 
     def GetSpaces(self, request, context):
         """Return observation and action space metadata.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetObservation(self, request, context):
+        """Return the current observation without resetting or stepping the robot.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -118,6 +130,11 @@ def add_RobotEnvServiceServicer_to_server(servicer, server):
                     servicer.GetSpaces,
                     request_deserializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.FromString,
                     response_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.SpacesResponse.SerializeToString,
+            ),
+            'GetObservation': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetObservation,
+                    request_deserializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.FromString,
+                    response_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Observation.SerializeToString,
             ),
             'Reset': grpc.unary_unary_rpc_method_handler(
                     servicer.Reset,
@@ -172,6 +189,33 @@ class RobotEnvService(object):
             '/robot_env.RobotEnvService/GetSpaces',
             rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.SerializeToString,
             rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.SpacesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetObservation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/robot_env.RobotEnvService/GetObservation',
+            rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.SerializeToString,
+            rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Observation.FromString,
             options,
             channel_credentials,
             insecure,
