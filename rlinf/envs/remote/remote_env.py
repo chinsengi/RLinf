@@ -41,6 +41,15 @@ from rlinf.utils.logging import get_logger
 _DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024
 
 
+class RobotServerDisconnectedError(RuntimeError):
+    """Raised when the remote robot server becomes unreachable.
+
+    This exception is intentionally plain (no gRPC objects) so that Ray
+    can pickle it across worker boundaries without hitting
+    ``cannot pickle '_thread.RLock'``.
+    """
+
+
 def _decompress_image(data: bytes, height: int, width: int) -> np.ndarray:
     """Decode JPEG bytes to uint8 HWC numpy array."""
     import cv2
@@ -274,7 +283,13 @@ class RemoteEnv(gym.Env):
         req = robot_env_pb2.ResetRequest()
         if seed is not None:
             req.seed = seed
-        proto_obs = self._stub.Reset(req, timeout=self._timeout)
+        try:
+            proto_obs = self._stub.Reset(req, timeout=self._timeout)
+        except grpc.RpcError as e:
+            raise RobotServerDisconnectedError(
+                f"[RemoteEnv] Robot server disconnected during Reset "
+                f"(gRPC {e.code().name}). Check the local robot server terminal."
+            ) from None
         obs = _proto_to_obs(proto_obs)
         # Always inject the locally-tracked task_description. The server proto
         # may omit this field if the underlying env does not include
@@ -338,7 +353,13 @@ class RemoteEnv(gym.Env):
             chunk_size=chunk_size,
             action_dim=action_dim,
         )
-        resp = self._stub.ChunkStep(req, timeout=self._timeout * chunk_size)
+        try:
+            resp = self._stub.ChunkStep(req, timeout=self._timeout * chunk_size)
+        except grpc.RpcError as e:
+            raise RobotServerDisconnectedError(
+                f"[RemoteEnv] Robot server disconnected during ChunkStep "
+                f"(gRPC {e.code().name}). Check the local robot server terminal."
+            ) from None
 
         obs_list = []
         rewards = []
@@ -413,7 +434,10 @@ class RemoteEnv(gym.Env):
         )
 
     def close(self):
-        self._stub.Close(robot_env_pb2.Empty(), timeout=self._timeout)
+        try:
+            self._stub.Close(robot_env_pb2.Empty(), timeout=self._timeout)
+        except grpc.RpcError:
+            pass
         self._channel.close()
 
     # ------------------------------------------------------------------
@@ -491,12 +515,15 @@ class RemoteEnv(gym.Env):
     @task_description.setter
     def task_description(self, value: str) -> None:
         self._task_description = str(value)
-        self._stub.SetTaskDescription(
-            robot_env_pb2.TaskDescriptionRequest(
-                task_description=self._task_description
-            ),
-            timeout=self._timeout,
-        )
+        try:
+            self._stub.SetTaskDescription(
+                robot_env_pb2.TaskDescriptionRequest(
+                    task_description=self._task_description
+                ),
+                timeout=self._timeout,
+            )
+        except grpc.RpcError:
+            pass
 
     @property
     def task_descriptions(self) -> list[str]:

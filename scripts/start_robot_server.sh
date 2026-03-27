@@ -335,7 +335,13 @@ if [ "$USE_FOLLOWER_SERVERS" = true ] && [ "$DUMMY" = false ]; then
     [ -n "$GRIPPER_OPEN" ] && FOLLOWER_ARGS+=(--gripper-open "$GRIPPER_OPEN")
     [ -n "$GRIPPER_CLOSE" ] && FOLLOWER_ARGS+=(--gripper-close "$GRIPPER_CLOSE")
 
-    python scripts/start_yam_follower_servers.py "${FOLLOWER_ARGS[@]}" &
+    # Start follower servers immune to SIGINT so that Ctrl+C on the
+    # terminal only reaches the robot server.  The robot server returns
+    # the arms home while the follower servers are still alive, then the
+    # cleanup() function terminates the follower servers afterwards.
+    # (Python preserves SIG_IGN across exec, so the launcher and its
+    # children stay immune to the terminal interrupt.)
+    (trap '' INT; exec python scripts/start_yam_follower_servers.py "${FOLLOWER_ARGS[@]}") &
     FOLLOWER_PID=$!
     echo "Follower launcher PID: ${FOLLOWER_PID}"
     echo "Waiting for follower servers on localhost:1234 and localhost:1235..."
