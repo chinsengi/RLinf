@@ -178,6 +178,88 @@ class Client:
             pass
 
 
+def shutdown_background_process(proc: Any, timeout: float = 2.0) -> None:
+    """Best-effort shutdown for portal, subprocess, or multiprocessing workers."""
+    if proc is None:
+        return
+
+    running = None
+    if hasattr(proc, "running"):
+        try:
+            running = bool(proc.running)
+        except Exception:
+            running = None
+    elif hasattr(proc, "poll"):
+        try:
+            running = proc.poll() is None
+        except Exception:
+            running = None
+    elif hasattr(proc, "is_alive"):
+        try:
+            running = bool(proc.is_alive())
+        except Exception:
+            running = None
+
+    if running is False:
+        join = getattr(proc, "join", None)
+        if callable(join):
+            try:
+                join(timeout=timeout)
+            except Exception:
+                pass
+        return
+
+    if hasattr(proc, "running") and callable(getattr(proc, "kill", None)):
+        try:
+            proc.kill(timeout=timeout)
+            return
+        except TypeError:
+            proc.kill()
+            return
+
+    terminate = getattr(proc, "terminate", None)
+    if callable(terminate):
+        try:
+            terminate()
+        except Exception:
+            pass
+
+    wait = getattr(proc, "wait", None)
+    if callable(wait):
+        try:
+            wait(timeout=timeout)
+            return
+        except Exception:
+            pass
+
+    join = getattr(proc, "join", None)
+    if callable(join):
+        try:
+            join(timeout=timeout)
+        except Exception:
+            pass
+
+    kill = getattr(proc, "kill", None)
+    if callable(kill):
+        try:
+            kill()
+        except TypeError:
+            kill(timeout=timeout)
+        except Exception:
+            pass
+
+    if callable(wait):
+        try:
+            wait(timeout=timeout)
+        except Exception:
+            pass
+    elif callable(join):
+        try:
+            join(timeout=timeout)
+        except Exception:
+            pass
+
+
 @contextmanager
 def return_futures(*clients: Client):
     """Context manager to set use_future=True for all provided Client instances."""

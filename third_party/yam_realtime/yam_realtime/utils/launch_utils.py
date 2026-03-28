@@ -18,6 +18,7 @@ from yam_realtime.utils.portal_utils import (
     Client,
     RemoteServer,
     launch_remote_get_local_handler,
+    shutdown_background_process,
 )
 
 # Create logger for this module
@@ -215,18 +216,9 @@ def cleanup_processes(agent: Any, server_processes: List[Any]) -> None:
     except Exception as e:
         logger.warning(f"Error closing agent: {e}")
 
-    # Terminate server processes and wait for them to finish
-    import time
     for server_process in server_processes:
         try:
-            if server_process and server_process.is_alive():
-                server_process.terminate()  # Send SIGTERM first
-                server_process.join(timeout=2)  # Wait up to 2 seconds
-                
-                # If still alive, force kill
-                if server_process.is_alive():
-                    server_process.kill()
-                    server_process.join(timeout=1)  # Wait for kill to complete
+            shutdown_background_process(server_process, timeout=2.0)
         except Exception as e:
             logger.warning(f"Error terminating server process: {e}")
 

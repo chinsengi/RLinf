@@ -102,9 +102,19 @@ class RealsenseCamera(CameraDriver):
 
     def stop(self) -> None:
         try:
-            self._pipeline.stop()
+            pipeline = getattr(self, "_pipeline", None)
+            if pipeline is not None:
+                pipeline.stop()
         except Exception:
             pass
+        finally:
+            self._pipeline = None
+
+    def close(self) -> None:
+        self.stop()
+
+    def __del__(self) -> None:
+        self.stop()
 
     def read_calibration_data_intrinsics(self) -> dict[str, Any]:
         import pyrealsense2 as rs

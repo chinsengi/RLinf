@@ -255,6 +255,7 @@ class YAMEnv(gym.Env):
                 initialize_robots,
                 initialize_sensors,
             )
+            from yam_realtime.utils.portal_utils import shutdown_background_process
         except ImportError as e:
             raise ImportError(
                 "yam_realtime must be installed to run YAMEnv with real hardware. "
@@ -262,6 +263,7 @@ class YAMEnv(gym.Env):
             ) from e
 
         self._server_processes: list = []
+        self._shutdown_background_process = shutdown_background_process
 
         # Robot configs: mapping of arm name to config file path list(s).
         # E.g. robot_cfgs: {left: ["/path/to/left.yaml"], right: ["/path/to/right.yaml"]}
@@ -735,11 +737,9 @@ class YAMEnv(gym.Env):
         self._dummy_cameras = {}
         for proc in getattr(self, "_server_processes", []):
             try:
-                if proc is not None and proc.is_alive():
-                    proc.terminate()
-                    proc.join(timeout=2)
-                    if proc.is_alive():
-                        proc.kill()
+                shutdown_process = getattr(self, "_shutdown_background_process", None)
+                if callable(shutdown_process):
+                    shutdown_process(proc, timeout=2.0)
             except Exception:
                 pass
 
