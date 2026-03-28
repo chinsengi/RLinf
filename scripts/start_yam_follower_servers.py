@@ -233,7 +233,12 @@ def main() -> None:
         terminate_processes(processes)
         raise SystemExit(0)
 
-    signal.signal(signal.SIGINT, _shutdown)
+    # Preserve an inherited SIG_IGN for SIGINT (set by the shell via
+    # ``trap '' INT`` in start_robot_server.sh) so that Ctrl+C on the
+    # terminal does not reach the launcher.  The shell's cleanup() function
+    # sends SIGTERM after the robot server has finished returning home.
+    if signal.getsignal(signal.SIGINT) != signal.SIG_IGN:
+        signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
     print("[FollowerServers] Launching follower arm servers...", flush=True)
@@ -256,7 +261,10 @@ def main() -> None:
         print(
             f"[FollowerServers] Starting {side} follower: {' '.join(cmd)}", flush=True
         )
-        process = subprocess.Popen(cmd)
+        # start_new_session=True puts each follower server in its own
+        # process group/session so terminal SIGINT never reaches it.
+        # Shutdown is driven exclusively by terminate_processes() on SIGTERM.
+        process = subprocess.Popen(cmd, start_new_session=True)
         processes.append(process)
 
     try:
