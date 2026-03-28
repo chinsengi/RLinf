@@ -98,6 +98,7 @@ class _FakeServicerEnv:
         self.prepare_for_reconnection_calls = 0
         self.prepare_for_next_episode_calls = 0
         self.chunk_step_calls = 0
+        self.reset_calls = 0
 
     def _dummy_obs(self):
         return {"raw": True}
@@ -124,6 +125,10 @@ class _FakeServicerEnv:
     def chunk_step(self, actions):
         self.chunk_step_calls += 1
         raise AssertionError("chunk_step should not run while restart is pending")
+
+    def reset(self):
+        self.reset_calls += 1
+        return self._wrap_obs(self._dummy_obs()), {}
 
 
 def test_close_rpc_triggers_safe_recovery_without_requesting_shutdown():
@@ -199,3 +204,17 @@ def test_episode_timeout_enters_zero_torque_during_cooldown_restart():
     assert env.zero_torque_calls == 1
     assert env.prepare_for_next_episode_calls == 1
     assert servicer._restart_required is True
+
+
+def test_poll_restart_if_ready_finishes_cooldown_without_waiting_for_client_rpc():
+    env = _FakeServicerEnv()
+    servicer = RobotEnvServicer(env)
+    servicer._restart_required = True
+    servicer._cooldown_deadline = time.monotonic() - 1.0
+
+    obs = servicer.poll_restart_if_ready()
+
+    assert env.reset_calls == 1
+    assert servicer._restart_required is False
+    assert servicer._cooldown_deadline is None
+    assert obs is not None

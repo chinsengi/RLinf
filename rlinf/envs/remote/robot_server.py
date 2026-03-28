@@ -288,6 +288,11 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         logger.info("[RobotServer] Episode/session restarted from home.")
         return obs
 
+    def poll_restart_if_ready(self) -> dict | None:
+        """Finish a cooldown-driven restart outside request handlers when ready."""
+        with self._env_lock:
+            return self._finish_restart_if_ready_locked()
+
     def GetSpaces(self, request, context):
         self._touch()
         obs_space = self._env.observation_space
@@ -678,6 +683,7 @@ def serve(
                     sys.stdout.flush()
                     last_line_len = len(line)
                     continue
+                servicer.poll_restart_if_ready()
             if start is None:
                 # Clear the timer line when no episode is active.
                 if last_line_len > 0:
