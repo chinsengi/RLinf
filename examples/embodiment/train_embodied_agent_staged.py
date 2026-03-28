@@ -67,11 +67,17 @@ from rlinf.envs.remote.simulated_desktop import (
     launch_simulated_desktop_server,
     stop_process,
 )
+from rlinf.runners.async_ppo_embodied_runner import AsyncPPOEmbodiedRunner
 from rlinf.runners.embodied_runner import EmbodiedRunner
 from rlinf.scheduler import AcceleratorUtil, Cluster, PackedPlacementStrategy
 from rlinf.utils.placement import HybridComponentPlacement
+from rlinf.workers.actor.async_ppo_fsdp_worker import AsyncPPOEmbodiedFSDPActor
 from rlinf.workers.actor.fsdp_actor_worker import EmbodiedFSDPActor
+from rlinf.workers.env.async_env_worker import AsyncEnvWorker
 from rlinf.workers.env.env_worker import EnvWorker
+from rlinf.workers.rollout.hf.async_huggingface_worker import (
+    AsyncMultiStepRolloutWorker,
+)
 from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
 from rlinf.workers.vlm_planner import VLMPlannerWorker
 
@@ -83,6 +89,11 @@ _REMOTE_MONITOR_CONNECT_TIMEOUT_S = 0.5
 _REMOTE_MONITOR_FAILURE_THRESHOLD = 3
 _REMOTE_SAFE_RECOVERY_TIMEOUT_S = 5.0
 _REMOTE_DISCONNECT_EVENT = threading.Event()
+
+
+def _use_async_embodied_runtime(cfg) -> bool:
+    """Return whether this staged config should run on the async PPO stack."""
+    return str(cfg.algorithm.get("loss_type", "")).lower() == "decoupled_actor_critic"
 
 
 def _parse_host_port(server_url: str) -> tuple[str, int]:
@@ -375,29 +386,38 @@ def main(cfg) -> None:
     try:
         cluster = Cluster(cluster_cfg=cfg.cluster)
         component_placement = HybridComponentPlacement(cfg, cluster)
+        use_async_runtime = _use_async_embodied_runtime(cfg)
         # Load the VLM planner before worker init so model startup completes
         # before the desktop-side robot session begins moving.
         vlm_actor = _launch_vlm_planner(cfg, cluster)
 
         # Create actor worker group (FSDP training on Beaker).
         actor_placement = component_placement.get_strategy("actor")
-        actor_group = EmbodiedFSDPActor.create_group(cfg).launch(
+        actor_worker_cls = (
+            AsyncPPOEmbodiedFSDPActor if use_async_runtime else EmbodiedFSDPActor
+        )
+        actor_group = actor_worker_cls.create_group(cfg).launch(
             cluster, name=cfg.actor.group_name, placement_strategy=actor_placement
         )
 
         # Create rollout worker group (inference).
         rollout_placement = component_placement.get_strategy("rollout")
-        rollout_group = MultiStepRolloutWorker.create_group(cfg).launch(
+        rollout_worker_cls = (
+            AsyncMultiStepRolloutWorker if use_async_runtime else MultiStepRolloutWorker
+        )
+        rollout_group = rollout_worker_cls.create_group(cfg).launch(
             cluster, name=cfg.rollout.group_name, placement_strategy=rollout_placement
         )
 
         # Create env worker group (direct YAMEnv or RemoteEnv per config).
         env_placement = component_placement.get_strategy("env")
-        env_group = EnvWorker.create_group(cfg).launch(
+        env_worker_cls = AsyncEnvWorker if use_async_runtime else EnvWorker
+        env_group = env_worker_cls.create_group(cfg).launch(
             cluster, name=cfg.env.group_name, placement_strategy=env_placement
         )
 
-        runner = EmbodiedRunner(
+        runner_cls = AsyncPPOEmbodiedRunner if use_async_runtime else EmbodiedRunner
+        runner = runner_cls(
             cfg=cfg,
             actor=actor_group,
             rollout=rollout_group,

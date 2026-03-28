@@ -1,6 +1,7 @@
-# YAM bimanual robot – PPO with TOPReward dense reward and π₀.5 (OpenPI) policy.
+# YAM bimanual robot – async PPO with TOPReward dense reward and π₀.5 (OpenPI) policy.
 #
-# Algorithm: PPO with GAE advantage, value head on VLM features, and dense
+# Algorithm: async PPO with decoupled actor-critic, GAE advantage, value head
+#            on VLM features, and dense
 #            TOPReward progress signal computed via VLM True-token log-prob.
 #
 # TOPReward design:
@@ -90,6 +91,7 @@ algorithm:
   kl_penalty: kl
   group_size: 1
   reward_coef: 1.0
+  staleness_threshold: 1
 
   rollout_epoch: 1
   eval_rollout_epoch: 1
@@ -100,7 +102,7 @@ algorithm:
 
   update_epoch: 5
   adv_type: gae
-  loss_type: actor_critic
+  loss_type: decoupled_actor_critic
   loss_agg_func: "token-mean"
 
   bootstrap_type: always

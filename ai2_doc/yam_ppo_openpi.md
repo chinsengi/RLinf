@@ -153,6 +153,9 @@ client_idle_timeout_s: 0
   so the server keeps running until you explicitly stop it. Set a positive
   number of seconds only if you want automatic safe recovery after a silent
   Beaker disconnect.
+- The YAM OpenPI training configs now use the async PPO runtime
+  (`algorithm.loss_type: decoupled_actor_critic`) so the robot can keep
+  executing rollout chunks while actor training runs in the background.
 - A Beaker-side `Ctrl+C` now asks the desktop server to return home and enter
   zero-torque / zero-gravity while staying alive for the next client.
 - A desktop-side `Ctrl+C` still performs the full local shutdown: return home,

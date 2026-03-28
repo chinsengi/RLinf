@@ -1,6 +1,6 @@
-# YAM bimanual robot – PPO training with π₀.5 (OpenPI) policy, RemoteEnv, and TOPReward.
+# YAM bimanual robot – async PPO training with π₀.5 (OpenPI), RemoteEnv, and TOPReward.
 #
-# Algorithm: PPO with GAE advantage and value head.
+# Algorithm: async PPO with decoupled actor-critic, GAE advantage, and value head.
 # Reward:    TOPReward dense progress signal (Qwen3-VL-8B).
 #            No custom reward code required.
 #
@@ -86,6 +86,7 @@ algorithm:
   kl_penalty: kl
   group_size: 1
   reward_coef: 1.0
+  staleness_threshold: 1
 
   rollout_epoch: 1
   eval_rollout_epoch: 1
@@ -96,7 +97,7 @@ algorithm:
 
   update_epoch: 5
   adv_type: gae
-  loss_type: actor_critic
+  loss_type: decoupled_actor_critic
   loss_agg_func: "token-mean"
 
   bootstrap_type: always
