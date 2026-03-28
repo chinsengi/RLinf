@@ -50,6 +50,7 @@ Optional remote-desktop simulation:
     still talks gRPC, but no real desktop machine or SSH tunnel is required.
 """
 
+import _thread
 import json
 import signal
 import socket
@@ -137,7 +138,7 @@ def _start_remote_disconnect_monitor(cfg):
                     file=sys.stderr,
                     flush=True,
                 )
-                signal.raise_signal(signal.SIGINT)
+                _thread.interrupt_main()
                 return
 
     thread = threading.Thread(
