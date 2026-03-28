@@ -139,6 +139,25 @@ def _unnormalize_quantiles(
     return (tensor + 1.0) * denom / 2.0 + q01
 
 
+def _compute_flow_cps_schedule(
+    t_input: torch.Tensor,
+    delta: torch.Tensor,
+    noise_level: torch.Tensor | float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute the constant-preserving PPO schedule used by legacy OpenPI."""
+    if not torch.is_tensor(noise_level):
+        noise_level = torch.tensor(
+            noise_level, device=t_input.device, dtype=torch.float32
+        )
+    noise_level = noise_level.to(device=t_input.device, dtype=t_input.dtype)
+    cos_term = torch.cos(torch.pi * noise_level / 2)
+    sin_term = torch.sin(torch.pi * noise_level / 2)
+    x0_weight = torch.ones_like(t_input) - (t_input - delta)
+    x1_weight = (t_input - delta) * cos_term
+    x_t_std = (t_input - delta) * sin_term
+    return x0_weight, x1_weight, x_t_std
+
+
 def _pad_vector(vector: torch.Tensor, new_dim: int) -> torch.Tensor:
     if vector.shape[-1] >= new_dim:
         return vector
@@ -535,6 +554,12 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
                 x0_weight = 1 - (t_input - delta)
                 x1_weight = t_input - delta
                 x_t_std = self.noise_head(suffix_out)
+            elif self.noise_method == "flow_cps":
+                x0_weight, x1_weight, x_t_std = _compute_flow_cps_schedule(
+                    t_input=t_input,
+                    delta=delta,
+                    noise_level=self.noise_level,
+                )
             else:
                 raise ValueError(
                     f"Unsupported PI05 PPO noise method: {self.noise_method}"
