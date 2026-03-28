@@ -72,9 +72,6 @@ class YAMFollowerClient(YamRealtimeClient):
             "vel": Array(shape=(self.num_dofs(),), dtype=np.float32),
         }
 
-    def get_robot_info(self) -> dict[str, Any]:
-        return {}
-
     def get_robot_type(self) -> RobotType:
         return RobotType.ARM
 
