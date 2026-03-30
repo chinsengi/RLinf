@@ -268,11 +268,80 @@ For the shipped `yam_ppo_openpi_subtask_{async,sync}` configs (`max_steps_per_ro
 
 `compute_top_reward()` is called **synchronously** in the rollout loop — each chunk step blocks on Qwen3-VL-8B inference (~200–400 ms). The `_episode_frames` buffer in `EnvWorker` is an in-process list, not a standalone Ray actor. This is a known limitation; decoupling it for async reward scoring is a future improvement.
 
-### TOPReward requires the `transformers` backend
+### TOPReward backend support
 
-`VLMPlannerWorker.compute_top_reward()` requires `vlm_planner.backend: "transformers"` — it performs a **forward pass** to extract log-probabilities, not a generation call. When `backend: "sglang"`, `compute_top_reward()` logs a warning and returns `0.0`. Both YAM configs set `backend: "transformers"`. If you switch to `sglang` for faster subtask generation, TOPReward will yield zero rewards every step (warning logged, but training continues without crashing).
+`VLMPlannerWorker.compute_top_reward()` now supports both `vlm_planner.backend: "transformers"` and `vlm_planner.backend: "sglang_http"`.
+
+With `backend: "transformers"`, the worker loads Qwen3-VL locally and computes the score from the model forward pass. With `backend: "sglang_http"`, the worker still performs local Qwen-VL preprocessing, then calls an external SGLang `/generate` endpoint and reads input-side log-probabilities for the final `True` token. This keeps the heavy SGLang runtime in a separate process / environment while preserving TOPReward semantics.
 
 Similarly, `compute_top_reward()` returns `0.0` on any exception (network error, OOM, etc.) with only a warning log — training continues but reward signal is lost for that step.
+
+### External SGLang serve validation
+
+Validation for the new planner path was done against a real external SGLang server running in a separate environment.
+
+Required SGLang checkout:
+
+```bash
+git clone --branch sglang-http https://github.com/xslingcn/sglang.git ../sglang
+cd ../sglang
+```
+
+Use `xslingcn/sglang` branch `sglang-http` for this path.
+
+A representative launch command was:
+
+```bash
+cd ../sglang
+python -m sglang.launch_server \
+    --model-path ~/Model/qwen-vl-instruct \
+    --host 127.0.0.1 \
+    --port 30000 \
+    --skip-tokenizer-init
+```
+
+`VLMPlannerWorker` then used:
+
+```yaml
+vlm_planner:
+  backend: "sglang_http"
+  server_url: "http://127.0.0.1:30000"
+  request_timeout: 120.0
+```
+
+This path performs all Qwen-VL preprocessing inside `VLMPlannerWorker`, sends tokenized `input_ids` plus multimodal `processor_output` payloads to SGLang `/generate`, and keeps the SGLang runtime fully outside the RLinf environment.
+
+Real smoke tests over the external server succeeded:
+
+- planning smoke (`Qwen/Qwen2-VL-2B-Instruct`): `get_next_subtask()` returned `Pick up the red object from the table`
+- TOPReward smoke (`Qwen/Qwen2-VL-2B-Instruct`): `compute_top_reward()` returned `-0.31696125864982605`
+
+Note: this validation used the local `../sglang` checkout from the branch above.
+
+### Numerical alignment vs `../TOPReward`
+
+To check semantic alignment, the external-SGLang path was compared against the standalone `../TOPReward` implementation using the same local Qwen-VL model (`~/Model/qwen-vl-instruct`) and the same synthetic video-frame inputs.
+
+The most apples-to-apples comparison used RLinf+SGLang at `24 fps`, because the current `../TOPReward` numpy-frame path falls back to `24 fps` when `video_metadata` is absent. Results:
+
+| case | `../TOPReward` | RLinf + `sglang_http` (`24 fps`) | delta |
+|---|---:|---:|---:|
+| `all_red_match` | `-22.750` | `-22.500` | `+0.250` |
+| `all_red_mismatch` | `-23.000` | `-22.875` | `+0.125` |
+| `all_green_match` | `-22.000` | `-21.875` | `+0.125` |
+| `all_green_mismatch` | `-22.875` | `-23.125` | `-0.250` |
+| `red_to_green_green` | `-23.625` | `-23.625` | `+0.000` |
+| `red_to_green_red` | `-24.125` | `-24.125` | `+0.000` |
+| `red_green_red_red` | `-22.125` | `-22.375` | `-0.250` |
+| `rgb_blue` | `-22.625` | `-22.875` | `-0.250` |
+
+Observed drift summary:
+
+- mean absolute delta: `0.15625`
+- max absolute delta: `0.25`
+- all observed deltas were multiples of `0.125`
+
+For reference, running RLinf+SGLang at the nominal `2 fps` input rate produced the same mean absolute delta (`0.15625`) but one outlier reached `0.625`; that larger gap matches the `../TOPReward` fallback-to-`24 fps` behavior rather than a planner/TOPReward semantic mismatch.
 
 ### `reward_scale` configuration path
 

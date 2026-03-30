@@ -33,8 +33,9 @@ This Ray actor runs on the Beaker GPU node and exposes three methods:
    Called by ``EnvWorker._compute_top_reward()`` every chunk step when
    ``top_reward_enabled: True`` (both YAM training configs).
 
-The worker loads a local Qwen3-VL-8B vision-language model (no external API
-required) and is placed on a dedicated GPU node.
+The worker either loads a local Qwen3-VL vision-language model or performs
+local Qwen-VL preprocessing before calling an external SGLang server. In staged
+embodied training it is placed on a dedicated GPU node.
 
 Architecture (active call paths for YAM)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -56,7 +57,14 @@ Configuration (under ``vlm_planner`` in the top-level YAML):
         Must be a vision-language model — image inputs are required for
         subtask planning and TOPReward scoring.
     backend: str
-        Inference backend: "transformers" (default) or "sglang".
+        Inference backend:
+        - ``"transformers"`` (default): load the VLM directly in this worker.
+        - ``"sglang_http"``: call an external SGLang HTTP server running in a
+          separate Python environment / process.
+    server_url: str
+        Base URL of the external SGLang server when ``backend: sglang_http``.
+    request_timeout: float
+        Timeout in seconds for SGLang HTTP requests.
     dtype: str
         Torch dtype string: "bfloat16" (default), "float16", or "float32".
     max_new_tokens_subtask: int
@@ -86,11 +94,15 @@ Example YAML::
       top_reward_max_frames: 1000
 """
 
+import json
 import os
 import sys
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import numpy as np
 from omegaconf import DictConfig
@@ -110,6 +122,29 @@ You are an AI evaluator for a bimanual robot arm. \
 You will be shown images from the robot's cameras and a description of the subtask that was attempted. \
 Decide whether the robot successfully completed the subtask. \
 Reply with ONLY "success" or "failure" — no other text."""
+_TOPREWARD_PROMPT_PREFIX = (
+    "The above video shows a robot manipulation trajectory that completes "
+    "the following task: "
+)
+
+_THINK_CLOSE_TAG = "</think>"
+
+
+@dataclass(slots=True)
+class _PreparedSGLangRequest:
+    """One preprocessed SGLang request ready for token-in generation."""
+
+    input_ids: list[int]
+    image_data: Optional[list[dict[str, Any]]] = None
+    video_data: Optional[list[dict[str, Any]]] = None
+
+
+def _strip_thinking_output(text: str) -> str:
+    """Return the final assistant answer after an optional reasoning block."""
+    stripped = text.strip()
+    if _THINK_CLOSE_TAG in stripped:
+        return stripped.split(_THINK_CLOSE_TAG, 1)[1].strip()
+    return stripped
 
 
 def _process_vision_info_compat(process_vision_info, messages):
@@ -193,7 +228,7 @@ class VLMPlannerWorker:
         self._model_path: str = planner_cfg.get(
             "model_path", "Qwen/Qwen3-VL-8B-Instruct"
         )
-        self._backend: str = planner_cfg.get("backend", "transformers")
+        self._backend: str = str(planner_cfg.get("backend", "transformers")).lower()
         self._dtype_str: str = planner_cfg.get("dtype", "bfloat16")
         self._max_new_tokens_subtask: int = int(
             planner_cfg.get("max_new_tokens_subtask", 64)
@@ -212,21 +247,49 @@ class VLMPlannerWorker:
         self._top_reward_max_frames: int = int(
             planner_cfg.get("top_reward_max_frames", 16)
         )
+        self._top_reward_reward_scale: float = float(
+            planner_cfg.get("reward_scale", 1.0)
+        )
+        self._top_reward_label: str = str(planner_cfg.get("top_reward_label", "True"))
         self._transformers_runtime_path: Optional[str] = planner_cfg.get(
             "transformers_runtime_path", None
         )
+        self._sglang_server_url: str = str(planner_cfg.get("server_url", "")).strip()
+        self._sglang_request_timeout: float = float(
+            planner_cfg.get("request_timeout", 120.0)
+        )
+        self._sglang_generate_path: str = str(
+            planner_cfg.get("generate_path", "/generate")
+        )
+        self._sglang_api_key: Optional[str] = planner_cfg.get("api_key", None)
 
-        if self._backend == "sglang":
-            self._load_sglang_backend()
+        if self._backend in {"sglang", "sglang_local", "sglang_server"}:
+            if not self._sglang_server_url:
+                raise ValueError(
+                    "Local in-process SGLang backends ('sglang', "
+                    "'sglang_local', 'sglang_server') were removed. "
+                    "Use backend='sglang_http' and set vlm_planner.server_url."
+                )
+            self._logger.warning(
+                "[VLMPlannerWorker] backend='%s' is deprecated. "
+                "Using backend='sglang_http' because server_url is set.",
+                self._backend,
+            )
+            self._backend = "sglang_http"
+            self._load_sglang_http_backend()
+        elif self._backend == "sglang_http":
+            self._load_sglang_http_backend()
         else:
+            self._backend = "transformers"
             self._load_transformers_backend()
 
         if self._top_reward_enabled:
-            from rlinf.algorithms.rewards.top_reward import TOPReward
+            if self._backend == "transformers":
+                from rlinf.algorithms.rewards.top_reward import TOPReward
 
-            self._top_reward = TOPReward(
-                planner_cfg, model=self._model, processor=self._processor
-            )
+                self._top_reward = TOPReward(
+                    planner_cfg, model=self._model, processor=self._processor
+                )
             self._logger.info("[VLMPlannerWorker] TOPReward enabled.")
 
     # ------------------------------------------------------------------
@@ -235,10 +298,8 @@ class VLMPlannerWorker:
 
     def _load_transformers_backend(self) -> None:
         """Load Qwen model via HuggingFace Transformers."""
-        self._activate_transformers_runtime_path()
-
         import torch
-        from transformers import AutoModelForImageTextToText, AutoProcessor
+        from transformers import AutoModelForImageTextToText
 
         dtype_map = {
             "bfloat16": torch.bfloat16,
@@ -251,18 +312,7 @@ class VLMPlannerWorker:
             f"[VLMPlannerWorker] Loading '{self._model_path}' "
             f"with dtype={self._dtype_str} via transformers."
         )
-        self._processor = AutoProcessor.from_pretrained(self._model_path)
-        if not (
-            hasattr(self._processor, "tokenizer")
-            and hasattr(self._processor, "image_processor")
-            and hasattr(self._processor, "video_processor")
-        ):
-            raise RuntimeError(
-                f"[VLMPlannerWorker] '{self._model_path}' did not expose a "
-                "multimodal processor in the active transformers runtime. "
-                "Install a Qwen3-VL-capable transformers build or set "
-                "'vlm_planner.transformers_runtime_path' to one."
-            )
+        self._load_qwen_processor()
         self._model = AutoModelForImageTextToText.from_pretrained(
             self._model_path,
             torch_dtype=torch_dtype,
@@ -301,31 +351,41 @@ class VLMPlannerWorker:
                 runtime_str,
             )
 
-    def _load_sglang_backend(self) -> None:
-        """Launch a local SGLang engine for Qwen inference.
-
-        Requires sglang>=0.4.6.  Older versions have signal-handler issues
-        inside Ray actors.
-        """
-        try:
-            import sglang as sgl
-        except ImportError as exc:
-            raise ImportError(
-                "Backend 'sglang' requires the 'sglang' package (>=0.4.6). "
-                "Install it with: pip install 'sglang>=0.4.6'"
-            ) from exc
-
+    def _load_sglang_http_backend(self) -> None:
+        """Use an externally managed SGLang HTTP server."""
+        if not self._sglang_server_url:
+            raise ValueError(
+                "Backend 'sglang_http' requires vlm_planner.server_url, e.g. "
+                "'http://127.0.0.1:30000'."
+            )
+        self._load_qwen_processor()
+        self._sglang_server_url = self._sglang_server_url.rstrip("/")
         self._logger.info(
-            f"[VLMPlannerWorker] Launching SGLang engine for '{self._model_path}'."
+            "[VLMPlannerWorker] Using external SGLang server at '%s'.",
+            self._sglang_server_url,
         )
-        self._sgl_engine = sgl.Engine(
-            model_path=self._model_path,
-            dtype=self._dtype_str,
-            mem_fraction_static=0.5,
+
+    def _load_qwen_processor(self) -> None:
+        """Load the Qwen multimodal processor used for local preprocessing."""
+        self._activate_transformers_runtime_path()
+
+        from transformers import AutoProcessor
+
+        self._processor = AutoProcessor.from_pretrained(
+            self._model_path,
+            trust_remote_code=True,
         )
-        # Qwen image placeholder token used when building SGLang prompts.
-        self._sgl_image_token = "<image>"
-        self._logger.info("[VLMPlannerWorker] SGLang engine ready.")
+        if not (
+            hasattr(self._processor, "tokenizer")
+            and hasattr(self._processor, "image_processor")
+            and hasattr(self._processor, "video_processor")
+        ):
+            raise RuntimeError(
+                f"[VLMPlannerWorker] '{self._model_path}' did not expose a "
+                "multimodal processor in the active transformers runtime. "
+                "Install a Qwen3-VL-capable transformers build or set "
+                "'vlm_planner.transformers_runtime_path' to one."
+            )
 
     # ------------------------------------------------------------------
     # Subtask generation
@@ -349,7 +409,7 @@ class VLMPlannerWorker:
         Raises:
             ValueError: If *main_task* is empty.
         """
-        if not main_task:
+        if not main_task or not main_task.strip():
             raise ValueError(
                 "get_next_subtask() requires a non-empty main_task. "
                 "Set env.train.task_description to a concrete episode goal."
@@ -444,12 +504,15 @@ class VLMPlannerWorker:
         if not self._top_reward_enabled:
             return 0.0
 
-        if self._backend == "sglang":
-            self._logger.warning(
-                "[VLMPlannerWorker] TOPReward is not supported with the sglang "
-                "backend (requires forward pass, not generation). Returning 0.0."
+        if self._backend == "sglang_http":
+            return float(
+                self._compute_top_reward_sglang(
+                    frames,
+                    instruction,
+                    reduction=reduction,
+                    fps=fps,
+                )
             )
-            return 0.0
 
         # Trim frames to the configured maximum.
         if len(frames) > self._top_reward_max_frames:
@@ -474,8 +537,8 @@ class VLMPlannerWorker:
         Returns:
             Stripped generated text string.
         """
-        if self._backend == "sglang":
-            return self._generate_sglang(messages, max_new_tokens)
+        if self._backend == "sglang_http":
+            return self._generate_sglang_http(messages, max_new_tokens)
         return self._generate_transformers(messages, max_new_tokens)
 
     def _generate_transformers(self, messages: list[dict], max_new_tokens: int) -> str:
@@ -517,47 +580,97 @@ class VLMPlannerWorker:
             trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0].strip()
 
-    def _generate_sglang(self, messages: list[dict], max_new_tokens: int) -> str:
-        """Run inference using a local SGLang engine.
-
-        Args:
-            messages: ChatML message list (system + user with PIL images).
-            max_new_tokens: Maximum tokens to generate.
-
-        Returns:
-            Stripped generated text string.
-        """
-        # Extract PIL images and build a flat prompt string with placeholders.
-        pil_images = []
-        prompt_parts = []
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            if isinstance(content, str):
-                prompt_parts.append(f"<|im_start|>{role}\n{content}<|im_end|>\n")
-            else:
-                part_text = f"<|im_start|>{role}\n"
-                for item in content:
-                    if item["type"] == "image":
-                        pil_images.append(item["image"])
-                        part_text += self._sgl_image_token
-                    elif item["type"] == "text":
-                        part_text += item["text"]
-                part_text += "<|im_end|>\n"
-                prompt_parts.append(part_text)
-        prompt_parts.append("<|im_start|>assistant\n")
-        prompt = "".join(prompt_parts)
-
-        output = self._sgl_engine.generate(
-            prompt=prompt,
-            image_data=pil_images if pil_images else None,
-            sampling_params={"max_new_tokens": max_new_tokens},
+    def _generate_sglang_http(self, messages: list[dict], max_new_tokens: int) -> str:
+        """Run inference through an external SGLang HTTP /generate endpoint."""
+        prepared = self._prepare_chat_request(
+            messages,
+            add_generation_prompt=True,
         )
-        return output["text"].strip()
+        payload = {
+            "input_ids": prepared.input_ids,
+            "sampling_params": {
+                "temperature": 0,
+                "max_new_tokens": max_new_tokens,
+            },
+        }
+        if prepared.image_data is not None:
+            payload["image_data"] = prepared.image_data
+        if prepared.video_data is not None:
+            payload["video_data"] = prepared.video_data
+
+        response = self._post_json(self._sglang_generate_path, payload)
+        return self._extract_generation_text(response)
+
+    def _compute_top_reward_sglang(
+        self,
+        frames: list[np.ndarray],
+        instruction: str,
+        reduction: str = "mean",
+        fps: float = 2.0,
+    ) -> float:
+        """Compute TOPReward through SGLang generation with prompt-side logprobs."""
+        del reduction
+
+        if len(frames) > self._top_reward_max_frames:
+            frames = frames[-self._top_reward_max_frames :]
+
+        prepared, expected_token_id = self._prepare_top_reward_request(
+            frames,
+            instruction,
+            fps=fps,
+        )
+        payload: dict[str, Any] = {
+            "input_ids": prepared.input_ids,
+            "sampling_params": {
+                "max_new_tokens": 1,
+                "temperature": 0,
+            },
+            "return_logprob": True,
+            "logprob_start_len": max(len(prepared.input_ids) - 2, 0),
+            "token_ids_logprob": [expected_token_id],
+        }
+        if prepared.image_data is not None:
+            payload["image_data"] = prepared.image_data
+        if prepared.video_data is not None:
+            payload["video_data"] = prepared.video_data
+
+        response = self._post_json(self._sglang_generate_path, payload)
+        score = self._extract_top_reward_logprob(
+            response,
+            expected_token_id=expected_token_id,
+        )
+        return float(score) * self._top_reward_reward_scale
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _extract_generation_text(self, response: dict[str, Any]) -> str:
+        """Read text from SGLang response or decode output_ids locally."""
+        text = response.get("text", None)
+        if text is not None:
+            if isinstance(text, list):
+                if not text:
+                    raise RuntimeError(
+                        "[VLMPlannerWorker] SGLang /generate returned an empty text list."
+                    )
+                text = text[0]
+            return _strip_thinking_output(str(text))
+
+        output_ids = response.get("output_ids", None)
+        if output_ids is None:
+            raise RuntimeError(
+                "[VLMPlannerWorker] SGLang /generate returned neither text nor output_ids."
+            )
+        if output_ids and isinstance(output_ids[0], list):
+            output_ids = output_ids[0]
+
+        decoded = self._processor.batch_decode(
+            [output_ids],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+        return _strip_thinking_output(str(decoded).strip())
 
     @staticmethod
     def _to_pil_image(image: np.ndarray) -> Image.Image:
@@ -570,6 +683,216 @@ class VLMPlannerWorker:
             PIL Image in RGB mode.
         """
         return Image.fromarray(image.astype(np.uint8))
+
+    @staticmethod
+    def _normalize_http_path(base_url: str, path: str) -> str:
+        return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST JSON to the configured SGLang server and parse the response."""
+        request = urllib_request.Request(
+            self._normalize_http_path(self._sglang_server_url, path),
+            data=json.dumps(payload).encode("utf-8"),
+            headers=self._build_http_headers(),
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(
+                request, timeout=self._sglang_request_timeout
+            ) as response:
+                body = response.read().decode("utf-8")
+        except urllib_error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"[VLMPlannerWorker] SGLang HTTP {path} failed with "
+                f"status={exc.code}: {body}"
+            ) from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(
+                f"[VLMPlannerWorker] Failed to reach SGLang server at "
+                f"'{self._sglang_server_url}': {exc}"
+            ) from exc
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"[VLMPlannerWorker] SGLang HTTP {path} returned invalid JSON: {body}"
+            ) from exc
+
+        if isinstance(parsed, dict) and "error" in parsed:
+            raise RuntimeError(
+                f"[VLMPlannerWorker] SGLang HTTP {path} returned error: "
+                f"{parsed['error']}"
+            )
+        return parsed
+
+    def _build_http_headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self._sglang_api_key:
+            headers["Authorization"] = f"Bearer {self._sglang_api_key}"
+        return headers
+
+    def _prepare_chat_request(
+        self,
+        messages: list[dict],
+        *,
+        add_generation_prompt: bool,
+    ) -> _PreparedSGLangRequest:
+        """Render ChatML + vision inputs locally and build a token-in request."""
+        from qwen_vl_utils import process_vision_info
+
+        text = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+        )
+        image_inputs, video_inputs, video_kwargs = _process_vision_info_compat(
+            process_vision_info, messages
+        )
+        processor_inputs = self._processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+            **video_kwargs,
+        )
+        return self._prepare_processor_output_request(processor_inputs)
+
+    def _prepare_top_reward_request(
+        self,
+        frames: list[np.ndarray],
+        instruction: str,
+        *,
+        fps: float,
+    ) -> tuple[_PreparedSGLangRequest, int]:
+        """Build the strict TOPReward prompt and resolve the final target token."""
+        from qwen_vl_utils import process_vision_info
+
+        pil_frames = [self._to_pil_image(frame) for frame in frames]
+        user_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "video", "video": pil_frames, "fps": fps},
+                    {"type": "text", "text": _TOPREWARD_PROMPT_PREFIX},
+                ],
+            }
+        ]
+        prompt_chat = self._processor.apply_chat_template(
+            user_messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        eos_token = self._processor.tokenizer.eos_token
+        if eos_token is not None:
+            prompt_chat = prompt_chat.split(eos_token)[0]
+        instruction_suffix = (
+            f"{instruction} Decide whether the above statement is True or not. "
+            f"The answer is: {self._top_reward_label}"
+        )
+        image_inputs, video_inputs, video_kwargs = _process_vision_info_compat(
+            process_vision_info, user_messages
+        )
+        processor_inputs = self._processor(
+            text=[f"{prompt_chat}{instruction_suffix}"],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+            **video_kwargs,
+        )
+        prepared = self._prepare_processor_output_request(processor_inputs)
+        return prepared, int(prepared.input_ids[-1])
+
+    def _prepare_processor_output_request(
+        self, processor_inputs
+    ) -> _PreparedSGLangRequest:
+        """Convert HF processor output into a JSON-safe SGLang request payload."""
+        payload: dict[str, Any] = {"format": "processor_output"}
+        for key, value in processor_inputs.items():
+            payload[key] = self._to_json_compatible(value)
+
+        input_ids = payload["input_ids"]
+        if isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], list):
+            input_ids = input_ids[0]
+
+        has_video = any(
+            key in payload
+            for key in (
+                "pixel_values_videos",
+                "video_grid_thw",
+                "second_per_grid_ts",
+                "video_second_per_grid",
+            )
+        )
+        has_image = any(
+            key in payload
+            for key in (
+                "pixel_values",
+                "image_grid_thw",
+            )
+        )
+
+        return _PreparedSGLangRequest(
+            input_ids=list(input_ids),
+            image_data=[payload] if has_image and not has_video else None,
+            video_data=[payload] if has_video else None,
+        )
+
+    @staticmethod
+    def _to_json_compatible(value: Any) -> Any:
+        """Convert tensors / numpy objects into plain Python containers."""
+        if hasattr(value, "detach"):
+            return value.detach().cpu().tolist()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, dict):
+            return {
+                key: VLMPlannerWorker._to_json_compatible(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [VLMPlannerWorker._to_json_compatible(item) for item in value]
+        return value
+
+    def _extract_top_reward_logprob(
+        self,
+        response: dict[str, Any],
+        *,
+        expected_token_id: int,
+    ) -> float:
+        """Extract the requested input-side token logprob from /generate output."""
+        meta_info = response.get("meta_info", {})
+        scored_positions = meta_info.get("input_token_ids_logprobs") or []
+        score_entry = next(
+            (position for position in reversed(scored_positions) if position),
+            None,
+        )
+        if score_entry is None:
+            raise RuntimeError(
+                "[VLMPlannerWorker] SGLang did not return input-side "
+                "token_ids_logprob data for TOPReward."
+            )
+
+        matching_entry = next(
+            (
+                entry
+                for entry in score_entry
+                if len(entry) >= 2 and int(entry[1]) == expected_token_id
+            ),
+            None,
+        )
+        if matching_entry is None:
+            raise RuntimeError(
+                "[VLMPlannerWorker] SGLang TOPReward response did not include "
+                f"the requested final token id {expected_token_id}."
+            )
+
+        return float(matching_entry[0])
 
     def _build_qwen_messages(
         self,
