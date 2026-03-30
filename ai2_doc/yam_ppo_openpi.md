@@ -1,7 +1,8 @@
-# YAM PPO + TOPReward (`yam_ppo_openpi`)
+# YAM PPO + TOPReward (`yam_ppo_openpi_async` / `yam_ppo_openpi_sync`)
 
-This is the AI2-facing Markdown guide for the baseline YAM PPO config:
-`examples/embodiment/config/yam_ppo_openpi.yaml`.
+This is the AI2-facing Markdown guide for the baseline YAM PPO configs:
+`examples/embodiment/config/yam_ppo_openpi_async.yaml` and
+`examples/embodiment/config/yam_ppo_openpi_sync.yaml`.
 
 This config runs:
 
@@ -10,8 +11,15 @@ This config runs:
 - TOPReward dense reward
 - no VLM subtask planning (`subtask_interval: 0`)
 
+Runtime split:
+
+- `yam_ppo_openpi_async` uses `train_embodied_agent_staged_async.py` and
+  `algorithm.loss_type: decoupled_actor_critic`
+- `yam_ppo_openpi_sync` uses `train_embodied_agent_staged.py` and
+  `algorithm.loss_type: actor_critic`
+
 For the variant that also enables VLM subtask planning, see
-[yam_ppo_openpi_topreward](yam_ppo_openpi_topreward.md).
+[yam_ppo_openpi_subtask](yam_ppo_openpi_subtask.md).
 
 ## Topology
 
@@ -30,7 +38,7 @@ Main component placement:
 
 ## VLM Planner Placement
 
-`train_embodied_agent_staged.py` now launches the VLM planner through RLinf's
+`train_embodied_agent_staged_async.py` now launches the VLM planner through RLinf's
 placement stack instead of as a standalone Ray `num_gpus=1` actor. This matters
 because actor and rollout workers were already using RLinf-managed GPU
 isolation, while the older VLM planner path only used a best-effort
@@ -62,7 +70,11 @@ Submit training from the repo root:
 
 ```bash
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi \
+    --config yam_ppo_openpi_async \
+    --model-path /path/to/RLinf-Pi05-SFT
+
+bash scripts/submit_yam_training.sh \
+    --config yam_ppo_openpi_sync \
     --model-path /path/to/RLinf-Pi05-SFT
 ```
 
@@ -71,7 +83,7 @@ Then start the desktop-side robot server:
 ```bash
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
+    --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
     --use-follower-servers \
     --remote-host <tailscale-ip>
 ```
@@ -81,7 +93,7 @@ For pipeline testing without hardware:
 ```bash
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
+    --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
     --dummy
 ```
 
@@ -156,6 +168,8 @@ client_idle_timeout_s: 0
 - The YAM OpenPI training configs now use the async PPO runtime
   (`algorithm.loss_type: decoupled_actor_critic`) so the robot can keep
   executing rollout chunks while actor training runs in the background.
+- The matching sync config keeps the same topology and reward setup, but uses
+  `train_embodied_agent_staged.py` with `algorithm.loss_type: actor_critic`.
 - A Beaker-side `Ctrl+C` now asks the desktop server to return home and enter
   zero-torque / zero-gravity while staying alive for the next client.
 - A desktop-side `Ctrl+C` still performs the full local shutdown: return home,
@@ -166,7 +180,7 @@ client_idle_timeout_s: 0
 
 ## Local Simulated Desktop Mode
 
-`train_embodied_agent_staged.py` now supports simulating the remote desktop
+`train_embodied_agent_staged_async.py` now supports simulating the remote desktop
 input path locally. This keeps the normal `RemoteEnv -> gRPC -> RobotServer`
 flow, but the training process starts a local dummy `RobotServer`
 automatically, so no separate desktop machine or reverse SSH tunnel is needed.
@@ -174,18 +188,31 @@ automatically, so no separate desktop machine or reverse SSH tunnel is needed.
 Enable it with:
 
 ```bash
+python examples/embodiment/train_embodied_agent_staged_async.py \
+    --config-path examples/embodiment/config \
+    --config-name yam_ppo_openpi_async \
+    env.remote_desktop_simulation.enabled=true
+
 python examples/embodiment/train_embodied_agent_staged.py \
     --config-path examples/embodiment/config \
-    --config-name yam_ppo_openpi \
+    --config-name yam_ppo_openpi_sync \
     env.remote_desktop_simulation.enabled=true
 ```
 
 Optional overrides:
 
 ```bash
+python examples/embodiment/train_embodied_agent_staged_async.py \
+    --config-path examples/embodiment/config \
+    --config-name yam_ppo_openpi_async \
+    env.remote_desktop_simulation.enabled=true \
+    env.remote_desktop_simulation.env_config_path=/path/to/yam_pi05_follower.yaml \
+    env.train.remote_server_url=localhost:50051 \
+    env.eval.remote_server_url=localhost:50051
+
 python examples/embodiment/train_embodied_agent_staged.py \
     --config-path examples/embodiment/config \
-    --config-name yam_ppo_openpi \
+    --config-name yam_ppo_openpi_sync \
     env.remote_desktop_simulation.enabled=true \
     env.remote_desktop_simulation.env_config_path=/path/to/yam_pi05_follower.yaml \
     env.train.remote_server_url=localhost:50051 \
@@ -221,7 +248,11 @@ the dummy `RobotServer` inside the Beaker session.
 
 ```bash
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi \
+    --config yam_ppo_openpi_async \
+    --interactive --allow-dirty
+
+bash scripts/submit_yam_training.sh \
+    --config yam_ppo_openpi_sync \
     --interactive --allow-dirty
 ```
 
@@ -236,9 +267,19 @@ source .venv/bin/activate
 ### Step 2: Run staged training with simulated desktop mode enabled
 
 ```bash
+python examples/embodiment/train_embodied_agent_staged_async.py \
+    --config-path examples/embodiment/config \
+    --config-name yam_ppo_openpi_async \
+    env.remote_desktop_simulation.enabled=true \
+    env.remote_desktop_simulation.dummy=true \
+    env.train.remote_server_url=localhost:50051 \
+    env.eval.remote_server_url=localhost:50051 \
+    actor.model.model_path=thomas0829/folding_towel_pi05 \
+    rollout.model.model_path=thomas0829/folding_towel_pi05
+
 python examples/embodiment/train_embodied_agent_staged.py \
     --config-path examples/embodiment/config \
-    --config-name yam_ppo_openpi \
+    --config-name yam_ppo_openpi_sync \
     env.remote_desktop_simulation.enabled=true \
     env.remote_desktop_simulation.dummy=true \
     env.train.remote_server_url=localhost:50051 \
@@ -257,7 +298,7 @@ This uses the same 3-GPU staged layout as the normal Beaker run:
 
 The run is wired correctly if you see all of the following:
 
-- a startup log from `train_embodied_agent_staged.py` saying it is starting a
+- a startup log from `train_embodied_agent_staged_async.py` saying it is starting a
   simulated `RobotServer` on `localhost:50051`
 - actor, rollout, env, and `VLMPlannerWorker` all start successfully
 - `EnvWorker` logs `TOPReward: score=..., delta=...`

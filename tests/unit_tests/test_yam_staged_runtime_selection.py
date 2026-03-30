@@ -13,8 +13,10 @@
 # limitations under the License.
 
 import importlib.util
+import os
 from pathlib import Path
 
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 _SCRIPT_PATH = (
@@ -31,17 +33,64 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 _is_expected_remote_disconnect_error = _MODULE._is_expected_remote_disconnect_error
 _start_remote_disconnect_monitor = _MODULE._start_remote_disconnect_monitor
-_use_async_embodied_runtime = _MODULE._use_async_embodied_runtime
+_SYNC_FORCED_ASYNC_RUNTIME = _MODULE._FORCED_ASYNC_RUNTIME
+
+_ASYNC_SCRIPT_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "embodiment"
+    / "train_embodied_agent_staged_async.py"
+)
+_ASYNC_SPEC = importlib.util.spec_from_file_location(
+    "train_embodied_agent_staged_async", _ASYNC_SCRIPT_PATH
+)
+assert _ASYNC_SPEC is not None and _ASYNC_SPEC.loader is not None
+_ASYNC_MODULE = importlib.util.module_from_spec(_ASYNC_SPEC)
+_ASYNC_SPEC.loader.exec_module(_ASYNC_MODULE)
+_ASYNC_FORCED_ASYNC_RUNTIME = _ASYNC_MODULE._FORCED_ASYNC_RUNTIME
+_CONFIG_DIR = Path(__file__).resolve().parents[2] / "examples" / "embodiment" / "config"
 
 
-def test_decoupled_actor_critic_uses_async_staged_runtime() -> None:
-    cfg = OmegaConf.create({"algorithm": {"loss_type": "decoupled_actor_critic"}})
-    assert _use_async_embodied_runtime(cfg) is True
+def test_sync_staged_entrypoint_forces_sync_runtime() -> None:
+    assert _SYNC_FORCED_ASYNC_RUNTIME is False
 
 
-def test_actor_critic_uses_sync_staged_runtime() -> None:
-    cfg = OmegaConf.create({"algorithm": {"loss_type": "actor_critic"}})
-    assert _use_async_embodied_runtime(cfg) is False
+def test_async_staged_entrypoint_forces_async_runtime() -> None:
+    assert _ASYNC_FORCED_ASYNC_RUNTIME is True
+
+
+def test_explicit_staged_sync_async_configs_validate() -> None:
+    os.environ["EMBODIED_PATH"] = str(_CONFIG_DIR.parent)
+    async_config_names = [
+        "yam_ppo_openpi_async",
+        "yam_ppo_openpi_subtask_async",
+        "yam_ppo_openpi_desktop_async",
+    ]
+    sync_config_names = [
+        "yam_ppo_openpi_sync",
+        "yam_ppo_openpi_subtask_sync",
+        "yam_ppo_openpi_desktop_sync",
+    ]
+
+    with initialize_config_dir(version_base="1.1", config_dir=str(_CONFIG_DIR)):
+        for config_name in async_config_names:
+            cfg = compose(config_name=config_name)
+            assert cfg.algorithm.loss_type == "decoupled_actor_critic"
+            if "desktop" in config_name:
+                assert cfg.cluster.num_nodes == 2
+                assert cfg.env.train.env_type == "yam"
+            else:
+                assert cfg.cluster.num_nodes == 1
+                assert cfg.env.train.env_type == "remote"
+        for config_name in sync_config_names:
+            cfg = compose(config_name=config_name)
+            assert cfg.algorithm.loss_type == "actor_critic"
+            if "desktop" in config_name:
+                assert cfg.cluster.num_nodes == 2
+                assert cfg.env.train.env_type == "yam"
+            else:
+                assert cfg.cluster.num_nodes == 1
+                assert cfg.env.train.env_type == "remote"
 
 
 def test_remote_disconnect_error_detector_matches_remote_env_disconnect() -> None:

@@ -1,37 +1,40 @@
-# YAM bimanual robot – async PPO training with π₀.5 (OpenPI), RemoteEnv, and TOPReward.
+# YAM bimanual robot – async PPO training with π₀.5 (OpenPI), direct YAMEnv on desktop, and TOPReward.
 #
 # Algorithm: async PPO with decoupled actor-critic, GAE advantage, and value head.
 # Reward:    TOPReward dense progress signal (Qwen3-VL-8B).
-#            No custom reward code required.
 #
-# Difference from yam_ppo_openpi_topreward.yaml:
-#   subtask_interval: 0  — VLM predicts no subtasks; TOPReward scoring only.
-#   Set subtask_interval > 0 to enable VLM subtask planning (see topreward config).
+# Difference from yam_ppo_openpi_async.yaml:
+#   - Desktop joins the Ray cluster as node_rank 1 (no RobotServer / gRPC needed).
+#   - EnvWorker runs YAMEnv directly on the desktop via a Ray actor.
+#   - num_nodes: 2 (Beaker at rank 0, desktop at rank 1).
 #
-# Hardware topology (single Beaker node, 3 GPUs):
-#   GPU 0 – actor (π₀.5 FSDP training with value head)
-#   GPU 1 – rollout (π₀.5 inference)
-#   GPU 2 – VLMPlannerWorker (Qwen3-VL-8B for TOPReward)
-#   CPU   – EnvWorker (RemoteEnv gRPC client → desktop RobotServer)
+# Hardware topology:
+#   Beaker node (rank 0, 3 GPUs):
+#     GPU 0 – actor (π₀.5 FSDP training with value head)
+#     GPU 1 – rollout (π₀.5 inference)
+#     GPU 2 – VLMPlannerWorker (Qwen3-VL-8B for TOPReward)
+#   Desktop (rank 1, CPU only):
+#     EnvWorker running YAMEnv directly (CAN bus + cameras)
 #
-# Desktop:
-#   RobotServer wrapping YAMEnv, exposed via reverse SSH tunnel on :50051.
-#   Start with: bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml \
-#                   --train-config .../yam_ppo_openpi.yaml \
-#                   --use-follower-servers --remote-host <beaker-tailscale-ip>
-#
-# Submit with:
-#   bash scripts/submit_yam_training.sh --config yam_ppo_openpi \
-#       --model-path thomas0829/folding_towel_pi05
+# Usage:
+#   1. Submit Beaker job (Ray head, idle):
+#        bash scripts/submit_yam_beaker_cluster.sh --config yam_ppo_openpi_desktop_async
+#   2. Desktop joins and runs training:
+#        bash scripts/join_beaker_cluster.sh \
+#            --head-ip <beaker-tailscale-ip> \
+#            --config yam_ppo_openpi_desktop_async \
+#            --model-path thomas0829/folding_towel_pi05 \
+#            --task "fold the towel"
 #
 # Prerequisites:
 #   pip install "transformers @ git+https://github.com/huggingface/transformers.git@main"
 #   pip install qwen-vl-utils accelerate torchvision pillow  (on Beaker)
 #   huggingface-cli download Qwen/Qwen3-VL-8B
+#   pip install yam_realtime  (on desktop)
 
 defaults:
-  - env/remote_yam@env.train
-  - env/remote_yam@env.eval
+  - env/yam_pi05_follower@env.train
+  - env/yam_pi05_follower@env.eval
   - model/pi0_5@actor.model
   - training_backend/fsdp@actor.fsdp_config
   - override hydra/job_logging: stdout
@@ -44,7 +47,7 @@ hydra:
     - file://${oc.env:EMBODIED_PATH}/config/
 
 cluster:
-  num_nodes: 1
+  num_nodes: 2
   component_placement:
     actor:
       node_group: "gpu"
@@ -53,20 +56,22 @@ cluster:
       node_group: "gpu"
       placement: 1   # π₀.5 requires a dedicated GPU; cannot share GPU 0 with actor
     env:
-      node_group: "gpu"
-      placement: 0   # RemoteEnv runs CPU-only; placement on same node
+      node_group: "desktop"
+      placement: 0   # YAMEnv runs directly on desktop CPU (no gRPC)
   node_groups:
     - label: "gpu"
-      node_ranks: 0
+      node_ranks: 0       # Beaker node
     - label: "beaker_vlm"
-      node_ranks: 0  # VLMPlannerWorker placement group on the Beaker node
+      node_ranks: 0       # VLMPlannerWorker placement group on the Beaker node
+    - label: "desktop"
+      node_ranks: 1       # Desktop node (joined via join_beaker_cluster.sh)
 
 runner:
   task_type: embodied
   logger:
     log_path: "../results"
     project_name: rlinf
-    experiment_name: "yam_ppo_openpi"
+    experiment_name: "yam_ppo_openpi_desktop_async"
     logger_backends: ["tensorboard"]
 
   max_epochs: 2000
@@ -131,70 +136,55 @@ algorithm:
     min_length: 1
 
 env:
-  # Single knob for how often the robot should return to startup home and rest.
-  # validate_cfg converts this into train/eval step counts and aligns to the
-  # action chunk size automatically.
-  return_home_minutes: 2
-  # Desktop RobotServer cooldown after the timer expires and the arms have
-  # already returned home. Keep this at the top level so Beaker and desktop
-  # can share one timing source.
-  server_cooldown_minutes: 1
   group_name: "EnvGroup"
-  # Optional local simulation of the robot desktop input path.
-  # When enabled, train_embodied_agent_staged.py starts a local dummy
-  # RobotServer automatically, so RemoteEnv still talks over gRPC but no
-  # separate desktop machine or reverse SSH tunnel is required.
-  #
-  # Keep env.train.remote_server_url / env.eval.remote_server_url pointed at
-  # localhost:<port> when using this mode.
-  remote_desktop_simulation:
-    enabled: False
-    dummy: True
-    env_config_path: null
-    startup_timeout: 30.0
 
   train:
     total_num_envs: 1
-    # Derived automatically from env.return_home_minutes.
-    max_episode_steps: 24000
-    max_steps_per_rollout_epoch: 24000
+    max_episode_steps: 100
+    max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
-    # Do not return home when a new rollout epoch starts.
-    reset_on_rollout_epoch: False
-    # Keep training epoch boundaries purely for bookkeeping. Real robot
-    # cadence is controlled only by the desktop server timer / manual stop.
-    reset_on_rollout_epoch_end: False
 
-    task_description: "Fold the towel."
+    task_description: "bimanual pick and place"
+
+    # Set to True to run without real hardware (returns zero observations).
+    is_dummy: False
+
+    # Robot arm configs — required when is_dummy: False.
+    # Paths to yam_realtime YAML configs for each arm.
+    robot_cfgs:
+      left: null   # e.g. ["/path/to/yam_realtime/robot_configs/yam/left.yaml"]
+      right: null  # e.g. ["/path/to/yam_realtime/robot_configs/yam/right.yaml"]
+
+    # Camera configs — optional.
+    camera_cfgs: null
 
     # Enable TOPReward dense progress signal.
+    # EnvWorker calls VLMPlannerWorker (on Beaker GPU 2) via Ray RPC.
     top_reward_enabled: True
     top_reward_max_frames: 16
     top_reward_instruction_source: initial_task
 
     # Subtask planning disabled — VLM is used for TOPReward only.
-    # Set subtask_interval > 0 to enable VLM subtask predictions (see topreward config).
     subtask_interval: 0
-
-    # Dummy mode: controlled at the ROBOT SERVER, not here.
-    # RemoteEnv does not read is_dummy — it proxies calls over gRPC to the server.
-    # To test without real hardware, start the robot server with --dummy:
-    #   bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml --dummy
 
   eval:
     total_num_envs: 1
-    # Derived automatically from env.return_home_minutes.
-    max_episode_steps: 24000
-    max_steps_per_rollout_epoch: 24000
+    max_episode_steps: 100
+    max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
-    task_description: "Fold the towel."
+    task_description: "bimanual pick and place"
+    is_dummy: False
+    robot_cfgs:
+      left: null
+      right: null
+    camera_cfgs: null
 
 # VLM planner: Qwen3-VL-8B for TOPReward scoring only (no subtask planning).
-# reward_scale is read from THIS section by TOPReward (not from reward.reward_scale).
 vlm_planner:
   model_path: "Qwen/Qwen3-VL-8B-Instruct"
   backend: "transformers"
   dtype: "bfloat16"
+  transformers_runtime_path: ".qwen3_runtime"
   # Optional explicit placement override. By default RLinf chooses GPU 2 here
   # because actor and rollout occupy GPUs 0 and 1 on the same node.
   # placement: 2
@@ -205,7 +195,7 @@ vlm_planner:
   success_threshold: 0.5
   top_reward_enabled: True
   top_reward_max_frames: 16
-  reward_scale: 1.0  # multiplied onto each log-prob score before delta computation
+  reward_scale: 1.0
 
 rollout:
   group_name: "RolloutGroup"
@@ -216,7 +206,7 @@ rollout:
   pipeline_stage_num: 1
 
   collect_transitions: True
-  collect_prev_infos: True  # required for adv_type: gae — prev_values must be collected for GAE bootstrap
+  collect_prev_infos: True
 
   model:
     model_path: "thomas0829/folding_towel_pi05"
@@ -229,8 +219,6 @@ actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
 
-  # rollout_size = n_chunk_steps * total_num_envs * rollout_epoch = 800 * 1 * 1 = 800
-  # global_batch_size must divide rollout_size; micro_batch_size must divide global_batch_size.
   micro_batch_size: 2
   global_batch_size: 2
   seed: 42
@@ -242,7 +230,7 @@ actor:
     precision: "bf16"
     add_value_head: True
     num_action_chunks: 30
-    action_dim: 14   # YAM bimanual: 2 × 7 DOF; sets openpi.action_env_dim via interpolation
+    action_dim: 14
     num_steps: 10
     openpi:
       value_after_vlm: True
@@ -252,13 +240,12 @@ actor:
       discrete_state_input: True
       noise_method: "flow_sde"
       action_horizon: 30
-      action_env_dim: 14
       noise_params: [0.16, 0.12, 200]
       joint_logprob: True
 
   optim:
-    lr: 0
-    value_lr: 0
+    lr: 5.0e-6
+    value_lr: 1.55e-4
     adam_beta1: 0.9
     adam_beta2: 0.95
     adam_eps: 1.0e-08
@@ -270,16 +257,12 @@ actor:
   fsdp_config:
     strategy: "fsdp"
     sharding_strategy: "no_shard"
-    use_orig_params: True
     gradient_checkpointing: False
     mixed_precision:
       param_dtype: ${actor.model.precision}
       reduce_dtype: ${actor.model.precision}
       buffer_dtype: ${actor.model.precision}
 
-# reward section is metadata only when use_reward_model: False.
-# TOPReward is computed inline by VLMPlannerWorker (see vlm_planner.reward_scale above).
-# reward_scale here is NOT read by TOPReward — configure it under vlm_planner instead.
 reward:
   use_reward_model: False
   reward_type: top_reward

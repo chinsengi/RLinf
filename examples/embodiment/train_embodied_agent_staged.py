@@ -12,42 +12,62 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Entry point for embodied RL with a VLM planner (subtask generation and/or TOPReward).
+"""Sync staged entry point for embodied RL with a VLM planner.
 
-Extends ``train_embodied_agent.py`` with an additional VLMPlannerWorker Ray
-actor that is launched when either ``env.train.subtask_interval > 0`` (subtask
-planning) or ``env.train.top_reward_enabled`` is True (dense TOPReward reward
-signal). The planner runs Qwen3-VL-8B as a Ray actor.
+This script extends ``train_embodied_agent.py`` with staged-runtime features
+that are needed by VLM-planner workflows:
+
+- launch ``VLMPlannerWorker`` when ``env.train.subtask_interval > 0`` or
+  ``env.train.top_reward_enabled`` is set,
+- support the remote-desktop simulation path for ``env_type: remote``,
+- keep the staged remote-disconnect handling used by the YAM/remote stack.
+
+The command-line entrypoint in this file is sync-only. It is intended for
+staged configs that should run with ``EmbodiedRunner`` +
+``MultiStepRolloutWorker`` + ``EnvWorker``.
+
+Use this script for staged configs with an explicit ``_sync`` suffix:
+
+- ``yam_ppo_openpi_sync`` — TOPReward only (``subtask_interval: 0``)
+- ``yam_ppo_openpi_subtask_sync`` — TOPReward + optional subtask planning
+- ``yam_ppo_openpi_desktop_sync`` — desktop-topology staged variant
 
 Usage::
 
     # Start Ray first (see CLAUDE.md: Multi-Node Setup)
-    bash examples/embodiment/run_embodiment.sh yam_ppo_openpi_topreward
+    bash examples/embodiment/run_embodiment.sh <staged_sync_config>
 
 Or directly::
 
     python examples/embodiment/train_embodied_agent_staged.py \
         --config-path examples/embodiment/config/ \
-        --config-name yam_ppo_openpi_topreward
+        --config-name <staged_sync_config>
+
+Launch-script routing:
+
+- ``run_embodiment.sh`` / ``run_realworld.sh`` / ``join_beaker_cluster.sh``
+  route config names ending in ``_sync`` here.
+- Matching ``*_async`` staged configs use
+  ``train_embodied_agent_staged_async.py`` instead.
 
 The config must contain a ``vlm_planner`` section and a node group labelled
-``"beaker_vlm"`` in ``cluster.node_groups``. The VLMPlannerWorker is allocated
+``"beaker_vlm"`` in ``cluster.node_groups``. ``VLMPlannerWorker`` is allocated
 through RLinf's placement stack so it inherits the same GPU isolation model as
-actor and rollout workers, instead of relying on a standalone Ray ``num_gpus``
+actor and rollout workers instead of relying on a standalone Ray ``num_gpus``
 reservation.
 
-Configs that use this entry point (auto-selected by run_embodiment.sh /
-run_realworld.sh / submit_yam_training.sh):
-  - ``yam_ppo_openpi``        — TOPReward only (``subtask_interval: 0``)
-  - ``*topreward*``           — TOPReward + optional subtask planning
-  - ``*staged*``              — subtask planning + TOPReward (legacy pattern)
+This file also exposes the shared ``run_with_runtime(...)`` helper used by
+``train_embodied_agent_staged_async.py``. The helper remains
+runtime-parameterized so the async wrapper can reuse the same staged
+setup/teardown logic without duplicating the implementation.
 
 Optional remote-desktop simulation:
-  - Set ``env.remote_desktop_simulation.enabled: true`` when using
-    ``env_type: remote`` to have this script launch a local dummy
-    ``RobotServer`` automatically.
-  - This simulates the robot desktop input path end to end, so ``RemoteEnv``
-    still talks gRPC, but no real desktop machine or SSH tunnel is required.
+
+- Set ``env.remote_desktop_simulation.enabled: true`` when using
+  ``env_type: remote`` to have this script launch a local dummy
+  ``RobotServer`` automatically.
+- This simulates the robot desktop input path end to end, so ``RemoteEnv``
+  still talks gRPC, but no real desktop machine or SSH tunnel is required.
 """
 
 import json
@@ -83,6 +103,8 @@ from rlinf.workers.vlm_planner import VLMPlannerWorker
 
 mp.set_start_method("spawn", force=True)
 
+_FORCED_ASYNC_RUNTIME = False
+
 _VLM_PLANNER_NODE_GROUP = "beaker_vlm"
 _REMOTE_MONITOR_POLL_S = 1.0
 _REMOTE_MONITOR_CONNECT_TIMEOUT_S = 0.5
@@ -95,11 +117,6 @@ _REMOTE_DISCONNECT_MARKERS = (
     "failed to connect to all addresses",
     "grpc unavailable",
 )
-
-
-def _use_async_embodied_runtime(cfg) -> bool:
-    """Return whether this staged config should run on the async PPO stack."""
-    return str(cfg.algorithm.get("loss_type", "")).lower() == "decoupled_actor_critic"
 
 
 def _parse_host_port(server_url: str) -> tuple[str, int]:
@@ -386,15 +403,8 @@ def _launch_vlm_planner(cfg, cluster: Cluster):
     return vlm_actor
 
 
-@hydra.main(
-    version_base="1.1",
-    config_path="config",
-    config_name="yam_ppo_openpi_topreward",
-)
-def main(cfg) -> None:
-    cfg = validate_cfg(cfg)
-    print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))
-
+def run_with_runtime(cfg, *, use_async_runtime: bool) -> None:
+    """Run staged embodied training with an explicit runtime selection."""
     simulated_desktop_server = launch_simulated_desktop_server(cfg)
     cluster = None
     actor_group = None
@@ -409,7 +419,6 @@ def main(cfg) -> None:
     try:
         cluster = Cluster(cluster_cfg=cfg.cluster)
         component_placement = HybridComponentPlacement(cfg, cluster)
-        use_async_runtime = _use_async_embodied_runtime(cfg)
         # Load the VLM planner before worker init so model startup completes
         # before the desktop-side robot session begins moving.
         vlm_actor = _launch_vlm_planner(cfg, cluster)
@@ -512,6 +521,17 @@ def main(cfg) -> None:
         stop_process(simulated_desktop_server)
     if remote_disconnect_exit:
         raise SystemExit(1)
+
+
+@hydra.main(
+    version_base="1.1",
+    config_path="config",
+    config_name="yam_ppo_openpi_subtask_sync",
+)
+def main(cfg) -> None:
+    cfg = validate_cfg(cfg)
+    print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))
+    run_with_runtime(cfg, use_async_runtime=_FORCED_ASYNC_RUNTIME)
 
 
 if __name__ == "__main__":

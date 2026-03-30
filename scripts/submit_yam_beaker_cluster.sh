@@ -9,9 +9,9 @@
 # The env worker runs directly on the desktop with YAMEnv — no gRPC, no SSH tunnel,
 # no RemoteEnv. The Beaker node only provides GPUs for actor/rollout workers.
 #
-# Supported configs (both use TOPReward, both need 3 GPUs):
-#   yam_ppo_openpi           — 3 GPUs (actor + rollout + VLM TOPReward on Beaker)
-#   yam_ppo_openpi_topreward — 3 GPUs (actor + rollout + VLM TOPReward + subtask planning)
+# Supported desktop-driven staged YAM configs with explicit runtime suffixes:
+#   yam_ppo_openpi_desktop_async       — 3 GPUs (actor + rollout + VLM TOPReward on Beaker)
+#   yam_ppo_openpi_desktop_sync        — 3 GPUs (actor + rollout + VLM TOPReward on Beaker)
 #
 # Prerequisites:
 #   gantry installed: pip install beaker-gantry
@@ -22,7 +22,7 @@
 set -euo pipefail
 
 # --- Defaults ---
-CONFIG_NAME="yam_ppo_openpi"
+CONFIG_NAME="yam_ppo_openpi_desktop_async"
 EXP_NAME=""
 GPUS=0  # 0 = auto-detect based on config
 CLUSTER="ai2/ceres-cirrascale"
@@ -46,11 +46,11 @@ Submit a Beaker job that starts Ray head with GPUs and idles, waiting for a
 desktop worker to join and run training via join_beaker_cluster.sh.
 
 Supported configs:
-  yam_ppo_openpi             3 GPUs (actor + rollout + VLM TOPReward)
-  yam_ppo_openpi_topreward   3 GPUs (actor + rollout + VLM TOPReward + subtask planning)
+  yam_ppo_openpi_desktop_async    3 GPUs (actor + rollout + VLM TOPReward)
+  yam_ppo_openpi_desktop_sync     3 GPUs (actor + rollout + VLM TOPReward)
 
 Options:
-  --config NAME         Hydra config name for GPU auto-detection (default: yam_ppo_openpi)
+  --config NAME         Hydra config name for GPU auto-detection (default: yam_ppo_openpi_desktop_async)
   --gpus N              GPUs (0 = auto based on config)
   --name NAME           Experiment name (default: rlinf-cluster-<config>)
   --cluster CLUSTER     Beaker cluster (default: ai2/ceres-cirrascale)
@@ -67,7 +67,7 @@ After submission:
   2. Join the cluster from your desktop:
        bash scripts/join_beaker_cluster.sh \
            --head-ip <tailscale-ip> \
-           --config yam_ppo_openpi \
+           --config yam_ppo_openpi_desktop_async \
            --model-path thomas0829/folding_towel_pi05 \
            --task "pick and place"
 EOF
@@ -97,7 +97,7 @@ fi
 
 # --- Auto-detect GPU count from config ---
 case "$CONFIG_NAME" in
-    *topreward*|*staged*|yam_ppo_openpi)
+    yam_*_async|yam_*_sync)
         # All YAM configs use TOPReward and need 3 GPUs.
         [ "$GPUS" -eq 0 ] && GPUS=3
         ;;

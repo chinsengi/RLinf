@@ -24,7 +24,8 @@
 # Options:
 #   --config PATH         Path to YAM env YAML config (required)
 #   --train-config PATH   Optional top-level training YAML to source timing from
-#                         (default: examples/embodiment/config/yam_ppo_openpi.yaml)
+#                         (default: examples/embodiment/config/yam_ppo_openpi_async.yaml;
+#                         sync configs are also supported)
 #   --port PORT           gRPC server port (default: 50051)
 #   --remote-host HOST    Beaker Tailscale hostname or IP (default: beaker-0)
 #   --remote-user USER    SSH user on the Beaker container (default: shiruic)
@@ -78,7 +79,8 @@ starts (all jobs register the Tailscale hostname "beaker-0").
 Options:
   --config PATH         Path to YAM env YAML config (required)
   --train-config PATH   Optional top-level training YAML to source timing from
-                        (default: examples/embodiment/config/yam_ppo_openpi.yaml)
+                        (default: examples/embodiment/config/yam_ppo_openpi_async.yaml;
+                        sync configs are also supported)
   --port PORT           gRPC server port (default: 50051)
   --remote-host HOST    Beaker Tailscale hostname or IP (default: beaker-0)
   --remote-user USER    SSH user on the Beaker container (default: shiruic)
@@ -101,7 +103,13 @@ Examples:
   # Persistent server + auto-reconnecting tunnel (default beaker-0 hostname):
   bash scripts/start_robot_server.sh \
       --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-      --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
+      --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
+      --use-follower-servers
+
+  # Same timing-sharing flow with the sync staged runtime:
+  bash scripts/start_robot_server.sh \
+      --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+      --train-config examples/embodiment/config/yam_ppo_openpi_sync.yaml \
       --use-follower-servers
 
   # Local only (no tunnel, for testing):
@@ -153,7 +161,7 @@ if [ -z "$CONFIG" ]; then
 fi
 
 if [ -z "$TRAIN_CONFIG" ]; then
-    DEFAULT_TRAIN_CONFIG="examples/embodiment/config/yam_ppo_openpi.yaml"
+    DEFAULT_TRAIN_CONFIG="examples/embodiment/config/yam_ppo_openpi_async.yaml"
     if [ -f "$DEFAULT_TRAIN_CONFIG" ]; then
         TRAIN_CONFIG="$DEFAULT_TRAIN_CONFIG"
     fi

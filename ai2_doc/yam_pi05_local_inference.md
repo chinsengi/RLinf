@@ -304,4 +304,4 @@ If behavior is numerically stable but task performance is poor:
 - [network_infrastructure](network_infrastructure.md)
 - [training_architecture](training_architecture.md)
 - [yam_ppo_openpi](yam_ppo_openpi.md)
-- [yam_ppo_openpi_topreward](yam_ppo_openpi_topreward.md)
+- [yam_ppo_openpi_subtask](yam_ppo_openpi_subtask.md)

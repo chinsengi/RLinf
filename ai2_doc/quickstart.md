@@ -7,7 +7,7 @@ YAM experiments.
 For network and infrastructure details, see [network_infrastructure](network_infrastructure.md).
 For algorithm and implementation details, see [training_architecture](training_architecture.md).
 For config-specific guides, see [yam_ppo_openpi](yam_ppo_openpi.md) and
-[yam_ppo_openpi_topreward](yam_ppo_openpi_topreward.md).
+[yam_ppo_openpi_subtask](yam_ppo_openpi_subtask.md).
 
 ## Prerequisites
 
@@ -46,39 +46,17 @@ session. Training is not submitted yet.
 
 ```bash
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi \
+    --config yam_ppo_openpi_async \
     --interactive --allow-dirty
 ```
 
-To specify a model checkpoint and/or task description:
+Use `yam_ppo_openpi_sync` instead if you want the sync staged runtime.
 
-```bash
-bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi \
-    --model-path thomas0829/folding_towel_pi05 \
-    --task "Fold the towel." \
-    --interactive --allow-dirty
-```
-
-To run inference only (no weight updates), set `algorithm.lr=0`:
-
-```bash
-bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi \
-    --model-path thomas0829/folding_towel_pi05 \
-    --task "Fold the towel." \
-    --interactive --allow-dirty \
-    -- algorithm.lr=0
-```
-
-Extra Hydra overrides can be passed after `--`:
-
-```bash
-bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi \
-    --interactive --allow-dirty \
-    -- algorithm.update_epoch=2
-```
+In `--interactive` mode, this command only creates the Beaker session and
+starts Ray. It does **not** build or run the training command, so training-only
+arguments such as `--model-path`, `--task`, or Hydra overrides after `--`
+(for example `algorithm.lr=0`) have no effect at this step. Apply them in
+Step 4 when you launch the Python training command manually.
 
 Beaker prints a session ID. Keep it for Step 4, where you will attach and start
 training manually. Pass `--workspace <beaker-workspace>` if you want to submit
@@ -90,9 +68,11 @@ cluster instead:
 
 ```bash
 bash scripts/submit_yam_beaker_cluster.sh \
-    --config yam_ppo_openpi \
+    --config yam_ppo_openpi_async \
     --allow-dirty
 ```
+
+Use `yam_ppo_openpi_sync` here as well if you want the sync staged runtime.
 
 That path starts Ray and waits without creating an interactive Beaker session.
 In that case, use direct SSH in Step 4 instead of `beaker session attach`.
@@ -106,6 +86,7 @@ Watch the Beaker logs for:
 100.a.b.c
 ==================
 ```
+this ip is also aliased as `beaker-0`. Sometimes you will use it to SSH into the container and to configure the robot server's reverse tunnel.
 
 ### Step 3: Start the robot server with persistent reverse SSH tunnel
 
@@ -113,13 +94,13 @@ Watch the Beaker logs for:
 # Real hardware — tunnel reconnects automatically when new Beaker jobs start
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
+    --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
     --use-follower-servers
 
 # Dummy mode (no CAN bus / robot hardware needed — for pipeline testing)
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
+    --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
     --dummy
 ```
 
@@ -130,7 +111,7 @@ approve it by running `touch /tmp/rlinf_approve_chunk` in another terminal:
 ```bash
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --train-config examples/embodiment/config/yam_ppo_openpi.yaml \
+    --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
     --use-follower-servers --verbose
 ```
 
@@ -146,7 +127,8 @@ Behavior to expect:
   training YAML, so `env.return_home_minutes` and `env.server_cooldown_minutes`
   only need to be edited once.
 - If you omit `--train-config`, the launcher now defaults to
-  `examples/embodiment/config/yam_ppo_openpi.yaml`.
+  `examples/embodiment/config/yam_ppo_openpi_async.yaml`.
+- You can point `--train-config` at either the `_async` or `_sync` YAM config.
 - A Beaker-side `Ctrl+C` returns the robot home and switches to zero-torque
   waiting mode without shutting down the desktop server.
 - A desktop-side `Ctrl+C` performs the full local shutdown after returning home.
@@ -163,12 +145,41 @@ attach to the Beaker session and launch training manually:
 beaker session attach <session-id>
 cd /weka/oe-training-default/shiruic/RLinf
 source .venv/bin/activate
-python examples/embodiment/train_embodied_agent_staged.py \
-    --config-name yam_ppo_openpi \
+python examples/embodiment/train_embodied_agent_staged_async.py \
+    --config-name yam_ppo_openpi_async \
     actor.model.model_path=thomas0829/folding_towel_pi05 \
     rollout.model.model_path=thomas0829/folding_towel_pi05 \
     'env.train.task_description=Fold the towel.' \
     'env.eval.task_description=Fold the towel.'
+
+# Sync staged runtime
+python examples/embodiment/train_embodied_agent_staged.py \
+    --config-name yam_ppo_openpi_sync \
+    actor.model.model_path=thomas0829/folding_towel_pi05 \
+    rollout.model.model_path=thomas0829/folding_towel_pi05 \
+    'env.train.task_description=Fold the towel.' \
+    'env.eval.task_description=Fold the towel.'
+```
+
+To run without gradient updating the model from the same interactive session, add `algorithm.lr=0`
+to the manual training command:
+
+```bash
+python examples/embodiment/train_embodied_agent_staged_async.py \
+    --config-name yam_ppo_openpi_async \
+    actor.model.model_path=thomas0829/folding_towel_pi05 \
+    rollout.model.model_path=thomas0829/folding_towel_pi05 \
+    'env.train.task_description=Fold the towel.' \
+    'env.eval.task_description=Fold the towel.' \
+    algorithm.lr=0
+```
+
+Apply any other Hydra overrides here as well, for example:
+
+```bash
+python examples/embodiment/train_embodied_agent_staged_async.py \
+    --config-name yam_ppo_openpi_async \
+    algorithm.update_epoch=2
 ```
 
 If the run fails or you want to tweak Hydra overrides, re-run the training
@@ -182,8 +193,8 @@ SSH into the container and run the same command there:
 ssh shiruic@beaker-0  # or ssh shiruic@<tailscale-ip>
 cd /weka/oe-training-default/shiruic/RLinf
 source .venv/bin/activate
-python examples/embodiment/train_embodied_agent_staged.py \
-    --config-name yam_ppo_openpi \
+python examples/embodiment/train_embodied_agent_staged_async.py \
+    --config-name yam_ppo_openpi_async \
     actor.model.model_path=thomas0829/folding_towel_pi05 \
     rollout.model.model_path=thomas0829/folding_towel_pi05 \
     'env.train.task_description=Fold the towel.' \
@@ -209,18 +220,24 @@ VLMPlanner (GPU 2) ◄── frames + instruction ── EnvWorker ────�
 
 > **Reward note:** Both YAM configs use TOPReward (Qwen3-VL-8B on GPU 2) —
 > no custom reward code required. The only difference is `subtask_interval`:
-> `yam_ppo_openpi` scores reward only; `yam_ppo_openpi_topreward` also
+> `yam_ppo_openpi_async` scores reward only; `yam_ppo_openpi_subtask_async` also
 > generates VLM subtask descriptions injected into the policy's language conditioning.
+> The matching `_sync` variants keep the same reward/subtask split and switch
+> only the staged runtime (`train_embodied_agent_staged.py`,
+> `algorithm.loss_type: actor_critic`).
 
 ## Supported Configs
 
 | Config | Reward | Subtask Planning | Startup Command |
 |---|---|---|---|
-| `yam_ppo_openpi` | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
-| `yam_ppo_openpi_topreward` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 3`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_async` | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_subtask_async` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_sync` | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_subtask_sync` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
 
-Both configs use the same decoupled startup flow. Both startup scripts
-auto-detect the GPU count from the config name.
+All four remote configs use the same startup flow. The `_async` pair runs
+`train_embodied_agent_staged_async.py`; the `_sync` pair runs
+`train_embodied_agent_staged.py`.
 
 ## Next Steps
 
@@ -230,5 +247,5 @@ auto-detect the GPU count from the config name.
   PPO/GAE internals, Hydra config reference, and implementation notes
 - [YAM PPO + TOPReward config guide](yam_ppo_openpi.md) — includes a Beaker
   simulated-robot-input validation workflow
-- [YAM PPO + TOPReward + subtask planning guide](yam_ppo_openpi_topreward.md)
+- [YAM PPO + TOPReward + subtask planning guide](yam_ppo_openpi_subtask.md)
   — includes the staged Beaker simulated-robot-input validation workflow

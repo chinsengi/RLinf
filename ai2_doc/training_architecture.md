@@ -5,19 +5,22 @@ implementation notes for the YAM PPO training pipeline. For setup and running a
 first training job, see [quickstart](quickstart.md). For network and
 infrastructure details, see [network_infrastructure](network_infrastructure.md).
 For config-specific runbooks, see [yam_ppo_openpi](yam_ppo_openpi.md) and
-[yam_ppo_openpi_topreward](yam_ppo_openpi_topreward.md).
+[yam_ppo_openpi_subtask](yam_ppo_openpi_subtask.md).
 
 ## Supported Configs
 
 | Config | Algorithm | Policy | Reward | Subtask Planning | Entry Point | GPUs | Beaker Script |
 |---|---|---|---|---|---|---|---|
-| `yam_ppo_openpi` | PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `train_embodied_agent_staged.py` | 3 | `submit_yam_training.sh` |
-| `yam_ppo_openpi_topreward` | PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | yes (`subtask_interval: 3`) | `train_embodied_agent_staged.py` | 3 | `submit_yam_training.sh` |
+| `yam_ppo_openpi_async` | Async PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `train_embodied_agent_staged_async.py` | 3 | `submit_yam_training.sh` |
+| `yam_ppo_openpi_subtask_async` | Async PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `train_embodied_agent_staged_async.py` | 3 | `submit_yam_training.sh` |
+| `yam_ppo_openpi_sync` | Sync PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `train_embodied_agent_staged.py` | 3 | `submit_yam_training.sh` |
+| `yam_ppo_openpi_subtask_sync` | Sync PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `train_embodied_agent_staged.py` | 3 | `submit_yam_training.sh` |
 
-Both configs use TOPReward (Qwen3-VL-8B on GPU 2) and `group_size: 1`.
-The only difference is `subtask_interval`: `yam_ppo_openpi` uses the VLM for reward
-scoring only; `yam_ppo_openpi_topreward` also generates language subtask descriptions
-that are injected into the policy's language conditioning.
+All four remote configs use TOPReward (Qwen3-VL-8B on GPU 2) and `group_size: 1`.
+The `openpi` pair uses reward scoring only; the `subtask` pair also injects
+language subtask descriptions. The runtime split is explicit:
+- `_async` uses `train_embodied_agent_staged_async.py` and `decoupled_actor_critic`
+- `_sync` uses `train_embodied_agent_staged.py` and `actor_critic`
 
 > **`collect_prev_infos: true` required for GAE.** Both configs use `adv_type: gae`,
 > which requires the value estimates (`prev_values`) collected by the rollout worker
@@ -39,11 +42,11 @@ that are injected into the policy's language conditioning.
 
 > **`subtask_interval` unit:** chunk steps (not env steps). The `EnvWorker` resets
 > the subtask counter at `bootstrap_step()` (once per rollout epoch / episode
-> reset). With `max_steps_per_rollout_epoch: 100` and `num_action_chunks: 10`,
-> `n_train_chunk_steps = 10`. Therefore `subtask_interval` must be ≤ 10 to fire
-> within an episode. `subtask_interval: 3` → VLM updates the subtask at chunk
-> steps 3, 6, 9 (env steps ~30, ~60, ~90 — roughly 30% / 60% / 90% of the episode).
-> Setting `subtask_interval > n_train_chunk_steps` disables subtask planning
+> reset). In the shipped `yam_ppo_openpi_subtask_{async,sync}` configs,
+> `max_steps_per_rollout_epoch: 60` and `num_action_chunks: 30`, so
+> `n_train_chunk_steps = 2`. The shipped `subtask_interval: 1` therefore fires on
+> both chunk steps in the rollout (roughly 50% and 100% of the episode). Setting
+> `subtask_interval > n_train_chunk_steps` disables subtask planning
 > (the config validator warns at startup; the counter resets before reaching the
 > threshold so the planner never fires).
 
@@ -99,27 +102,28 @@ After rollout_epoch epochs:               send_rollout_trajectories() ──► 
 ```
 
 `n_train_chunk_steps = max_steps_per_rollout_epoch // num_action_chunks`
-(e.g. `100 // 10 = 10` for YAM with `max_steps_per_rollout_epoch: 100`, `num_action_chunks: 10`).
+(e.g. `60 // 30 = 2` for the shipped `yam_ppo_openpi_subtask_{async,sync}` configs).
 
 The post-loop `recv_env_output` (in `generate_one_epoch`) receives the last env step result
-(observation + reward + done from the 10th `env_interact_step`). It serves two purposes:
-(1) collects `prev_values = V(obs₁₀)` for GAE bootstrapping (the `n_steps+1` value estimate),
-and (2) captures the last step's reward and done signal to complete the 10-entry reward window.
+(observation + reward + done from the final `env_interact_step`). It serves two purposes:
+(1) collects `prev_values = V(obs_final)` for GAE bootstrapping (the `n_steps+1` value estimate),
+and (2) captures the last step's reward and done signal to complete the rollout reward window.
 No action is sent back to the EnvWorker for this step (`prev_logprobs=None`, `actions=None`,
 `forward_inputs=None`). The `prev_values` entry is collected because
 `rollout.collect_prev_infos: true` (required for `adv_type: gae`).
 
-Resulting trajectory shapes after `to_trajectory()` (for `n_train_chunk_steps=10`, `bsz=B`, `num_action_chunks=C`):
+Resulting trajectory shapes after `to_trajectory()` (for `n_train_chunk_steps=N`, `bsz=B`, `num_action_chunks=C`):
 
 | Field | Shape | Contents |
 |---|---|---|
-| `rewards` | `[10, B, C]` | Loop iter 0 (bootstrap) has `rewards=None` so is skipped; iters 1–9 + post-loop provide 10 entries. Each entry is `[B, C]` (one reward scalar per sub-step). |
-| `prev_values` | `[11, B, 1]` | V(obs₀)…V(obs₁₀): all 10 loop iters + post-loop. Value head output is per-observation, shape `[B, 1]`. |
-| `dones` | `[11, B, C]` | dones₀ (bootstrap initial) + dones₁…dones₁₀. Shape `[B, C]` per entry (one done flag per sub-step). |
-| `forward_inputs` | `dict[str, Tensor]` each `[10, B, ...]` | `stack_list_of_dict_tensor` converts the `EmbodiedRolloutResult.forward_inputs` (a list of 10 per-step dicts) into a stacked dict. Keys include `chains`, `denoise_inds`, `tokenized_prompt`, `tokenized_prompt_mask` + cloned observation tensors — the diffusion rollout state needed to recompute logprobs during the PPO update. `action` (raw action values) are **not** stored for standard PPO (`forward_action=None` in OpenPI non-DSRL mode; the key `"action"` is absent from each step's dict). |
+| `rewards` | `[N, B, C]` | Loop iter 0 (bootstrap) has `rewards=None` so is skipped; the remaining `N-1` loop iterations plus the post-loop receive path provide `N` reward entries. Each entry is `[B, C]` (one reward scalar per sub-step). |
+| `prev_values` | `[N+1, B, 1]` | Value estimates for the bootstrap observation, each rollout-step observation, and the final post-loop observation. The value head output is per-observation, shape `[B, 1]`. |
+| `dones` | `[N+1, B, C]` | `dones_0` (bootstrap initial) plus one done tensor per rollout-step observation and the final post-loop observation. Shape `[B, C]` per entry (one done flag per sub-step). |
+| `forward_inputs` | `dict[str, Tensor]` each `[N, B, ...]` | `stack_list_of_dict_tensor` converts the `EmbodiedRolloutResult.forward_inputs` (a list of `N` per-step dicts) into a stacked dict. Keys include `chains`, `denoise_inds`, `tokenized_prompt`, `tokenized_prompt_mask` + cloned observation tensors — the diffusion rollout state needed to recompute logprobs during the PPO update. `action` (raw action values) are **not** stored for standard PPO (`forward_action=None` in OpenPI non-DSRL mode; the key `"action"` is absent from each step's dict). |
 
-For YAM (`C=10`, `B=1`): `rewards=[10,1,10]`, `prev_values=[11,1,1]`, `dones=[11,1,10]`.
-`preprocess_embodied_advantages_inputs` with `reward_type="chunk_level"` then reduces the C dimension: `rewards.sum(-1,keepdim=True)→[10,1,1]`, `dones.max(-1,keepdim=True)→[11,1,1]`.
+For the shipped `yam_ppo_openpi_subtask_{async,sync}` configs (`N=2`, `C=30`, `B=1`):
+`rewards=[2,1,30]`, `prev_values=[3,1,1]`, `dones=[3,1,30]`.
+`preprocess_embodied_advantages_inputs` with `reward_type="chunk_level"` then reduces the C dimension: `rewards.sum(-1,keepdim=True)→[2,1,1]`, `dones.max(-1,keepdim=True)→[3,1,1]`.
 
 > **`bootstrap_type: always` note:** `bootstrap_type` controls whether
 > `get_dones_and_rewards()` adds a discounted bootstrap value to the reward on truncated episodes
@@ -137,7 +141,7 @@ Quick mapping from architecture terms to code locations:
 
 | Term | Code component | Location |
 |---|---|---|
-| **Diffusion NFT** | RL algorithm for flow-matching / diffusion policies (π₀.5). The current YAM configs run standard PPO on the OpenPI model — Diffusion NFT is a planned upgrade. | `yam_ppo_openpi*.yaml`, `rlinf/models/embodiment/openpi/` — TODO(agent): not yet implemented |
+| **Diffusion NFT** | RL algorithm for flow-matching / diffusion policies (π₀.5). The current YAM configs run standard PPO on the OpenPI model — Diffusion NFT is a planned upgrade. | `yam_ppo_openpi_*`, `rlinf/models/embodiment/openpi/` — TODO(agent): not yet implemented |
 | **VLM planner** | `VLMPlannerWorker` (Qwen3-VL-8B) | `rlinf/workers/vlm_planner/vlm_planner_worker.py` |
 | **TOPReward** | `compute_top_reward()` — log P("True" \| frames, instruction) | Same file, called from `rlinf/workers/env/env_worker.py` |
 | **Frame buffer** | Episode frame buffer `_episode_frames` in `EnvWorker` | `rlinf/workers/env/env_worker.py` — NOT a standalone Ray actor; frames are buffered in-process before each TOPReward call |
@@ -189,7 +193,7 @@ Note: `last_obs` (single latest frame for subtask planning) is distinct from `_e
 
 `_steps_since_subtask_update` is an instance variable reset to `0` in `bootstrap_step()` (once per rollout epoch). With `rollout_epoch: 1`, this reset happens once per training step. The effective maximum subtask interval within a single episode is therefore `n_train_chunk_steps = max_steps_per_rollout_epoch // num_action_chunks`.
 
-For the YAM configs (`max_steps_per_rollout_epoch: 100`, `num_action_chunks: 10`): `n_train_chunk_steps = 10`. If `subtask_interval > 10` the subtask planner never fires because the counter is reset before it reaches the threshold. The correct value for 3 subtask updates per episode is `subtask_interval: 3` (chunk steps 3, 6, 9 = env steps 30, 60, 90).
+For the shipped `yam_ppo_openpi_subtask_{async,sync}` configs (`max_steps_per_rollout_epoch: 60`, `num_action_chunks: 30`): `n_train_chunk_steps = 2`. The shipped `subtask_interval: 1` fires on both chunk steps in the episode. If `subtask_interval > 2`, the subtask planner never fires because the counter is reset before it reaches the threshold.
 
 ### TOPReward VLM latency
 
@@ -268,7 +272,7 @@ grpc_max_message_size: 16777216  # 16 MB
 grpc_timeout: 30.0               # seconds per RPC; scaled by chunk_size for ChunkStep
 
 # Base task description — always overridden by the training config.
-# e.g. yam_ppo_openpi sets this to "bimanual pick and place".
+# e.g. yam_ppo_openpi_async sets this to "bimanual pick and place".
 # RemoteEnv.__init__ calls SetTaskDescription gRPC with this value at startup
 # so the robot server's YAMEnv starts with the correct instruction.
 task_description: ""

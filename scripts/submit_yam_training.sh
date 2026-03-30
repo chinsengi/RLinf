@@ -2,14 +2,16 @@
 #
 # submit_yam_training.sh — Submit YAM training to Beaker.
 #
-# Supports two configs (both use TOPReward, both need 3 GPUs):
-#   yam_ppo_openpi                  — PPO + π₀.5 + TOPReward (no subtask planning)
-#   yam_ppo_openpi_topreward        — PPO + π₀.5 + TOPReward + subtask planning
+# Supports staged YAM configs with explicit runtime suffixes:
+#   yam_ppo_openpi_async            — async PPO + π₀.5 + TOPReward (no subtask planning)
+#   yam_ppo_openpi_subtask_async    — async PPO + π₀.5 + TOPReward + subtask planning
+#   yam_ppo_openpi_sync             — sync PPO + π₀.5 + TOPReward (no subtask planning)
+#   yam_ppo_openpi_subtask_sync     — sync PPO + π₀.5 + TOPReward + subtask planning
 #
 # Topology (both configs, single Beaker node):
 #   GPU 0 — actor (FSDP training)
 #   GPU 1 — rollout (inference)
-#   GPU 2 — VLM planner (Qwen3-VL-8B, TOPReward scoring; + subtask for topreward variant)
+#   GPU 2 — VLM planner (Qwen3-VL-8B, TOPReward scoring; + subtask for subtask variant)
 #   CPU   — RemoteEnv (gRPC to robot server via SSH tunnel)
 #
 # The robot server runs on the local desktop with a reverse SSH tunnel
@@ -28,7 +30,7 @@
 set -euo pipefail
 
 # --- Defaults ---
-CONFIG_NAME="yam_ppo_openpi"
+CONFIG_NAME="yam_ppo_openpi_async"
 MODEL_PATH=""
 TASK_DESC="pick and place"
 EXP_NAME=""
@@ -51,18 +53,22 @@ WEKA_MOUNT="oe-training-default:/weka/oe-training-default"
 INSTALL_CMD="bash requirements/install.sh embodied --model openpi --env remote"
 RAY_PORT=6379
 
+SAFE_REPO_SYNC_CMD='cd '"${REPO_DIR}"' && echo '"'"'=== Fetching repo metadata ==='"'"' && git fetch origin && CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || true) && if [ -z "${CURRENT_BRANCH}" ]; then echo '"'"'=== Detached HEAD; leaving repo checkout unchanged ==='"'"'; elif [ "${CURRENT_BRANCH}" != "dev" ]; then echo "=== Current branch is ${CURRENT_BRANCH}; leaving repo checkout unchanged ==="; elif [ -n "$(git status --porcelain --untracked-files=normal)" ]; then echo '"'"'=== Repo has local changes; leaving checkout unchanged ==='"'"'; else echo '"'"'=== Fast-forwarding clean dev branch to origin/dev ==='"'"' && git pull --ff-only origin dev; fi && echo '"'"'=== Repo sync check complete ==='"'"''
+
 usage() {
     cat <<'EOF'
 Usage: bash scripts/submit_yam_training.sh [OPTIONS] [-- HYDRA_OVERRIDES...]
 
 Submit YAM training to Beaker with automatic component placement.
 
-Supported configs (both use TOPReward, both require 3 GPUs):
-  yam_ppo_openpi                  3 GPUs — TOPReward only, no subtask planning
-  yam_ppo_openpi_topreward        3 GPUs — TOPReward + VLM subtask planning
+Supported staged YAM configs (all require 3 GPUs):
+  yam_ppo_openpi_async            3 GPUs — async PPO, TOPReward only
+  yam_ppo_openpi_subtask_async    3 GPUs — async PPO, TOPReward + VLM subtask planning
+  yam_ppo_openpi_sync             3 GPUs — sync PPO, TOPReward only
+  yam_ppo_openpi_subtask_sync     3 GPUs — sync PPO, TOPReward + VLM subtask planning
 
 Options:
-  --config NAME         Hydra config name (default: yam_ppo_openpi)
+  --config NAME         Hydra config name (default: yam_ppo_openpi_async)
   --model-path PATH     Path to model checkpoint (local or HuggingFace ID)
   --task DESC           Task description (default: "pick and place")
   --name NAME           Experiment name (default: rlinf-<config>)
@@ -145,15 +151,26 @@ if [ -z "$EXP_NAME" ]; then
     fi
 fi
 
+case "$CONFIG_NAME" in
+    *_desktop_async|*_desktop_sync)
+        echo "Error: ${CONFIG_NAME} uses the desktop-driven 2-node topology."
+        echo "Use scripts/submit_yam_beaker_cluster.sh to start the Beaker head"
+        echo "and scripts/join_beaker_cluster.sh from the desktop to join node rank 1."
+        exit 1
+        ;;
+esac
+
 # --- Detect config type and set GPU count / entry point ---
 IS_TOPREWARD=false
 ENTRY_SCRIPT="train_embodied_agent.py"
 
 case "$CONFIG_NAME" in
-    *topreward*|*staged*|yam_ppo_openpi)
-        # All YAM configs use TOPReward → 3 GPUs, staged entry point.
-        # yam_ppo_openpi uses TOPReward with subtask_interval=0 (no subtask planning).
-        # yam_ppo_openpi_topreward also enables subtask planning (subtask_interval=3).
+    yam_*_async)
+        IS_TOPREWARD=true
+        ENTRY_SCRIPT="train_embodied_agent_staged_async.py"
+        [ "$GPUS" -eq 0 ] && GPUS=3
+        ;;
+    yam_*_sync)
         IS_TOPREWARD=true
         ENTRY_SCRIPT="train_embodied_agent_staged.py"
         [ "$GPUS" -eq 0 ] && GPUS=3
@@ -201,8 +218,7 @@ if [ -n "$INTERACTIVE" ]; then
     ENTRYPOINT_CMD+=" && echo '=================='"
     ENTRYPOINT_CMD+=" && INSTALL_CMD_DECODED=\$(echo ${INSTALL_CMD_B64} | base64 -d)"
     ENTRYPOINT_CMD+=" && export RAY_health_check_period_ms=3600000"
-    ENTRYPOINT_CMD+=" && cd ${REPO_DIR}"
-    ENTRYPOINT_CMD+=" && echo '=== Updating repo to latest ===' && git fetch origin && git reset --hard origin/dev && echo '=== Repo updated ==='"
+    ENTRYPOINT_CMD+=" && ${SAFE_REPO_SYNC_CMD}"
     ENTRYPOINT_CMD+=" && bash ray_utils/start_ray_beaker.sh"
     ENTRYPOINT_CMD+=" --entrypoint"
     ENTRYPOINT_CMD+=" --interactive-shell"
@@ -266,8 +282,8 @@ else
     TRAIN_CMD+=" cluster.num_nodes=${REPLICAS}"
 
     # For single replica the placement is baked into the config:
-    #   yam_ppo_openpi:           actor:0  rollout:1
-    #   yam_ppo_openpi_topreward: actor:0  rollout:1  VLM:2 (heuristic: max(0,1)+1)
+    #   yam_ppo_openpi_*:           actor:0  rollout:1
+    #   yam_ppo_openpi_subtask_*: actor:0  rollout:1  VLM:2 (heuristic: max(0,1)+1)
     # For multiple replicas, distribute actor + rollout across node ranks.
     if [ "$REPLICAS" -gt 1 ]; then
         LAST_RANK=$((REPLICAS - 1))
@@ -334,7 +350,7 @@ else
     ENTRYPOINT_CMD+=" && echo '=================='"
     ENTRYPOINT_CMD+=" && TRAIN_CMD_DECODED=\$(echo ${TRAIN_CMD_B64} | base64 -d)"
     ENTRYPOINT_CMD+=" && INSTALL_CMD_DECODED=\$(echo ${INSTALL_CMD_B64} | base64 -d)"
-    ENTRYPOINT_CMD+=" && cd ${REPO_DIR} && echo '=== Updating repo to latest ===' && git fetch origin && git reset --hard origin/dev && echo '=== Repo updated ==='"
+    ENTRYPOINT_CMD+=" && ${SAFE_REPO_SYNC_CMD}"
     ENTRYPOINT_CMD+=" && bash ray_utils/start_ray_beaker.sh"
     ENTRYPOINT_CMD+=" --entrypoint"
     ENTRYPOINT_CMD+=" --ray-port ${RAY_PORT}"

@@ -27,21 +27,32 @@ else
     CONFIG_NAME=$1
 fi
 
-# Auto-select entry script: configs with a VLM planner need
-# train_embodied_agent_staged.py so that VLMPlannerWorker is launched and wired.
-#
-# Patterns:
-#   *staged*        — configs with VLM subtask planning
-#   *topreward*     — TOPReward configs (VLM dense reward)
-#   yam_ppo_openpi  — YAM PPO baseline (TOPReward, no subtask planning)
-case "$CONFIG_NAME" in
-    *staged*|*topreward*|yam_ppo_openpi)
-        SRC_FILE="${EMBODIED_PATH}/train_embodied_agent_staged.py"
-        ;;
-    *)
-        SRC_FILE="${EMBODIED_PATH}/train_embodied_agent.py"
-        ;;
-esac
+CONFIG_FILE="${EMBODIED_PATH}/config/${CONFIG_NAME}.yaml"
+
+# Auto-select the staged YAM entrypoints only for configs that actually opt in
+# to the staged runtime (`vlm_planner:` block) and use the explicit `_async` or
+# `_sync` suffix. All other configs keep the generic simulation launcher path.
+if [[ -f "${CONFIG_FILE}" ]] && rg -q '^vlm_planner:' "${CONFIG_FILE}"; then
+    if rg -q 'env/yam_pi05_follower@env\.train' "${CONFIG_FILE}"; then
+        echo "Error: ${CONFIG_NAME} uses the desktop-driven topology."
+        echo "Use scripts/submit_yam_beaker_cluster.sh and scripts/join_beaker_cluster.sh instead."
+        exit 1
+    fi
+
+    case "$CONFIG_NAME" in
+        *_async)
+            SRC_FILE="${EMBODIED_PATH}/train_embodied_agent_staged_async.py"
+            ;;
+        *_sync)
+            SRC_FILE="${EMBODIED_PATH}/train_embodied_agent_staged.py"
+            ;;
+        *)
+            SRC_FILE="${EMBODIED_PATH}/train_embodied_agent.py"
+            ;;
+    esac
+else
+    SRC_FILE="${EMBODIED_PATH}/train_embodied_agent.py"
+fi
 export SRC_FILE
 
 # NOTE: Set the active robot platform (required for correct action dimension and normalization), supported platforms are LIBERO, ALOHA, BRIDGE, default is LIBERO

@@ -6,7 +6,9 @@
 #   1. submit_yam_beaker_cluster.sh starts a Beaker job with Ray head + GPUs (idle).
 #   2. This script joins the cluster from the desktop and runs training locally.
 #
-# NOTE: The canonical YAM configs (yam_ppo_openpi, yam_ppo_openpi_topreward) use
+# NOTE: The canonical remote YAM configs (yam_ppo_openpi_async,
+# yam_ppo_openpi_subtask_async, yam_ppo_openpi_sync,
+# yam_ppo_openpi_subtask_sync) use
 # env/remote_yam (RemoteEnv via gRPC) and cluster.num_nodes: 1.  For those configs,
 # use submit_yam_training.sh instead — it runs everything on Beaker.
 #
@@ -22,7 +24,7 @@ set -euo pipefail
 
 # --- Defaults ---
 HEAD_IP=""
-CONFIG_NAME="yam_ppo_openpi"
+CONFIG_NAME="yam_ppo_openpi_async"
 MODEL_PATH=""
 TASK_DESC="pick and place"
 NODE_RANK=1
@@ -42,7 +44,7 @@ Required:
   --head-ip IP          Beaker container Tailscale IP (from Beaker logs)
 
 Options:
-  --config NAME         Hydra config name (default: yam_ppo_openpi)
+  --config NAME         Hydra config name (default: yam_ppo_openpi_async)
   --model-path PATH     Model checkpoint path
   --task DESC           Task description (default: "pick and place")
   --node-rank N         Desktop node rank (default: 1)
@@ -87,7 +89,10 @@ fi
 # --- Detect entry script ---
 ENTRY_SCRIPT="train_embodied_agent.py"
 case "$CONFIG_NAME" in
-    *topreward*|*staged*|yam_ppo_openpi)
+    *_async)
+        ENTRY_SCRIPT="train_embodied_agent_staged_async.py"
+        ;;
+    *_sync)
         ENTRY_SCRIPT="train_embodied_agent_staged.py"
         ;;
 esac

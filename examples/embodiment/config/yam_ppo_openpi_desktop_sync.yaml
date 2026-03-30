@@ -1,9 +1,9 @@
-# YAM bimanual robot – async PPO training with π₀.5 (OpenPI), direct YAMEnv on desktop, and TOPReward.
+# YAM bimanual robot – sync PPO training with π₀.5 (OpenPI), direct YAMEnv on desktop, and TOPReward.
 #
-# Algorithm: async PPO with decoupled actor-critic, GAE advantage, and value head.
+# Algorithm: sync PPO with actor-critic, GAE advantage, and value head.
 # Reward:    TOPReward dense progress signal (Qwen3-VL-8B).
 #
-# Difference from yam_ppo_openpi.yaml:
+# Difference from yam_ppo_openpi_sync.yaml:
 #   - Desktop joins the Ray cluster as node_rank 1 (no RobotServer / gRPC needed).
 #   - EnvWorker runs YAMEnv directly on the desktop via a Ray actor.
 #   - num_nodes: 2 (Beaker at rank 0, desktop at rank 1).
@@ -18,11 +18,11 @@
 #
 # Usage:
 #   1. Submit Beaker job (Ray head, idle):
-#        bash scripts/submit_yam_beaker_cluster.sh --config yam_ppo_openpi_desktop
+#        bash scripts/submit_yam_beaker_cluster.sh --config yam_ppo_openpi_desktop_sync
 #   2. Desktop joins and runs training:
 #        bash scripts/join_beaker_cluster.sh \
 #            --head-ip <beaker-tailscale-ip> \
-#            --config yam_ppo_openpi_desktop \
+#            --config yam_ppo_openpi_desktop_sync \
 #            --model-path thomas0829/folding_towel_pi05 \
 #            --task "fold the towel"
 #
@@ -33,8 +33,8 @@
 #   pip install yam_realtime  (on desktop)
 
 defaults:
-  - env/yam@env.train
-  - env/yam@env.eval
+  - env/yam_pi05_follower@env.train
+  - env/yam_pi05_follower@env.eval
   - model/pi0_5@actor.model
   - training_backend/fsdp@actor.fsdp_config
   - override hydra/job_logging: stdout
@@ -71,7 +71,7 @@ runner:
   logger:
     log_path: "../results"
     project_name: rlinf
-    experiment_name: "yam_ppo_openpi_desktop"
+    experiment_name: "yam_ppo_openpi_desktop_sync"
     logger_backends: ["tensorboard"]
 
   max_epochs: 2000
@@ -91,7 +91,6 @@ algorithm:
   kl_penalty: kl
   group_size: 1
   reward_coef: 1.0
-  staleness_threshold: 1
 
   rollout_epoch: 1
   eval_rollout_epoch: 1
@@ -102,7 +101,7 @@ algorithm:
 
   update_epoch: 5
   adv_type: gae
-  loss_type: decoupled_actor_critic
+  loss_type: actor_critic
   loss_agg_func: "token-mean"
 
   bootstrap_type: always

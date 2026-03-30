@@ -18,7 +18,7 @@ Relevant code:
 - `rlinf/algorithms/utils.py`
 - `rlinf/algorithms/losses.py`
 - `rlinf/runners/async_ppo_embodied_runner.py`
-- `examples/embodiment/config/yam_ppo_openpi.yaml`
+- `examples/embodiment/config/yam_ppo_openpi_async.yaml`
 - `examples/embodiment/config/maniskill_ppo_openpi.yaml`
 
 ## 1. What "FlowPPO" Means Here

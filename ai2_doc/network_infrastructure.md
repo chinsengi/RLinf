@@ -77,20 +77,23 @@ desktop is never a Ray node.
     │           └─ Robot HW  │
     └────────────────────────┘
     ▲ Desktop → Beaker TCP: OK (desktop initiates, Tailscale proxies inbound SSH)
-    ✗ Beaker → Desktop TCP: FAILS (no kernel route in userspace Tailscale)
+    ✗ Beaker → Desktop TCP: FAILS (has to be proxyed by Tailscale)
 ```
 
 The desktop → Beaker direction works but the reverse fails — Beaker's userspace
 Tailscale has no kernel TUN interface and cannot route TCP to `100.x.x.x`. See
 [Troubleshooting: Desktop node marked dead](#desktop-node-marked-dead-immediately-after-joining-ray-cluster-topology-2).
 
-**Config:** `examples/embodiment/config/yam_ppo_openpi_desktop.yaml`
-(`num_nodes: 2`, `env/yam` direct, env on desktop `node_rank: 1`). Created
-as a reference but not validated end-to-end on the current AI2 Beaker setup.
+**Configs:** `examples/embodiment/config/yam_ppo_openpi_desktop_async.yaml`
+or `examples/embodiment/config/yam_ppo_openpi_desktop_sync.yaml`
+(`num_nodes: 2`, direct `YAMEnv` on the desktop, env on desktop `node_rank: 1`).
 
-> **Incompatible with current canonical configs.** `yam_ppo_openpi` and
-> `yam_ppo_openpi_topreward` both use `env/remote_yam` (RemoteEnv) and
-> `cluster.num_nodes: 1` — they are designed for Topology 1.
+> **These desktop configs are different from the standard remote YAM configs.**
+> `yam_ppo_openpi_async`, `yam_ppo_openpi_subtask_async`,
+> `yam_ppo_openpi_sync`, and `yam_ppo_openpi_subtask_sync` all use
+> `env/remote_yam` (`RemoteEnv`) with `RobotServer` and `cluster.num_nodes: 1`,
+> which is the standard Topology 1 setup. The `*_desktop_*` configs bypass
+> `RobotServer` and run `YAMEnv` directly on the desktop instead.
 > For standard YAM experiments, use Topology 1 (`submit_yam_training.sh`).
 
 ## Components *(Topology 1: Beaker-Driven)*
@@ -114,6 +117,10 @@ when no CAN interfaces are present (dummy mode or non-robot machine).
 | **Rollout** | GPU 1 | Action inference (π₀.5 requires a dedicated GPU) |
 | **VLM Planner** | GPU 2 | TOPReward scoring (both configs); subtask planning only when `subtask_interval > 0` |
 | **RemoteEnv** | CPU | gRPC client connecting to `localhost:50051` (via the SSH tunnel) |
+
+The remote `_async` and `_sync` configs use the same network and hardware
+topology. Their only intended difference is the staged runtime selected by the
+config suffix and entrypoint.
 
 ## Network Stack
 
@@ -265,7 +272,7 @@ server-side setting that `RemoteEnv` does not read.
 
 All components run in one Beaker replica. Ray head starts on the same node.
 
-`yam_ppo_openpi` (3 GPUs — TOPReward scoring, no subtask planning):
+`yam_ppo_openpi_async` (3 GPUs — TOPReward scoring, no subtask planning):
 ```
 Replica 0 (head)
   ├── Ray head  (:6379)
@@ -275,7 +282,7 @@ Replica 0 (head)
   └── Env       (CPU, gRPC → localhost:50051)
 ```
 
-`yam_ppo_openpi_topreward` (3 GPUs — TOPReward + subtask planning):
+`yam_ppo_openpi_subtask_async` (3 GPUs — TOPReward + subtask planning):
 ```
 Replica 0 (head)
   ├── Ray head  (:6379)
@@ -284,6 +291,11 @@ Replica 0 (head)
   ├── VLM       (GPU 2 — Qwen3-VL-8B, TOPReward + subtask planning)
   └── Env       (CPU, gRPC → localhost:50051)
 ```
+
+Matching sync variants use the same 3-GPU layout:
+
+- `yam_ppo_openpi_sync`
+- `yam_ppo_openpi_subtask_sync`
 
 ### Multi-Replica
 
@@ -319,25 +331,31 @@ workspace.
 ```bash
 # TOPReward only, no subtask planning (3 GPUs: actor GPU 0, rollout GPU 1, VLM GPU 2)
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi \
+    --config yam_ppo_openpi_async \
+    --model-path /path/to/pi05_checkpoint \
+    --dry-run
+
+# Sync staged runtime with the same remote topology
+bash scripts/submit_yam_training.sh \
+    --config yam_ppo_openpi_sync \
     --model-path /path/to/pi05_checkpoint \
     --dry-run
 
 # TOPReward + subtask planning (3 GPUs: actor GPU 0, rollout GPU 1, VLM GPU 2)
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi_topreward \
+    --config yam_ppo_openpi_subtask_async \
     --model-path /path/to/pi05_checkpoint \
     --dry-run
 
 # With Hydra overrides
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi \
+    --config yam_ppo_openpi_async \
     --model-path /weka/.../checkpoint \
     -- algorithm.update_epoch=2 runner.save_interval=50
 
 # Interactive session: full setup, then drop into a shell (no training)
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi \
+    --config yam_ppo_openpi_async \
     --interactive --allow-dirty
 # Beaker prints a session ID; then from the cluster:
 # beaker session attach <session-id>
@@ -345,7 +363,7 @@ bash scripts/submit_yam_training.sh \
 
 **What the script does (training mode):**
 
-1. Auto-detects config type (`yam_ppo_openpi` exact / `*topreward*` / `*staged*` → 3 GPUs + `train_embodied_agent_staged.py`)
+1. Auto-detects config type (`yam_ppo_openpi_async`, `yam_ppo_openpi_sync`, etc.)
 2. Builds Hydra training command (placement is baked into config defaults for single replica)
 3. Base64-encodes the training command (avoids nested shell quoting issues)
 4. Builds entrypoint that installs Tailscale, starts Ray, runs training
@@ -364,7 +382,7 @@ bash scripts/submit_yam_training.sh \
 
 | Option | Default | Description |
 |---|---|---|
-| `--config` | `yam_ppo_openpi` | Hydra config name |
+| `--config` | `yam_ppo_openpi_async` | Hydra config name (`*_async` and `*_sync` are both supported) |
 | `--model-path` | (none) | Model checkpoint / HF ID (training mode only) |
 | `--task` | `"pick and place"` | Task description (training mode only) |
 | `--name` | `rlinf-<config>` | Beaker experiment/session name (appends `-interactive` in interactive mode) |
@@ -455,13 +473,18 @@ command. The desktop then joins and drives training via `join_beaker_cluster.sh`
 ```bash
 # TOPReward only, no subtask planning (3 GPUs, idle, waiting for desktop)
 bash scripts/submit_yam_beaker_cluster.sh \
-    --config yam_ppo_openpi \
+    --config yam_ppo_openpi_async \
+    --dry-run
+
+# Sync staged runtime with the same desktop-driven topology
+bash scripts/submit_yam_beaker_cluster.sh \
+    --config yam_ppo_openpi_sync \
     --dry-run
 ```
 
 **What the script does:**
 
-1. Auto-detects GPU count from config (`yam_ppo_openpi` exact / `*topreward*` / `*staged*` → 3, else 2)
+1. Auto-detects GPU count from config (`yam_*_async` / `yam_*_sync` → 3, else 2)
 2. Installs Tailscale in the container (same as `submit_yam_training.sh`)
 3. Attempts `ip addr add <tailscale-ip>/32 dev lo` to make Ray advertise the
    Tailscale IP; falls back gracefully if `CAP_NET_ADMIN` is absent
@@ -473,7 +496,7 @@ bash scripts/submit_yam_beaker_cluster.sh \
 
 | Option | Default | Description |
 |---|---|---|
-| `--config` | `yam_ppo_openpi` | Config for GPU auto-detection |
+| `--config` | `yam_ppo_openpi_async` | Config for GPU auto-detection (`*_async` and `*_sync` are both supported) |
 | `--gpus` | auto | GPUs (3 for all canonical YAM configs) |
 | `--name` | `rlinf-cluster-<config>` | Beaker experiment name |
 | `--cluster` | `ai2/ceres-cirrascale` | Beaker cluster |
@@ -501,7 +524,7 @@ bash scripts/join_beaker_cluster.sh \
 # TOPReward + subtask planning (custom multi-node config)
 bash scripts/join_beaker_cluster.sh \
     --head-ip 100.64.1.2 \
-    --config my_custom_yam_topreward_config \
+    --config my_custom_yam_subtask_config \
     --node-rank 0 \
     --model-path /path/to/pi05_checkpoint \
     --task "bimanual manipulation"
@@ -524,7 +547,7 @@ bash scripts/join_beaker_cluster.sh \
 | Option | Default | Description |
 |---|---|---|
 | `--head-ip` | (required) | Beaker container Tailscale IP |
-| `--config` | `yam_ppo_openpi` | Hydra config name |
+| `--config` | `yam_ppo_openpi_async` | Hydra config name (`*_async` and `*_sync` are both supported) |
 | `--model-path` | (none) | Model checkpoint path |
 | `--task` | `"pick and place"` | Task description |
 | `--node-rank` | `1` | This desktop's `RLINF_NODE_RANK` |
