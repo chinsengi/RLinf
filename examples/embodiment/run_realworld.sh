@@ -13,10 +13,10 @@ fi
 # dedicated staged entrypoints. All other realworld configs keep their existing
 # launch path.
 case "$CONFIG_NAME" in
-    yam_ppo_openpi_async|yam_ppo_openpi_topreward_async|yam_ppo_openpi_desktop_async)
+    yam_ppo_openpi_async|yam_ppo_openpi_subtask_async|yam_ppo_openpi_desktop_async)
         SRC_FILE="${EMBODIED_PATH}/train_embodied_agent_staged_async.py"
         ;;
-    yam_ppo_openpi_sync|yam_ppo_openpi_topreward_sync|yam_ppo_openpi_desktop_sync)
+    yam_ppo_openpi_sync|yam_ppo_openpi_subtask_sync|yam_ppo_openpi_desktop_sync)
         SRC_FILE="${EMBODIED_PATH}/train_embodied_agent_staged.py"
         ;;
     *)

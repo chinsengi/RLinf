@@ -7,8 +7,8 @@
 #   2. This script joins the cluster from the desktop and runs training locally.
 #
 # NOTE: The canonical remote YAM configs (yam_ppo_openpi_async,
-# yam_ppo_openpi_topreward_async, yam_ppo_openpi_sync,
-# yam_ppo_openpi_topreward_sync) use
+# yam_ppo_openpi_subtask_async, yam_ppo_openpi_sync,
+# yam_ppo_openpi_subtask_sync) use
 # env/remote_yam (RemoteEnv via gRPC) and cluster.num_nodes: 1.  For those configs,
 # use submit_yam_training.sh instead — it runs everything on Beaker.
 #

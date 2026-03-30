@@ -4,9 +4,9 @@
 # Reward:    TOPReward dense progress signal (Qwen3-VL-8B).
 #            No custom reward code required.
 #
-# Difference from yam_ppo_openpi_topreward_async.yaml:
+# Difference from yam_ppo_openpi_subtask_async.yaml:
 #   subtask_interval: 0  — VLM predicts no subtasks; TOPReward scoring only.
-#   Set subtask_interval > 0 to enable VLM subtask planning (see topreward config).
+#   Set subtask_interval > 0 to enable VLM subtask planning (see subtask config).
 #
 # Hardware topology (single Beaker node, 3 GPUs):
 #   GPU 0 – actor (π₀.5 FSDP training with value head)
@@ -173,7 +173,7 @@ env:
     top_reward_instruction_source: initial_task
 
     # Subtask planning disabled — VLM is used for TOPReward only.
-    # Set subtask_interval > 0 to enable VLM subtask predictions (see topreward config).
+    # Set subtask_interval > 0 to enable VLM subtask predictions (see subtask config).
     subtask_interval: 0
 
     # Dummy mode: controlled at the ROBOT SERVER, not here.

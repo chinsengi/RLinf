@@ -4,14 +4,14 @@
 #
 # Supports staged YAM configs with explicit runtime suffixes:
 #   yam_ppo_openpi_async            — async PPO + π₀.5 + TOPReward (no subtask planning)
-#   yam_ppo_openpi_topreward_async  — async PPO + π₀.5 + TOPReward + subtask planning
+#   yam_ppo_openpi_subtask_async    — async PPO + π₀.5 + TOPReward + subtask planning
 #   yam_ppo_openpi_sync             — sync PPO + π₀.5 + TOPReward (no subtask planning)
-#   yam_ppo_openpi_topreward_sync   — sync PPO + π₀.5 + TOPReward + subtask planning
+#   yam_ppo_openpi_subtask_sync     — sync PPO + π₀.5 + TOPReward + subtask planning
 #
 # Topology (both configs, single Beaker node):
 #   GPU 0 — actor (FSDP training)
 #   GPU 1 — rollout (inference)
-#   GPU 2 — VLM planner (Qwen3-VL-8B, TOPReward scoring; + subtask for topreward variant)
+#   GPU 2 — VLM planner (Qwen3-VL-8B, TOPReward scoring; + subtask for subtask variant)
 #   CPU   — RemoteEnv (gRPC to robot server via SSH tunnel)
 #
 # The robot server runs on the local desktop with a reverse SSH tunnel
@@ -63,9 +63,9 @@ Submit YAM training to Beaker with automatic component placement.
 
 Supported staged YAM configs (all require 3 GPUs):
   yam_ppo_openpi_async            3 GPUs — async PPO, TOPReward only
-  yam_ppo_openpi_topreward_async  3 GPUs — async PPO, TOPReward + VLM subtask planning
+  yam_ppo_openpi_subtask_async    3 GPUs — async PPO, TOPReward + VLM subtask planning
   yam_ppo_openpi_sync             3 GPUs — sync PPO, TOPReward only
-  yam_ppo_openpi_topreward_sync   3 GPUs — sync PPO, TOPReward + VLM subtask planning
+  yam_ppo_openpi_subtask_sync     3 GPUs — sync PPO, TOPReward + VLM subtask planning
 
 Options:
   --config NAME         Hydra config name (default: yam_ppo_openpi_async)
@@ -283,7 +283,7 @@ else
 
     # For single replica the placement is baked into the config:
     #   yam_ppo_openpi_*:           actor:0  rollout:1
-    #   yam_ppo_openpi_topreward_*: actor:0  rollout:1  VLM:2 (heuristic: max(0,1)+1)
+    #   yam_ppo_openpi_subtask_*: actor:0  rollout:1  VLM:2 (heuristic: max(0,1)+1)
     # For multiple replicas, distribute actor + rollout across node ranks.
     if [ "$REPLICAS" -gt 1 ]; then
         LAST_RANK=$((REPLICAS - 1))

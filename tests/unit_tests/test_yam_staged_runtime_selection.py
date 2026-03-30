@@ -63,12 +63,12 @@ def test_explicit_staged_sync_async_configs_validate() -> None:
     os.environ["EMBODIED_PATH"] = str(_CONFIG_DIR.parent)
     async_config_names = [
         "yam_ppo_openpi_async",
-        "yam_ppo_openpi_topreward_async",
+        "yam_ppo_openpi_subtask_async",
         "yam_ppo_openpi_desktop_async",
     ]
     sync_config_names = [
         "yam_ppo_openpi_sync",
-        "yam_ppo_openpi_topreward_sync",
+        "yam_ppo_openpi_subtask_sync",
         "yam_ppo_openpi_desktop_sync",
     ]
 

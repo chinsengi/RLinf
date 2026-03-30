@@ -19,7 +19,7 @@ Runtime split:
   `algorithm.loss_type: actor_critic`
 
 For the variant that also enables VLM subtask planning, see
-[yam_ppo_openpi_topreward](yam_ppo_openpi_topreward.md).
+[yam_ppo_openpi_subtask](yam_ppo_openpi_subtask.md).
 
 ## Topology
 

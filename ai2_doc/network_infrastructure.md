@@ -89,8 +89,8 @@ or `examples/embodiment/config/yam_ppo_openpi_desktop_sync.yaml`
 (`num_nodes: 2`, direct `YAMEnv` on the desktop, env on desktop `node_rank: 1`).
 
 > **These desktop configs are different from the standard remote YAM configs.**
-> `yam_ppo_openpi_async`, `yam_ppo_openpi_topreward_async`,
-> `yam_ppo_openpi_sync`, and `yam_ppo_openpi_topreward_sync` all use
+> `yam_ppo_openpi_async`, `yam_ppo_openpi_subtask_async`,
+> `yam_ppo_openpi_sync`, and `yam_ppo_openpi_subtask_sync` all use
 > `env/remote_yam` (`RemoteEnv`) with `RobotServer` and `cluster.num_nodes: 1`,
 > which is the standard Topology 1 setup. The `*_desktop_*` configs bypass
 > `RobotServer` and run `YAMEnv` directly on the desktop instead.
@@ -282,7 +282,7 @@ Replica 0 (head)
   └── Env       (CPU, gRPC → localhost:50051)
 ```
 
-`yam_ppo_openpi_topreward_async` (3 GPUs — TOPReward + subtask planning):
+`yam_ppo_openpi_subtask_async` (3 GPUs — TOPReward + subtask planning):
 ```
 Replica 0 (head)
   ├── Ray head  (:6379)
@@ -295,7 +295,7 @@ Replica 0 (head)
 Matching sync variants use the same 3-GPU layout:
 
 - `yam_ppo_openpi_sync`
-- `yam_ppo_openpi_topreward_sync`
+- `yam_ppo_openpi_subtask_sync`
 
 ### Multi-Replica
 
@@ -343,7 +343,7 @@ bash scripts/submit_yam_training.sh \
 
 # TOPReward + subtask planning (3 GPUs: actor GPU 0, rollout GPU 1, VLM GPU 2)
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi_topreward_async \
+    --config yam_ppo_openpi_subtask_async \
     --model-path /path/to/pi05_checkpoint \
     --dry-run
 
@@ -524,7 +524,7 @@ bash scripts/join_beaker_cluster.sh \
 # TOPReward + subtask planning (custom multi-node config)
 bash scripts/join_beaker_cluster.sh \
     --head-ip 100.64.1.2 \
-    --config my_custom_yam_topreward_config \
+    --config my_custom_yam_subtask_config \
     --node-rank 0 \
     --model-path /path/to/pi05_checkpoint \
     --task "bimanual manipulation"

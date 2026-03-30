@@ -7,7 +7,7 @@ YAM experiments.
 For network and infrastructure details, see [network_infrastructure](network_infrastructure.md).
 For algorithm and implementation details, see [training_architecture](training_architecture.md).
 For config-specific guides, see [yam_ppo_openpi](yam_ppo_openpi.md) and
-[yam_ppo_openpi_topreward](yam_ppo_openpi_topreward.md).
+[yam_ppo_openpi_subtask](yam_ppo_openpi_subtask.md).
 
 ## Prerequisites
 
@@ -220,7 +220,7 @@ VLMPlanner (GPU 2) ◄── frames + instruction ── EnvWorker ────�
 
 > **Reward note:** Both YAM configs use TOPReward (Qwen3-VL-8B on GPU 2) —
 > no custom reward code required. The only difference is `subtask_interval`:
-> `yam_ppo_openpi_async` scores reward only; `yam_ppo_openpi_topreward_async` also
+> `yam_ppo_openpi_async` scores reward only; `yam_ppo_openpi_subtask_async` also
 > generates VLM subtask descriptions injected into the policy's language conditioning.
 > The matching `_sync` variants keep the same reward/subtask split and switch
 > only the staged runtime (`train_embodied_agent_staged.py`,
@@ -231,9 +231,9 @@ VLMPlanner (GPU 2) ◄── frames + instruction ── EnvWorker ────�
 | Config | Reward | Subtask Planning | Startup Command |
 |---|---|---|---|
 | `yam_ppo_openpi_async` | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
-| `yam_ppo_openpi_topreward_async` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_subtask_async` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
 | `yam_ppo_openpi_sync` | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
-| `yam_ppo_openpi_topreward_sync` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_subtask_sync` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
 
 All four remote configs use the same startup flow. The `_async` pair runs
 `train_embodied_agent_staged_async.py`; the `_sync` pair runs
@@ -247,5 +247,5 @@ All four remote configs use the same startup flow. The `_async` pair runs
   PPO/GAE internals, Hydra config reference, and implementation notes
 - [YAM PPO + TOPReward config guide](yam_ppo_openpi.md) — includes a Beaker
   simulated-robot-input validation workflow
-- [YAM PPO + TOPReward + subtask planning guide](yam_ppo_openpi_topreward.md)
+- [YAM PPO + TOPReward + subtask planning guide](yam_ppo_openpi_subtask.md)
   — includes the staged Beaker simulated-robot-input validation workflow

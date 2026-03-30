@@ -26,7 +26,7 @@ but forces the async components:
 Use this script for staged configs with an explicit ``_async`` suffix:
 
 - ``yam_ppo_openpi_async`` — TOPReward only (``subtask_interval: 0``)
-- ``yam_ppo_openpi_topreward_async`` — TOPReward + optional subtask planning
+- ``yam_ppo_openpi_subtask_async`` — TOPReward + optional subtask planning
 - ``yam_ppo_openpi_desktop_async`` — desktop-topology staged variant
 
 These configs are auto-selected here by the standard launchers whenever the
@@ -61,7 +61,7 @@ _FORCED_ASYNC_RUNTIME = True
 @hydra.main(
     version_base="1.1",
     config_path="config",
-    config_name="yam_ppo_openpi_topreward_async",
+    config_name="yam_ppo_openpi_subtask_async",
 )
 def main(cfg) -> None:
     cfg = validate_cfg(cfg)

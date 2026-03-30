@@ -1,8 +1,8 @@
-# YAM PPO + TOPReward + Subtask Planning (`yam_ppo_openpi_topreward_async` / `yam_ppo_openpi_topreward_sync`)
+# YAM PPO + TOPReward + Subtask Planning (`yam_ppo_openpi_subtask_async` / `yam_ppo_openpi_subtask_sync`)
 
 This is the AI2-facing Markdown guide for the staged YAM PPO configs:
-`examples/embodiment/config/yam_ppo_openpi_topreward_async.yaml` and
-`examples/embodiment/config/yam_ppo_openpi_topreward_sync.yaml`.
+`examples/embodiment/config/yam_ppo_openpi_subtask_async.yaml` and
+`examples/embodiment/config/yam_ppo_openpi_subtask_sync.yaml`.
 
 This config runs:
 
@@ -13,10 +13,10 @@ This config runs:
 
 Runtime split:
 
-- `yam_ppo_openpi_topreward_async` uses
+- `yam_ppo_openpi_subtask_async` uses
   `train_embodied_agent_staged_async.py` and
   `algorithm.loss_type: decoupled_actor_critic`
-- `yam_ppo_openpi_topreward_sync` uses `train_embodied_agent_staged.py` and
+- `yam_ppo_openpi_subtask_sync` uses `train_embodied_agent_staged.py` and
   `algorithm.loss_type: actor_critic`
 
 For the simpler TOPReward-only variant, see
@@ -71,11 +71,11 @@ Submit training from the repo root:
 
 ```bash
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi_topreward_async \
+    --config yam_ppo_openpi_subtask_async \
     --model-path /path/to/RLinf-Pi05-SFT
 
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi_topreward_sync \
+    --config yam_ppo_openpi_subtask_sync \
     --model-path /path/to/RLinf-Pi05-SFT
 ```
 
@@ -156,12 +156,12 @@ Enable it with:
 ```bash
 python examples/embodiment/train_embodied_agent_staged_async.py \
     --config-path examples/embodiment/config \
-    --config-name yam_ppo_openpi_topreward_async \
+    --config-name yam_ppo_openpi_subtask_async \
     env.remote_desktop_simulation.enabled=true
 
 python examples/embodiment/train_embodied_agent_staged.py \
     --config-path examples/embodiment/config \
-    --config-name yam_ppo_openpi_topreward_sync \
+    --config-name yam_ppo_openpi_subtask_sync \
     env.remote_desktop_simulation.enabled=true
 ```
 
@@ -170,7 +170,7 @@ Optional overrides:
 ```bash
 python examples/embodiment/train_embodied_agent_staged_async.py \
     --config-path examples/embodiment/config \
-    --config-name yam_ppo_openpi_topreward_async \
+    --config-name yam_ppo_openpi_subtask_async \
     env.remote_desktop_simulation.enabled=true \
     env.remote_desktop_simulation.env_config_path=/path/to/yam_pi05_follower.yaml \
     env.train.remote_server_url=localhost:50051 \
@@ -178,7 +178,7 @@ python examples/embodiment/train_embodied_agent_staged_async.py \
 
 python examples/embodiment/train_embodied_agent_staged.py \
     --config-path examples/embodiment/config \
-    --config-name yam_ppo_openpi_topreward_sync \
+    --config-name yam_ppo_openpi_subtask_sync \
     env.remote_desktop_simulation.enabled=true \
     env.remote_desktop_simulation.env_config_path=/path/to/yam_pi05_follower.yaml \
     env.train.remote_server_url=localhost:50051 \
@@ -214,11 +214,11 @@ dummy `RobotServer` is launched locally inside the Beaker session.
 
 ```bash
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi_topreward_async \
+    --config yam_ppo_openpi_subtask_async \
     --interactive --allow-dirty
 
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi_topreward_sync \
+    --config yam_ppo_openpi_subtask_sync \
     --interactive --allow-dirty
 ```
 
@@ -235,7 +235,7 @@ source .venv/bin/activate
 ```bash
 python examples/embodiment/train_embodied_agent_staged_async.py \
     --config-path examples/embodiment/config \
-    --config-name yam_ppo_openpi_topreward_async \
+    --config-name yam_ppo_openpi_subtask_async \
     env.remote_desktop_simulation.enabled=true \
     env.remote_desktop_simulation.dummy=true \
     env.train.remote_server_url=localhost:50051 \
@@ -245,7 +245,7 @@ python examples/embodiment/train_embodied_agent_staged_async.py \
 
 python examples/embodiment/train_embodied_agent_staged.py \
     --config-path examples/embodiment/config \
-    --config-name yam_ppo_openpi_topreward_sync \
+    --config-name yam_ppo_openpi_subtask_sync \
     env.remote_desktop_simulation.enabled=true \
     env.remote_desktop_simulation.dummy=true \
     env.train.remote_server_url=localhost:50051 \

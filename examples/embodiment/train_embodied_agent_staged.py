@@ -29,7 +29,7 @@ staged configs that should run with ``EmbodiedRunner`` +
 Use this script for staged configs with an explicit ``_sync`` suffix:
 
 - ``yam_ppo_openpi_sync`` — TOPReward only (``subtask_interval: 0``)
-- ``yam_ppo_openpi_topreward_sync`` — TOPReward + optional subtask planning
+- ``yam_ppo_openpi_subtask_sync`` — TOPReward + optional subtask planning
 - ``yam_ppo_openpi_desktop_sync`` — desktop-topology staged variant
 
 Usage::
@@ -526,7 +526,7 @@ def run_with_runtime(cfg, *, use_async_runtime: bool) -> None:
 @hydra.main(
     version_base="1.1",
     config_path="config",
-    config_name="yam_ppo_openpi_topreward_sync",
+    config_name="yam_ppo_openpi_subtask_sync",
 )
 def main(cfg) -> None:
     cfg = validate_cfg(cfg)
