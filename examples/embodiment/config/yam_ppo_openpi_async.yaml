@@ -195,6 +195,15 @@ vlm_planner:
   model_path: "Qwen/Qwen3-VL-8B-Instruct"
   backend: "transformers"
   dtype: "bfloat16"
+  # To offload planner inference into a separate SGLang process / environment,
+  # switch to:
+  # backend: "sglang_http"
+  # server_url: "http://127.0.0.1:30000"
+  # request_timeout: 120.0
+  # The worker still performs local Qwen-VL preprocessing before calling
+  # SGLang /generate. Use
+  # transformers_runtime_path if that preprocessing should come from an
+  # isolated wheel/runtime.
   # Optional explicit placement override. By default RLinf chooses GPU 2 here
   # because actor and rollout occupy GPUs 0 and 1 on the same node.
   # placement: 2

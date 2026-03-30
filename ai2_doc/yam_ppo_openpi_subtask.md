@@ -65,6 +65,48 @@ vlm_planner:
 Use an explicit `vlm_planner.placement` override if you want to pin the VLM to
 a different GPU than the default inferred one.
 
+Planner backend options:
+
+- `backend: "transformers"` keeps Qwen3-VL inside `VLMPlannerWorker` and is the
+  default in the shipped configs.
+- `backend: "sglang_http"` keeps preprocessing in `VLMPlannerWorker` but sends
+  tokenized requests to an external SGLang server via `vlm_planner.server_url`.
+
+External SGLang serve example:
+
+```bash
+git clone --branch sglang-http https://github.com/xslingcn/sglang.git ../sglang
+cd ../sglang
+python -m sglang.launch_server \
+    --model-path ~/Model/qwen-vl-instruct \
+    --host 127.0.0.1 \
+    --port 30000 \
+    --skip-tokenizer-init
+```
+
+Use `xslingcn/sglang` branch `sglang-http` for this path.
+
+Matching config override:
+
+```yaml
+vlm_planner:
+  backend: "sglang_http"
+  server_url: "http://127.0.0.1:30000"
+  request_timeout: 120.0
+```
+
+Separate real smoke results over an external `Qwen/Qwen2-VL-2B-Instruct` server:
+
+- planning smoke returned `Pick up the red object from the table`
+- TOPReward smoke returned `-0.31696125864982605`
+
+Observed numerical alignment against `../TOPReward` on 8 synthetic cases:
+
+- mean absolute delta: `0.15625`
+- max absolute delta: `0.25` when compared at the same effective `24 fps`
+- one larger `0.625` outlier only appeared when RLinf was run at `2 fps` while
+  `../TOPReward` fell back internally to `24 fps` due to missing `video_metadata`
+
 ## Standard Workflow
 
 Submit training from the repo root:

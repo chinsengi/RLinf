@@ -12,7 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+import types
+
 import numpy as np
+
+if "torch" not in sys.modules:
+    torch_stub = types.ModuleType("torch")
+    torch_stub.bfloat16 = "bfloat16"
+    torch_stub.float16 = "float16"
+    torch_stub.float32 = "float32"
+    sys.modules["torch"] = torch_stub
 
 from rlinf.workers.vlm_planner.vlm_planner_worker import VLMPlannerWorker
 
@@ -31,15 +41,14 @@ def test_get_next_subtask_prompt_includes_main_task():
     worker._max_new_tokens_subtask = 64
     worker._build_qwen_messages = lambda _system, _images, user_text: user_text
     worker._generate = lambda messages, _tokens: messages
-    worker.get_memory_text = lambda: "step 1: moved toward towel"
 
     prompt = worker.get_next_subtask(
         images=[np.zeros((8, 8, 3), dtype=np.uint8)],
         main_task="fold the towel",
     )
 
-    assert "Overall task:\nfold the towel" in prompt
-    assert "History of past steps:\nstep 1: moved toward towel" in prompt
+    assert "The overall episode goal is: fold the towel" in prompt
+    assert "single best next subtask" in prompt
 
 
 def test_get_next_subtask_requires_main_task():
