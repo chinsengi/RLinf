@@ -19,12 +19,15 @@ Covers:
 - Main task is passed to get_next_subtask (Plan step 2)
 - Empty task_description rejected when subtask_interval > 0 (Plan step 2)
 - TOPReward instruction selection logic (Plan step 4)
+- Adaptive subtask triggering (plateau, score threshold, cooldown, fallback)
 """
 
+from collections import deque
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 try:
     import ray  # noqa: F401
@@ -59,6 +62,57 @@ def _cfg_node(data):
     return data
 
 
+class _PlannerStub:
+    def __init__(self, result="pick up the corner"):
+        self.calls = []
+        self.result = result
+        self.get_next_subtask = SimpleNamespace(remote=self._get_next_subtask)
+
+    def _get_next_subtask(self, images, main_task):
+        self.calls.append((images, main_task))
+        return self.result
+
+
+def _make_adaptive_worker(
+    *,
+    subtask_adaptive=True,
+    subtask_interval=10,
+    subtask_min_interval=2,
+    plateau_window=3,
+    plateau_threshold=0.01,
+    score_threshold=-0.5,
+    prev_top_score=-2.0,
+    recent_deltas=None,
+    steps_since_update=0,
+):
+    inner_env = SimpleNamespace(task_description="fold the towel")
+    env = SimpleNamespace(
+        unwrapped=inner_env,
+        last_obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+    )
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.env_list = [env]
+    worker._initial_task_descriptions = ["fold the towel"]
+    worker._subtask_interval = subtask_interval
+    worker._subtask_adaptive = subtask_adaptive
+    worker._subtask_min_interval = subtask_min_interval
+    worker._subtask_plateau_window = plateau_window
+    worker._subtask_plateau_threshold = plateau_threshold
+    worker._subtask_score_threshold = score_threshold
+    worker._top_reward_enabled = True
+    worker._top_reward_instruction_source = "initial_task"
+    worker._prev_top_score = prev_top_score
+    worker._steps_since_subtask_update = steps_since_update
+    worker._recent_top_deltas = deque(
+        recent_deltas or [],
+        maxlen=plateau_window,
+    )
+    worker._episode_frames = []
+    worker._vlm_planner = _PlannerStub()
+    worker.log_info = lambda *_args, **_kwargs: None
+    return worker
+
+
 # ---------------------------------------------------------------------------
 # Plan step 1: TOPReward reset on subtask update should not raise
 # ---------------------------------------------------------------------------
@@ -73,6 +127,7 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     worker._top_reward_instruction_source = "current_task"
     worker._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
     worker._prev_top_score = 1.5
+    worker._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
     worker.log_info = lambda *_args, **_kwargs: None
 
     # Should not raise TypeError (the old bug passed stage_id to a no-arg method).
@@ -82,6 +137,7 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     # Reward state should be reset.
     assert worker._episode_frames == []
     assert worker._prev_top_score == 0.0
+    assert list(worker._recent_top_deltas) == []
 
 
 def test_apply_subtask_update_no_reset_for_initial_task():
@@ -181,14 +237,15 @@ def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
                     "auto_reset": False,
                     "reset_on_rollout_epoch": False,
                 }
-            }
+            },
+            "actor": {"model": {"num_action_chunks": 1}},
         }
     )
     worker._top_reward_enabled = False
     worker.stage_num = 1
     worker.train_num_envs_per_stage = 1
     worker.last_obs_list = [{"states": "previous"}]
-    worker.last_intervened_info_list = [("act", "flag")]
+    worker.last_intervened_info_list = [(torch.tensor([1]), torch.tensor([0]))]
 
     reset_calls = []
 
@@ -205,8 +262,8 @@ def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
 
     assert reset_calls == []
     assert env_outputs[0].obs == {"states": "previous"}
-    assert env_outputs[0].intervene_actions == "act"
-    assert env_outputs[0].intervene_flags == "flag"
+    assert torch.equal(env_outputs[0].intervene_actions, torch.tensor([1]))
+    assert torch.equal(env_outputs[0].intervene_flags, torch.tensor([0]))
 
 
 def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled():
@@ -218,7 +275,8 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
                     "auto_reset": False,
                     "reset_on_rollout_epoch": False,
                 }
-            }
+            },
+            "actor": {"model": {"num_action_chunks": 1}},
         }
     )
     worker._top_reward_enabled = False
@@ -242,3 +300,93 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
 
     assert reset_calls == [True]
     assert env_outputs[0].obs == {"states": "reset"}
+
+
+def test_maybe_update_subtask_triggers_on_plateau(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_adaptive_worker(
+        recent_deltas=[0.001, -0.002, 0.0],
+        steps_since_update=1,
+    )
+
+    worker._maybe_update_subtask(0)
+
+    assert len(worker._vlm_planner.calls) == 1
+    assert worker.env_list[0].unwrapped.task_description == "pick up the corner"
+    assert worker._steps_since_subtask_update == 0
+
+
+def test_maybe_update_subtask_triggers_on_score_threshold(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_adaptive_worker(
+        prev_top_score=-0.1,
+        recent_deltas=[0.2],
+        steps_since_update=1,
+    )
+
+    worker._maybe_update_subtask(0)
+
+    assert len(worker._vlm_planner.calls) == 1
+    assert worker._steps_since_subtask_update == 0
+
+
+def test_maybe_update_subtask_respects_adaptive_cooldown(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_adaptive_worker(
+        prev_top_score=-0.1,
+        recent_deltas=[0.001, 0.0, -0.001],
+        steps_since_update=0,
+    )
+
+    worker._maybe_update_subtask(0)
+
+    assert len(worker._vlm_planner.calls) == 0
+    assert worker._steps_since_subtask_update == 1
+
+    worker._maybe_update_subtask(0)
+
+    assert len(worker._vlm_planner.calls) == 1
+    assert worker._steps_since_subtask_update == 0
+
+
+def test_maybe_update_subtask_falls_back_to_max_interval(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_adaptive_worker(
+        subtask_interval=3,
+        subtask_min_interval=2,
+        prev_top_score=-2.0,
+        recent_deltas=[0.1, 0.2],
+        steps_since_update=2,
+    )
+
+    worker._maybe_update_subtask(0)
+
+    assert len(worker._vlm_planner.calls) == 1
+    assert worker._steps_since_subtask_update == 0
+
+
+def test_maybe_update_subtask_fixed_mode_preserves_old_interval_behavior(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_adaptive_worker(
+        subtask_adaptive=False,
+        subtask_interval=1,
+        subtask_min_interval=99,
+        prev_top_score=-0.1,
+        recent_deltas=[0.001, 0.0, -0.001],
+        steps_since_update=0,
+    )
+
+    worker._maybe_update_subtask(0)
+
+    assert len(worker._vlm_planner.calls) == 1
+    assert worker._steps_since_subtask_update == 0

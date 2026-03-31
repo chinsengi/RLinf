@@ -759,6 +759,7 @@ def validate_embodied_cfg(cfg):
             # epoch boundaries must never command an extra env.reset(), or the
             # real robot will return home early for a training bookkeeping
             # reason instead of a true timeout / operator stop.
+            cfg.env.train.reset_on_rollout_epoch = False
             cfg.env.train.reset_on_rollout_epoch_end = False
             for split in ("train", "eval"):
                 control_rate_hz = float(cfg.env[split].get("control_rate_hz", 0.0))
@@ -814,20 +815,40 @@ def validate_embodied_cfg(cfg):
                 "Set rollout.collect_prev_infos: true in the config."
             )
 
-    # Warn if subtask_interval > n_train_chunk_steps: the subtask planner would
-    # never fire because bootstrap_step() resets the counter every rollout epoch.
+    # Warn if subtask_interval > n_train_chunk_steps: in fixed mode the subtask
+    # planner would never fire because bootstrap_step() resets the counter every
+    # rollout epoch. In adaptive mode the planner can still fire from TOPReward
+    # signals, but the fixed-interval fallback will never fire.
     subtask_interval = cfg.env.train.get("subtask_interval", 0)
+    subtask_adaptive = bool(cfg.env.train.get("subtask_adaptive", True))
     max_steps = cfg.env.train.get("max_steps_per_rollout_epoch", None)
     num_chunks = cfg.actor.model.get("num_action_chunks", None)
     if subtask_interval > 0 and max_steps is not None and num_chunks is not None:
         n_train_chunk_steps = max_steps // num_chunks
         if subtask_interval > n_train_chunk_steps:
-            logging.warning(
-                f"subtask_interval ({subtask_interval}) > n_train_chunk_steps "
-                f"({n_train_chunk_steps}). The subtask planner will never fire "
-                f"because bootstrap_step() resets the counter each rollout epoch. "
-                f"Set subtask_interval <= {n_train_chunk_steps}."
-            )
+            if subtask_adaptive:
+                logging.warning(
+                    f"subtask_interval ({subtask_interval}) > n_train_chunk_steps "
+                    f"({n_train_chunk_steps}). Adaptive subtask triggering can "
+                    f"still fire from TOPReward signals, but the fixed-interval "
+                    f"fallback will never fire because bootstrap_step() resets "
+                    f"the counter each rollout epoch. Set subtask_interval <= "
+                    f"{n_train_chunk_steps} to keep the fallback active."
+                )
+            else:
+                logging.warning(
+                    f"subtask_interval ({subtask_interval}) > n_train_chunk_steps "
+                    f"({n_train_chunk_steps}). The subtask planner will never fire "
+                    f"because bootstrap_step() resets the counter each rollout epoch. "
+                    f"Set subtask_interval <= {n_train_chunk_steps}."
+                )
+
+    if subtask_adaptive and not cfg.env.train.get("top_reward_enabled", False):
+        logging.warning(
+            "env.train.subtask_adaptive=true requires env.train.top_reward_enabled=true "
+            "for plateau and score-threshold triggers. Falling back to the fixed "
+            "subtask_interval cadence only."
+        )
 
     # Warn if global_batch_size does not divide rollout_size.
     # rollout_size = n_train_chunk_steps * total_num_envs * rollout_epoch, and
