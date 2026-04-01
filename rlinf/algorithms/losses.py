@@ -325,7 +325,7 @@ def compute_ppo_critic_loss(
 
     Args:
         values (torch.Tensor): Current value predictions.
-        returns (torch.Tensor): Return values.
+        returns (torch.Tensor): Value targets for the critic.
         prev_values (torch.Tensor): Previous value predictions.
         value_clip (float): Value clipping threshold.
         huber_delta (float): Huber loss delta parameter.
@@ -410,7 +410,7 @@ def compute_ppo_actor_critic_loss(**kwargs) -> tuple[torch.Tensor, dict]:
         values (torch.Tensor): Current value predictions
         old_log_prob (torch.Tensor): Previous log probabilities
         advantages (torch.Tensor): Advantage values
-        returns (torch.Tensor): Return values
+        returns (torch.Tensor): Value targets for the critic.
         prev_values (torch.Tensor): Previous value predictions
         clip_ratio_low (float): Lower clipping ratio for PPO
         clip_ratio_high (float): Upper clipping ratio for PPO
