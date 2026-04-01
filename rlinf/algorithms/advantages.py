@@ -34,12 +34,13 @@ def compute_gae_advantages_and_returns(
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Calculate advantages and returns for Proximal Policy Optimization (PPO).
+    Calculate advantages and value targets for Proximal Policy Optimization (PPO).
     NOTE: currently this function does not support auto-reset.
 
     This function implements Generalized Advantage Estimation (GAE) to compute
-    advantages and returns for PPO training. The advantages are normalized
-    using mean and standard deviation for stable training.
+    advantages and value targets for PPO training. The returned value-target
+    tensor is still exposed as ``returns`` elsewhere in RLinf for compatibility
+    with the existing training pipeline and config surface.
 
     Args:
         rewards (torch.Tensor): Rewards per timestep. Shape: [seq_len, bsz].
@@ -48,14 +49,15 @@ def compute_gae_advantages_and_returns(
         gamma (float, optional): Discount factor. Defaults to 1.0.
         gae_lambda (float, optional): GAE smoothing factor. Defaults to 1.0.
         normalize_advantages (bool, optional): Whether to normalize advantages. Defaults to True.
-        normalize_returns (bool, optional): Whether to normalize returns. Defaults to False.
+        normalize_returns (bool, optional): Whether to normalize the returned
+            value targets. Defaults to False.
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: (advantages, returns)
+        Tuple[torch.Tensor, torch.Tensor]: (advantages, value_targets)
     """
     T = rewards.shape[0]
     advantages = torch.zeros_like(rewards)
-    returns = torch.zeros_like(rewards)
+    value_targets = torch.zeros_like(rewards)
     gae = 0
 
     critic_free = values is None
@@ -74,16 +76,18 @@ def compute_gae_advantages_and_returns(
             )
 
         gae = delta + gamma * gae_lambda * (~dones[step + 1]) * gae
-        returns[step] = gae if critic_free else gae + values[step]
+        # ``gae`` is the advantage estimate. The critic is trained against the
+        # corresponding value target V_t + A_t.
+        value_targets[step] = gae if critic_free else gae + values[step]
 
-    advantages = returns - values[:-1] if not critic_free else returns
+    advantages = value_targets - values[:-1] if not critic_free else value_targets
 
     if normalize_advantages:
         advantages = safe_normalize(advantages, loss_mask=loss_mask)
     if normalize_returns:
-        returns = safe_normalize(returns, loss_mask=loss_mask)
+        value_targets = safe_normalize(value_targets, loss_mask=loss_mask)
 
-    return advantages, returns
+    return advantages, value_targets
 
 
 @register_advantage("grpo")

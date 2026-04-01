@@ -184,7 +184,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         )
         self._cooldown_deadline: float | None = None
         self._restart_required: bool = False
-        self._restart_truncation_pending: bool = False
         # Protects all env operations so that safe_recover() and gRPC
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
@@ -266,7 +265,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             self._env.prepare_for_next_episode()
 
         self._restart_required = True
-        self._restart_truncation_pending = True
         self._cooldown_deadline = (
             time.monotonic() + cooldown_s if cooldown_s > 0 else None
         )
@@ -407,10 +405,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 obs = self._finish_restart_if_ready_locked()
                 if obs is None:
                     obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
-                emit_truncated = self._restart_truncation_pending
-                self._restart_truncation_pending = False
                 return self._build_idle_chunk_response(
-                    obs, request.chunk_size, truncated=emit_truncated
+                    obs, request.chunk_size, truncated=True
                 )
 
         if not self._first_chunk_approved:

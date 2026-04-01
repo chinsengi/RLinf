@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import asyncio
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Literal
 
 import numpy as np
@@ -64,7 +64,26 @@ class EnvWorker(Worker):
         # When subtask_interval > 0 the env worker calls the VLM planner every
         # subtask_interval chunk steps and updates env.task_description.
         self._subtask_interval: int = int(self.cfg.env.train.get("subtask_interval", 0))
+        self._subtask_adaptive: bool = bool(
+            self.cfg.env.train.get("subtask_adaptive", True)
+        )
+        self._subtask_min_interval: int = int(
+            self.cfg.env.train.get("subtask_min_interval", 2)
+        )
+        self._subtask_plateau_window: int = max(
+            int(self.cfg.env.train.get("subtask_plateau_window", 3)),
+            1,
+        )
+        self._subtask_plateau_threshold: float = float(
+            self.cfg.env.train.get("subtask_plateau_threshold", 0.01)
+        )
+        self._subtask_score_threshold: float = float(
+            self.cfg.env.train.get("subtask_score_threshold", -0.5)
+        )
         self._steps_since_subtask_update: int = 0
+        self._recent_top_deltas: deque[float] = deque(
+            maxlen=self._subtask_plateau_window
+        )
         self._vlm_planner = None  # set via set_vlm_planner() after construction
 
         # TOPReward dense reward state.
@@ -257,10 +276,26 @@ class EnvWorker(Worker):
             return
 
         self._steps_since_subtask_update += 1
-        if self._steps_since_subtask_update < self._subtask_interval:
+        if self._subtask_adaptive and (
+            self._steps_since_subtask_update < self._subtask_min_interval
+        ):
             return
 
-        self._steps_since_subtask_update = 0
+        should_trigger = self._steps_since_subtask_update >= self._subtask_interval
+        if self._subtask_adaptive and self._top_reward_enabled:
+            recent_deltas = list(self._recent_top_deltas)
+            plateau_triggered = len(recent_deltas) >= self._subtask_plateau_window and (
+                all(
+                    abs(delta) < self._subtask_plateau_threshold
+                    for delta in recent_deltas[-self._subtask_plateau_window :]
+                )
+            )
+            score_triggered = self._prev_top_score > self._subtask_score_threshold
+            should_trigger = should_trigger or plateau_triggered or score_triggered
+
+        if not should_trigger:
+            return
+
         env = self.env_list[stage_id]
 
         # Collect the most recent observation image for the planner.
@@ -282,7 +317,8 @@ class EnvWorker(Worker):
         subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
         new_subtask: str = ray.get(subtask_ref)
 
-        self._apply_subtask_update(stage_id, new_subtask)
+        if self._apply_subtask_update(stage_id, new_subtask):
+            self._steps_since_subtask_update = 0
 
     def _compute_top_reward(self, env_output: EnvOutput, stage_id: int) -> EnvOutput:
         """Compute TOPReward dense progress reward and inject into env_output.
@@ -324,6 +360,7 @@ class EnvWorker(Worker):
 
         reward = float(score_t) - self._prev_top_score
         self._prev_top_score = float(score_t)
+        self._recent_top_deltas.append(reward)
 
         # Inject reward into the last chunk position.
         if env_output.rewards is not None:
@@ -336,6 +373,7 @@ class EnvWorker(Worker):
         """Reset TOPReward episode state for a new episode."""
         self._episode_frames = []
         self._prev_top_score = 0.0
+        self._recent_top_deltas.clear()
 
     def _setup_env_and_wrappers(self, env_cls, env_cfg, num_envs_per_stage: int):
         env_list = []

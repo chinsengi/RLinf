@@ -49,56 +49,105 @@ language subtask descriptions. The runtime split is explicit:
 > `subtask_interval > n_train_chunk_steps` disables subtask planning
 > (the config validator warns at startup; the counter resets before reaching the
 > threshold so the planner never fires).
+>
+> **Adaptive subtask triggering:** when `env.train.subtask_adaptive: true` and
+> `top_reward_enabled: true`, `subtask_interval` becomes a max-interval fallback
+> instead of the only trigger. `EnvWorker` can also refresh the subtask early if
+> either (1) the last `subtask_plateau_window` TOPReward deltas all satisfy
+> `abs(delta) < subtask_plateau_threshold`, or (2) the latest TOPReward score
+> exceeds `subtask_score_threshold`. `subtask_min_interval` acts as a
+> cooldown between successful updates. If `subtask_interval > n_train_chunk_steps`
+> in adaptive mode, only the fallback is disabled; plateau / score triggers can
+> still fire.
 
 ## Data Flow
 
-The `EmbodiedRunner` spawns `EnvWorker.interact()` and `RolloutWorker.generate()` as **concurrent Ray tasks**. They synchronise through channels — neither calls the other directly.
+The `EmbodiedRunner` spawns `EnvWorker.interact()` and `RolloutWorker.generate()` as
+**concurrent Ray tasks**. They synchronise through channels; neither worker directly
+calls the other.
 
-```
-Desktop                              Beaker Container
-──────                               ─────────────────────────────────────────────────
-                                     Runner spawns concurrently ↓
-RobotServer                         ┌───────────────────┐     ┌─────────────────────┐
-(wraps YAMEnv)                      │    EnvWorker      │     │   RolloutWorker     │
-    │                               │  (RemoteEnv)      │◄────┤  ← actions          │
-    │◄── gRPC (via SSH tunnel) ────►│                   │     │  (π₀.5 OpenPI)      │
-    │                               │  calls VLMPlanner:│────►│  obs + reward →     │
-    │                               │  · get_next_subtask     └──────────┬──────────┘
-    │                               │  · compute_top_reward              │ trajectories
-    │                               └───────────┬───────┘                ▼
-    │                                           │              ┌─────────────────────┐
-    │                                           │              │    ActorWorker      │
-    │                               ┌───────────▼───────┐      │  (FSDP training)    │
-    │                               │  VLMPlannerWorker │      │  PPO loss           │
-    │                               │  (Qwen3-VL-8B)    │      └──────────┬──────────┘
-    │                               └───────────────────┘                 │ sync weights
-    │                                                                      └──► RolloutWorker
+```text
+Desktop                                           Beaker container
++---------------------------+                    +----------------------------+
+| RobotServer               |                    | EmbodiedRunner             |
+| - wraps YAMEnv            |                    | - starts env loop          |
+| - reset / chunk_step RPCs |                    | - starts rollout loop      |
+| - returns obs, done, info |                    | - waits for actor batches  |
++---------------------------+                    | - syncs weights to rollout |
+              ^                                  +-------------+--------------+
+              | gRPC via SSH tunnel                            |
+              v                                                |
++---------------------------+        env_channel               |
+| EnvWorker (RemoteEnv)     | -------------------------------> |
+| - sends obs / final_obs   |                                  |
+| - receives rollout output | <------------------------------- |
+| - computes reward         |      rollout_channel             |
+| - packages trajectories   |                                  |
++-------------+-------------+                                  |
+              | actor_channel                                  |
+              v                                                v
+      +-------+------------------+                 +-----------+-------------+
+      | ActorWorker              |                 | RolloutWorker           |
+      | - GAE + PPO update       |                 | - OpenPI inference      |
+      | - updates policy/value   |                 | - emits actions         |
+      | - syncs weights          | --------------> | - emits logprobs/values |
+      +--------------------------+   weight sync   | - tracks versions       |
+                                                   +-----------+-------------+
+                                                               |
+                                                               | reward / subtask RPCs
+                                                               v
+                                                   +-----------+-------------+
+                                                   | VLMPlannerWorker        |
+                                                   | - TOPReward scoring     |
+                                                   | - next subtask          |
+                                                   +-------------------------+
 ```
 
 ## Per-Epoch Loop
 
-**Per-epoch loop (concurrent handoff via channels):**
+**Per-epoch loop (channel handoff + training step):**
 
-```
-For each epoch (rollout_epoch total):
-EnvWorker                                   RolloutWorker
-─────────                                   ─────────────
-bootstrap_step() → send_env_batch() ──────►                           ─╮
-                                            recv_env_output()            │
-                                            predict() → send_chunk_actions()  │ ×n_train
-recv_chunk_actions() ◄──────────────────────                            │  _chunk
-env_interact_step()                                                      │  _steps
-  └─ RemoteEnv.chunk_step() → gRPC → YAMEnv                            │
-  └─ _compute_top_reward() [VLMPlanner, ~200-400 ms]                   │
-  └─ if done: _reset_top_reward_state() [_prev_top_score=0.0]          │
-_maybe_update_subtask()  [VLMPlanner if subtask_interval > 0]           │
-  └─ if new_subtask non-empty: _reset_top_reward_state() [_prev_top_score=0.0] │
-send_env_batch() ─────────────────────────►                           ─╯
-                                            [post-loop, once per epoch]
-                                            recv_env_output() [final obs+reward+done]
-                                            predict() [GAE value bootstrap + last reward;
-                                                       no actions sent]
-After rollout_epoch epochs:               send_rollout_trajectories() ──► ActorWorker
+```text
+Step 0. Runner setup
+  Runner ---- sync latest weights --------------------------------> RolloutWorker
+  Runner ---- start interact() -----------------------------------> EnvWorker
+  Runner ---- start generate() -----------------------------------> RolloutWorker
+
+Step 1. Bootstrap
+  EnvWorker ---- reset / bootstrap_step() ------------------------> RobotServer
+  RobotServer ---- initial obs -----------------------------------> EnvWorker
+  EnvWorker ---- obs, final_obs ----------------------------------> RolloutWorker
+
+Step 2. Main chunk loop, repeated n_train_chunk_steps times
+  RolloutWorker ---- predict(obs) --------------------------------> RolloutWorker
+  RolloutWorker ---- actions, prev_logprobs, prev_values,
+                     forward_inputs, versions ---------------------> EnvWorker
+
+  EnvWorker ---- chunk_step(actions) ------------------------------> RobotServer
+  RobotServer ---- next obs, done, reward, env info --------------> EnvWorker
+
+  EnvWorker ---- optional TOPReward / next-subtask ---------------> VLMPlannerWorker
+  VLMPlannerWorker ---- reward delta / subtask -------------------> EnvWorker
+
+  EnvWorker ---- next obs, final_obs -----------------------------> RolloutWorker
+
+Step 3. Post-loop bootstrap value
+  RolloutWorker ---- final predict() for bootstrap value ---------> RolloutWorker
+  RolloutWorker ---- no action sent on this pass -----------------> EnvWorker
+
+Step 4. Trajectory handoff
+  EnvWorker ---- trajectories:
+                 rewards, dones, prev_values,
+                 prev_logprobs, forward_inputs, versions ---------> ActorWorker
+
+Step 5. Training
+  ActorWorker ---- compute GAE -----------------------------------> ActorWorker
+  ActorWorker ---- optional proximal_logprob recompute -----------> ActorWorker
+  ActorWorker ---- PPO update epochs -----------------------------> ActorWorker
+
+Step 6. Refresh rollout policy
+  ActorWorker ---- sync updated weights --------------------------> RolloutWorker
+  RolloutWorker ---- next samples use new version ---------------> RolloutWorker
 ```
 
 `n_train_chunk_steps = max_steps_per_rollout_epoch // num_action_chunks`

@@ -181,6 +181,14 @@ env:
     # be <= n_train_chunk_steps to fire within an episode.
     # 1 chunk step = 30 env steps = subtask update at ~50% and ~100% of episode.
     subtask_interval: 1
+    # Adaptive triggering on TOPReward signals. When enabled, the VLM
+    # planner can refresh early on plateau / score-threshold triggers while
+    # subtask_interval remains a max-interval fallback.
+    subtask_adaptive: True
+    subtask_min_interval: 2
+    subtask_plateau_window: 3
+    subtask_plateau_threshold: 0.01
+    subtask_score_threshold: -0.5
 
     # Dummy mode: controlled at the ROBOT SERVER, not here.
     # RemoteEnv does not read is_dummy — it proxies calls over gRPC to the server.
