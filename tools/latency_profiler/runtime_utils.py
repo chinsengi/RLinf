@@ -55,9 +55,11 @@ def backfill_worker_durations(
                     rec.timers[layer_name] = timer
                     break
 
+    # Prefer "predict" (pure model forward) over "generate" (includes env
+    # wait time) so that rollout_inference reflects actual inference cost.
     _set_duration_if_present(
         rollout_time,
-        ("generate", "generate_one_epoch", "predict"),
+        ("predict", "generate_one_epoch", "generate"),
         "rollout_inference",
     )
     _set_duration_if_present(actor_time, ("recv_trajectory",), "recv_trajectory")

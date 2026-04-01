@@ -54,9 +54,11 @@ when training finishes or is interrupted (Ctrl+C).
 import json
 import os
 import sys
+import time
 
 import hydra
 import torch.multiprocessing as mp
+from omegaconf import open_dict
 from omegaconf.omegaconf import OmegaConf
 
 # Ensure repo root is on sys.path so ``tools.*`` imports work.
@@ -66,7 +68,7 @@ if _REPO_ROOT not in sys.path:
 
 from rlinf.config import validate_cfg  # noqa: E402
 from rlinf.utils.logging import get_logger  # noqa: E402
-from tools.latency_profiler.profiler import LatencyProfiler  # noqa: E402
+from tools.latency_profiler.profiler import LatencyProfiler, LayerTimer  # noqa: E402
 from tools.latency_profiler.runtime_utils import (  # noqa: E402
     backfill_worker_durations,
     is_async_runtime,
@@ -189,8 +191,10 @@ def _run_sync_profiled(cfg, profiler: LatencyProfiler) -> None:
                 runner.update_rollout_weights()
             profiler.stop("weight_sync")
 
-            # ②③④ Rollout + Env + VLM (parallel workers — measure wall time)
-            profiler.start("rollout_inference")
+            # ②③④⑤ Rollout + Env + VLM run interleaved across workers.
+            # Measure the total pipeline wall time, then backfill individual
+            # layer durations from worker-reported timers after the step.
+            pipeline_start = time.perf_counter()
             env_handle: Handle = env_group.interact(
                 input_channel=rollout_channel,
                 output_channel=env_channel,
@@ -200,19 +204,21 @@ def _run_sync_profiled(cfg, profiler: LatencyProfiler) -> None:
                 input_channel=env_channel,
                 output_channel=rollout_channel,
             )
-            profiler.stop("rollout_inference")
-
-            # ③ Env execution (wall time until trajectories arrive)
-            profiler.start("env_execution")
             recv_handle: Handle = actor_group.recv_rollout_trajectories(
                 input_channel=actor_channel
             )
             recv_handle.wait()
             rollout_handle.wait()
+            pipeline_wall_ms = (time.perf_counter() - pipeline_start) * 1000.0
+
+            # Placeholder timers — overwritten by backfill_worker_durations
+            # with actual worker-side measurements below.
+            profiler.start("rollout_inference")
+            profiler.stop("rollout_inference")
+
+            profiler.start("env_execution")
             profiler.stop("env_execution")
 
-            # ⑤ Recv trajectory is included in env_execution above.
-            # Record VLM reward from worker-reported durations.
             profiler.start("vlm_reward")
             profiler.stop("vlm_reward")
 
@@ -234,13 +240,26 @@ def _run_sync_profiled(cfg, profiler: LatencyProfiler) -> None:
 
             runner.global_step += 1
 
-            # Collect worker-side durations and backfill vlm/env/rollout.
+            # Collect worker-side durations and backfill individual layers.
             env_time, _ = env_handle.consume_durations(return_per_rank=True)
             rollout_time, _ = rollout_handle.consume_durations(return_per_rank=True)
             actor_time, _ = recv_handle.consume_durations(return_per_rank=True)
             backfill_worker_durations(
                 profiler, _step, env_time, rollout_time, actor_time
             )
+
+            # Derive recv_trajectory as scheduling/channel overhead:
+            # pipeline_wall minus the worker-reported compute durations.
+            rec = profiler.records[-1]
+            if rec.step_id == _step:
+                known_ms = sum(
+                    rec.layer_ms(l) or 0.0
+                    for l in ("rollout_inference", "env_execution", "vlm_reward")
+                )
+                overhead_ms = max(pipeline_wall_ms - known_ms, 0.0)
+                t = LayerTimer(layer="recv_trajectory")
+                t.duration_ms = overhead_ms
+                rec.timers["recv_trajectory"] = t
 
             _, save_model, _ = check_progress(
                 runner.global_step,
@@ -433,6 +452,27 @@ def _save_results(profiler: LatencyProfiler, cfg) -> None:
 )
 def main(cfg) -> None:
     cfg = validate_cfg(cfg)
+
+    # Disable the desktop return-home timer and cooldown so the profiler
+    # runs purely step-based without wall-clock interruptions.
+    with open_dict(cfg):
+        if cfg.env.get("return_home_minutes", None) is not None:
+            logger.info(
+                "Latency profiler: disabling return_home_minutes "
+                f"(was {cfg.env.return_home_minutes}) to avoid cooldown stalls."
+            )
+            cfg.env.return_home_minutes = None
+            cfg.env.server_episode_duration_s = 0.0
+        if cfg.env.get("server_cooldown_minutes", None) is not None:
+            cfg.env.server_cooldown_minutes = 0
+
+    # The simulated desktop RobotServer reads episode_duration_s and
+    # episode_cooldown_minutes from its own env YAML config.  Override
+    # via the environment variables that the OmegaConf resolver reads
+    # so the subprocess inherits a practically infinite timer.
+    os.environ.setdefault("RLINF_EPISODE_DURATION_S", "999999")
+    os.environ.setdefault("RLINF_EPISODE_COOLDOWN_MINUTES", "0")
+
     print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))
 
     mode = _detect_mode(cfg)

@@ -515,21 +515,21 @@ class EnvWorker(Worker):
         """
         This function is used to interact with the environment.
         """
-        with self.worker_timer("env_step"):
-            # Track pure environment interaction separately from TOPReward so the
-            # latency profiler can split env time and VLM reward time into
-            # distinct buckets.
-            chunk_actions = prepare_actions(
-                raw_chunk_actions=chunk_actions,
-                env_type=self.cfg.env.train.env_type,
-                model_type=self.cfg.actor.model.model_type,
-                num_action_chunks=self.cfg.actor.model.num_action_chunks,
-                action_dim=self.cfg.actor.model.action_dim,
-                policy=self.cfg.actor.model.get("policy_setup", None),
-                wm_env_type=self.cfg.env.train.get("wm_env_type", None),
-            )
-            env_info = {}
+        chunk_actions = prepare_actions(
+            raw_chunk_actions=chunk_actions,
+            env_type=self.cfg.env.train.env_type,
+            model_type=self.cfg.actor.model.model_type,
+            num_action_chunks=self.cfg.actor.model.num_action_chunks,
+            action_dim=self.cfg.actor.model.action_dim,
+            policy=self.cfg.actor.model.get("policy_setup", None),
+            wm_env_type=self.cfg.env.train.get("wm_env_type", None),
+        )
+        env_info = {}
 
+        # Only time the actual environment interaction (chunk_step) so the
+        # latency profiler reports pure env latency, excluding action
+        # preparation and post-processing.
+        with self.worker_timer("env_step"):
             (
                 obs_list,
                 chunk_rewards,
@@ -537,53 +537,50 @@ class EnvWorker(Worker):
                 chunk_truncations,
                 infos_list,
             ) = self.env_list[stage_id].chunk_step(chunk_actions)
-            if isinstance(obs_list, (list, tuple)):
-                extracted_obs = obs_list[-1] if obs_list else None
-            if isinstance(infos_list, (list, tuple)):
-                infos = infos_list[-1] if infos_list else None
-            chunk_dones = torch.logical_or(chunk_terminations, chunk_truncations)
-            if not self.cfg.env.train.auto_reset:
-                if self.cfg.env.train.ignore_terminations:
-                    if chunk_truncations[:, -1].any():
-                        assert chunk_truncations[:, -1].all()
-                        if "episode" in infos:
-                            for key in infos["episode"]:
-                                env_info[key] = infos["episode"][key].cpu()
-                else:
+
+        if isinstance(obs_list, (list, tuple)):
+            extracted_obs = obs_list[-1] if obs_list else None
+        if isinstance(infos_list, (list, tuple)):
+            infos = infos_list[-1] if infos_list else None
+        chunk_dones = torch.logical_or(chunk_terminations, chunk_truncations)
+        if not self.cfg.env.train.auto_reset:
+            if self.cfg.env.train.ignore_terminations:
+                if chunk_truncations[:, -1].any():
+                    assert chunk_truncations[:, -1].all()
                     if "episode" in infos:
                         for key in infos["episode"]:
                             env_info[key] = infos["episode"][key].cpu()
-            elif chunk_dones.any():
-                if "final_info" in infos:
-                    final_info = infos["final_info"]
-                    for key in final_info["episode"]:
-                        env_info[key] = final_info["episode"][key][
-                            chunk_dones[:, -1]
-                        ].cpu()
+            else:
+                if "episode" in infos:
+                    for key in infos["episode"]:
+                        env_info[key] = infos["episode"][key].cpu()
+        elif chunk_dones.any():
+            if "final_info" in infos:
+                final_info = infos["final_info"]
+                for key in final_info["episode"]:
+                    env_info[key] = final_info["episode"][key][chunk_dones[:, -1]].cpu()
 
-            intervene_actions = (
-                infos["intervene_action"] if "intervene_action" in infos else None
-            )
-            intervene_flags = (
-                infos["intervene_flag"] if "intervene_flag" in infos else None
-            )
-            if self.cfg.env.train.auto_reset and chunk_dones.any():
-                if "intervene_action" in infos["final_info"]:
-                    intervene_actions = infos["final_info"]["intervene_action"]
-                    intervene_flags = infos["final_info"]["intervene_flag"]
+        intervene_actions = (
+            infos["intervene_action"] if "intervene_action" in infos else None
+        )
+        intervene_flags = infos["intervene_flag"] if "intervene_flag" in infos else None
+        if self.cfg.env.train.auto_reset and chunk_dones.any():
+            if "intervene_action" in infos["final_info"]:
+                intervene_actions = infos["final_info"]["intervene_action"]
+                intervene_flags = infos["final_info"]["intervene_flag"]
 
-            env_output = EnvOutput(
-                obs=extracted_obs,
-                final_obs=infos["final_observation"]
-                if "final_observation" in infos
-                else None,
-                rewards=chunk_rewards,
-                dones=chunk_dones,
-                terminations=chunk_terminations,
-                truncations=chunk_truncations,
-                intervene_actions=intervene_actions,
-                intervene_flags=intervene_flags,
-            )
+        env_output = EnvOutput(
+            obs=extracted_obs,
+            final_obs=infos["final_observation"]
+            if "final_observation" in infos
+            else None,
+            rewards=chunk_rewards,
+            dones=chunk_dones,
+            terminations=chunk_terminations,
+            truncations=chunk_truncations,
+            intervene_actions=intervene_actions,
+            intervene_flags=intervene_flags,
+        )
 
         # Inject TOPReward dense reward if enabled.
         env_output = self._compute_top_reward(env_output, stage_id)
