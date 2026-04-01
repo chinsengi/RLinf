@@ -354,15 +354,12 @@ class RemoteEnv(gym.Env):
         chunk_actions = np.asarray(chunk_actions, dtype=np.float32)
         num_envs, chunk_size, action_dim = chunk_actions.shape
 
-        import time as _time
-
         req = robot_env_pb2.ChunkStepRequest(
             actions=chunk_actions.tobytes(),
             num_envs=num_envs,
             chunk_size=chunk_size,
             action_dim=action_dim,
         )
-        _grpc_t0 = _time.perf_counter()
         try:
             resp = self._stub.ChunkStep(req, timeout=self._timeout * chunk_size)
         except grpc.RpcError as e:
@@ -370,7 +367,6 @@ class RemoteEnv(gym.Env):
                 f"[RemoteEnv] Robot server disconnected during ChunkStep "
                 f"(gRPC {e.code().name}). Check the local robot server terminal."
             ) from None
-        _grpc_ms = (_time.perf_counter() - _grpc_t0) * 1000
 
         obs_list = []
         rewards = []
@@ -432,13 +428,6 @@ class RemoteEnv(gym.Env):
         else:
             chunk_terminations = raw_chunk_terminations.clone()
             chunk_truncations = raw_chunk_truncations.clone()
-
-        _total_ms = (_time.perf_counter() - _grpc_t0) * 1000
-        _post_ms = _total_ms - _grpc_ms
-        self._logger.info(
-            f"[RemoteEnv.chunk_step] grpc={_grpc_ms:.1f}ms, "
-            f"post_process={_post_ms:.1f}ms, total={_total_ms:.1f}ms"
-        )
 
         # Track latest obs for VLM subtask planner image context.
         if obs_list:

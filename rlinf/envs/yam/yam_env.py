@@ -746,30 +746,20 @@ class YAMEnv(gym.Env):
         raw_chunk_truncations = []
         last_idx = chunk_size - 1
 
-        import time as _time
-
-        _cs_t0 = _time.perf_counter()
-        _lightweight_total = 0.0
-        _full_step_total = 0.0
-
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
 
             if i == last_idx:
                 # Last step: build full observation with images.
-                _ft0 = _time.perf_counter()
                 obs, step_reward, terminations, truncations, infos = self.step(
                     actions, auto_reset=False
                 )
-                _full_step_total += _time.perf_counter() - _ft0
                 obs_list.append(obs)
             else:
                 # Intermediate step: skip image capture & _wrap_obs.
-                _lt0 = _time.perf_counter()
                 step_reward, terminations, truncations, infos = self._step_lightweight(
                     actions
                 )
-                _lightweight_total += _time.perf_counter() - _lt0
 
             infos_list.append(infos)
             raw_chunk_rewards.append(step_reward)
@@ -795,14 +785,6 @@ class YAMEnv(gym.Env):
                     raw_chunk_terminations.append(terminations.copy())
                     raw_chunk_truncations.append(truncations.copy())
                 break
-
-        _cs_elapsed = _time.perf_counter() - _cs_t0
-        self._logger.info(
-            f"[YAMEnv.chunk_step] chunk_size={chunk_size}, "
-            f"lightweight={_lightweight_total * 1000:.1f}ms, "
-            f"full_step={_full_step_total * 1000:.1f}ms, "
-            f"loop_total={_cs_elapsed * 1000:.1f}ms"
-        )
 
         chunk_rewards = torch.stack(
             [

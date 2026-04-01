@@ -385,9 +385,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         )
 
     def ChunkStep(self, request, context):
-        import time as _time
-
-        _t0 = _time.perf_counter()
         self._touch()
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
@@ -456,8 +453,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 )
             )
 
-        _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-        logger.info(f"[ChunkStep] total={_elapsed_ms:.1f}ms, chunk_size={chunk_size}")
         if self._verbose:
             logger.info(
                 f"[ChunkStep] Done. rewards={[float(chunk_rewards[0, i]) for i in range(chunk_size)]}, "
