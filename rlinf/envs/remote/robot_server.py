@@ -385,6 +385,9 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         )
 
     def ChunkStep(self, request, context):
+        import time as _time
+
+        _t0 = _time.perf_counter()
         self._touch()
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
@@ -424,14 +427,22 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
         step_results = []
         chunk_size = request.chunk_size
+        # The env's chunk_step only returns obs for the last step (or
+        # the step where the episode ended).  Use the last entry in
+        # obs_list for the final StepResult and send empty observations
+        # for intermediate steps to save bandwidth.
+        last_obs = obs_list[-1] if obs_list else None
         for i in range(chunk_size):
-            obs_proto = _obs_to_proto(
-                obs_list[i],
-                self._env._img_h,
-                self._env._img_w,
-                compress=self._compress,
-                jpeg_quality=self._jpeg_quality,
-            )
+            if i == chunk_size - 1 and last_obs is not None:
+                obs_proto = _obs_to_proto(
+                    last_obs,
+                    self._env._img_h,
+                    self._env._img_w,
+                    compress=self._compress,
+                    jpeg_quality=self._jpeg_quality,
+                )
+            else:
+                obs_proto = robot_env_pb2.Observation()
             # chunk_rewards shape: (num_envs, chunk_size)
             reward = float(chunk_rewards[0, i])
             terminated = bool(chunk_terminations[0, i])
@@ -445,6 +456,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 )
             )
 
+        _elapsed_ms = (_time.perf_counter() - _t0) * 1000
+        logger.info(f"[ChunkStep] total={_elapsed_ms:.1f}ms, chunk_size={chunk_size}")
         if self._verbose:
             logger.info(
                 f"[ChunkStep] Done. rewards={[float(chunk_rewards[0, i]) for i in range(chunk_size)]}, "

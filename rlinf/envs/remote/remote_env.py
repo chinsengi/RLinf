@@ -84,8 +84,15 @@ def _decode_image_stack(
     return np.stack(images, axis=0)[np.newaxis, :]
 
 
-def _proto_to_obs(proto_obs: robot_env_pb2.Observation) -> dict:
-    """Convert a protobuf Observation to a YAMEnv-compatible dict."""
+def _proto_to_obs(proto_obs: robot_env_pb2.Observation) -> dict | None:
+    """Convert a protobuf Observation to a YAMEnv-compatible dict.
+
+    Returns ``None`` when the observation contains no data (intermediate
+    chunk steps where the server omits images to save bandwidth).
+    """
+    if not proto_obs.states and not proto_obs.main_image:
+        return None
+
     # States
     state_shape = tuple(proto_obs.state_shape)
     states = np.frombuffer(proto_obs.states, dtype=np.float32).reshape(state_shape)
@@ -347,12 +354,15 @@ class RemoteEnv(gym.Env):
         chunk_actions = np.asarray(chunk_actions, dtype=np.float32)
         num_envs, chunk_size, action_dim = chunk_actions.shape
 
+        import time as _time
+
         req = robot_env_pb2.ChunkStepRequest(
             actions=chunk_actions.tobytes(),
             num_envs=num_envs,
             chunk_size=chunk_size,
             action_dim=action_dim,
         )
+        _grpc_t0 = _time.perf_counter()
         try:
             resp = self._stub.ChunkStep(req, timeout=self._timeout * chunk_size)
         except grpc.RpcError as e:
@@ -360,6 +370,7 @@ class RemoteEnv(gym.Env):
                 f"[RemoteEnv] Robot server disconnected during ChunkStep "
                 f"(gRPC {e.code().name}). Check the local robot server terminal."
             ) from None
+        _grpc_ms = (_time.perf_counter() - _grpc_t0) * 1000
 
         obs_list = []
         rewards = []
@@ -369,11 +380,12 @@ class RemoteEnv(gym.Env):
 
         for sr in resp.step_results:
             obs = _proto_to_obs(sr.observation)
-            # Always use the locally-tracked task_description so the policy
-            # always sees the correct instruction (from config or latest VLM
-            # subtask update) regardless of whether the server includes it.
-            obs["task_descriptions"] = [self._task_description]
-            obs_list.append(obs)
+            # Intermediate chunk steps may have no observation (server
+            # skips images to save bandwidth).  Only append non-None obs
+            # so that obs_list[-1] is always the final observation.
+            if obs is not None:
+                obs["task_descriptions"] = [self._task_description]
+                obs_list.append(obs)
 
             self._elapsed_steps += 1
             self._num_steps += 1
@@ -420,6 +432,13 @@ class RemoteEnv(gym.Env):
         else:
             chunk_terminations = raw_chunk_terminations.clone()
             chunk_truncations = raw_chunk_truncations.clone()
+
+        _total_ms = (_time.perf_counter() - _grpc_t0) * 1000
+        _post_ms = _total_ms - _grpc_ms
+        self._logger.info(
+            f"[RemoteEnv.chunk_step] grpc={_grpc_ms:.1f}ms, "
+            f"post_process={_post_ms:.1f}ms, total={_total_ms:.1f}ms"
+        )
 
         # Track latest obs for VLM subtask planner image context.
         if obs_list:
