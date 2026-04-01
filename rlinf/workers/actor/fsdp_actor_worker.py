@@ -1122,6 +1122,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.enable_offload and not self.is_weight_offloaded:
             self.offload_param_and_grad()
 
+    @Worker.timer("recv_trajectory")
     async def recv_rollout_trajectories(self, input_channel: Channel) -> None:
         """
         Receive rollout trajectories from rollout workers.

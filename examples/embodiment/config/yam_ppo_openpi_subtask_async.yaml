@@ -136,8 +136,11 @@ algorithm:
     min_length: 1
 
 env:
-  # Single timing source for the YAM home-return cycle.
+  # Desktop-side hardware timer for the YAM home-return cycle.
   return_home_minutes: 0.1
+  # Training-side rollout horizon in action chunks. With
+  # actor.model.num_action_chunks=30, two chunks means 60 low-level steps.
+  rollout_horizon_chunks: 2
   # Desktop RobotServer cooldown after returning home.
   server_cooldown_minutes: 1
   group_name: "EnvGroup"
@@ -156,8 +159,8 @@ env:
 
   train:
     total_num_envs: 1
-    # Derived automatically from env.return_home_minutes.
-    max_episode_steps: 100
+    # Derived automatically from env.rollout_horizon_chunks.
+    max_episode_steps: 60
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
 
@@ -197,8 +200,8 @@ env:
 
   eval:
     total_num_envs: 1
-    # Derived automatically from env.return_home_minutes.
-    max_episode_steps: 100
+    # Derived automatically from env.rollout_horizon_chunks.
+    max_episode_steps: 60
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
     task_description: "fold the towel"

@@ -15,7 +15,6 @@
 import dataclasses
 import importlib.util
 import logging
-import math
 import os
 from dataclasses import asdict
 from enum import Enum
@@ -739,6 +738,8 @@ def validate_megatron_cfg(cfg: DictConfig) -> DictConfig:
 
 def validate_embodied_cfg(cfg):
     return_home_minutes = cfg.env.get("return_home_minutes", None)
+    rollout_horizon_chunks = cfg.env.get("rollout_horizon_chunks", None)
+    rollout_horizon_minutes = cfg.env.get("rollout_horizon_minutes", None)
     server_cooldown_minutes = cfg.env.get("server_cooldown_minutes", None)
     if return_home_minutes is not None:
         return_home_minutes = float(return_home_minutes)
@@ -746,42 +747,35 @@ def validate_embodied_cfg(cfg):
             raise ValueError("env.return_home_minutes must be greater than 0.")
         if server_cooldown_minutes is not None and float(server_cooldown_minutes) < 0:
             raise ValueError("env.server_cooldown_minutes must be >= 0.")
-        num_chunks = cfg.actor.model.get("num_action_chunks", None)
-        if num_chunks is None or num_chunks <= 0:
-            raise ValueError(
-                "env.return_home_minutes requires actor.model.num_action_chunks > 0."
-            )
         with open_dict(cfg):
             cfg.env.server_episode_duration_s = return_home_minutes * 60.0
             if server_cooldown_minutes is not None:
                 cfg.env.server_cooldown_s = float(server_cooldown_minutes) * 60.0
-            # When cadence is driven by the desktop RobotServer timer, rollout
+            # When a desktop RobotServer enforces the return-home timer, rollout
             # epoch boundaries must never command an extra env.reset(), or the
-            # real robot will return home early for a training bookkeeping
-            # reason instead of a true timeout / operator stop.
+            # robot will return home early for a training bookkeeping reason
+            # instead of a true timeout / operator stop.
             cfg.env.train.reset_on_rollout_epoch = False
             cfg.env.train.reset_on_rollout_epoch_end = False
+
+    if rollout_horizon_minutes is not None:
+        raise ValueError(
+            "env.rollout_horizon_minutes has been removed. "
+            "Use env.rollout_horizon_chunks instead."
+        )
+
+    num_chunks = cfg.actor.model.get("num_action_chunks", None)
+    if rollout_horizon_chunks is not None:
+        if num_chunks is None or num_chunks <= 0:
+            raise ValueError(
+                "env.rollout_horizon_chunks requires actor.model.num_action_chunks > 0."
+            )
+        rollout_horizon_chunks = int(rollout_horizon_chunks)
+        if rollout_horizon_chunks <= 0:
+            raise ValueError("env.rollout_horizon_chunks must be greater than 0.")
+        aligned_steps = rollout_horizon_chunks * num_chunks
+        with open_dict(cfg):
             for split in ("train", "eval"):
-                control_rate_hz = float(cfg.env[split].get("control_rate_hz", 0.0))
-                if control_rate_hz <= 0:
-                    raise ValueError(
-                        f"env.{split}.control_rate_hz must be greater than 0 when "
-                        "using env.return_home_minutes."
-                    )
-                raw_steps = int(round(return_home_minutes * 60.0 * control_rate_hz))
-                aligned_steps = int(math.ceil(raw_steps / num_chunks) * num_chunks)
-                if aligned_steps != raw_steps:
-                    logging.warning(
-                        "env.return_home_minutes=%s with env.%s.control_rate_hz=%s "
-                        "produced %s raw steps, which is not divisible by "
-                        "actor.model.num_action_chunks=%s. Rounding up to %s steps.",
-                        return_home_minutes,
-                        split,
-                        control_rate_hz,
-                        raw_steps,
-                        num_chunks,
-                        aligned_steps,
-                    )
                 cfg.env[split].max_episode_steps = aligned_steps
                 cfg.env[split].max_steps_per_rollout_epoch = aligned_steps
 

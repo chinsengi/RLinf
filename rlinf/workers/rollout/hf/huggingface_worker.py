@@ -309,12 +309,13 @@ class MultiStepRolloutWorker(Worker):
         if self.enable_offload:
             self.reload_model()
 
-        for _ in tqdm(
-            range(self.rollout_epoch),
-            desc="Generating Rollout Epochs",
-            disable=(self._rank != 0),
-        ):
-            await self.generate_one_epoch(input_channel, output_channel)
+        with self.worker_timer("generate"):
+            for _ in tqdm(
+                range(self.rollout_epoch),
+                desc="Generating Rollout Epochs",
+                disable=(self._rank != 0),
+            ):
+                await self.generate_one_epoch(input_channel, output_channel)
 
         if self.enable_offload:
             self.offload_model()

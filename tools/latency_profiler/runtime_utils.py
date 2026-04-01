@@ -22,6 +22,7 @@ def backfill_worker_durations(
     step_id: int,
     env_time: dict,
     rollout_time: dict,
+    actor_time: dict | None = None,
 ) -> None:
     """Overwrite selected layer durations with worker-side measurements."""
     if not profiler.records:
@@ -30,20 +31,36 @@ def backfill_worker_durations(
     if rec.step_id != step_id:
         return
 
-    for key, layer_name in [
-        ("env_step", "env_execution"),
-        ("top_reward", "vlm_reward"),
-    ]:
-        if key in env_time:
-            timer = LayerTimer(layer=layer_name)
-            timer.duration_ms = env_time[key] * 1000.0
-            rec.timers[layer_name] = timer
+    def _set_duration_if_present(
+        metrics: dict | None, keys: tuple[str, ...], layer_name: str
+    ) -> None:
+        if not metrics:
+            return
+        for key in keys:
+            if key in metrics:
+                timer = LayerTimer(layer=layer_name)
+                timer.duration_ms = metrics[key] * 1000.0
+                rec.timers[layer_name] = timer
+                return
 
-    for key, layer_name in [("generate", "rollout_inference")]:
-        if key in rollout_time:
-            timer = LayerTimer(layer=layer_name)
-            timer.duration_ms = rollout_time[key] * 1000.0
-            rec.timers[layer_name] = timer
+    for keys, layer_name in [
+        (("env_step", "env_interact_step"), "env_execution"),
+        (("top_reward",), "vlm_reward"),
+    ]:
+        if env_time:
+            for key in keys:
+                if key in env_time:
+                    timer = LayerTimer(layer=layer_name)
+                    timer.duration_ms = env_time[key] * 1000.0
+                    rec.timers[layer_name] = timer
+                    break
+
+    _set_duration_if_present(
+        rollout_time,
+        ("generate", "generate_one_epoch", "predict"),
+        "rollout_inference",
+    )
+    _set_duration_if_present(actor_time, ("recv_trajectory",), "recv_trajectory")
 
 
 def is_async_runtime(cfg) -> bool:

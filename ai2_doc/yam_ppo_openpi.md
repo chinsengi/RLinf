@@ -136,11 +136,12 @@ Timing / shutdown behavior:
 ```yaml
 env:
   return_home_minutes: 2
+  rollout_horizon_chunks: 2
   train:
     control_rate_hz: 10.0
-    max_episode_steps: 24000
-    max_steps_per_rollout_epoch: 24000
-    reset_on_rollout_epoch: True
+    max_episode_steps: 60
+    max_steps_per_rollout_epoch: 60
+    reset_on_rollout_epoch: False
 ```
 
 Desktop server timing:
@@ -152,10 +153,15 @@ episode_cooldown_minutes: 1
 client_idle_timeout_s: 0
 ```
 
-- Change only `env.return_home_minutes` when you want a different cadence.
+- Change `env.return_home_minutes` when you want a different desktop-side
+  return-home cadence.
+- Change `env.rollout_horizon_chunks` when you want a different training
+  rollout horizon.
 - Change only `env.server_cooldown_minutes` when you want a different restart
   wait time on the desktop server.
-- At `10 Hz`, `40` minutes becomes `24000` steps.
+- At `num_action_chunks: 30`, `rollout_horizon_chunks: 2` becomes `60`
+  rollout steps.
+- That is `2` chunk steps per rollout epoch at `10 Hz`.
 - `episode_duration_s` is the desktop-side hard stop: once it expires, the
   server returns to home, starts the cooldown countdown, then restarts from
   home instead of continuing the old chunk.

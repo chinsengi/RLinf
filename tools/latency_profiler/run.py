@@ -204,7 +204,10 @@ def _run_sync_profiled(cfg, profiler: LatencyProfiler) -> None:
 
             # ③ Env execution (wall time until trajectories arrive)
             profiler.start("env_execution")
-            actor_group.recv_rollout_trajectories(input_channel=actor_channel).wait()
+            recv_handle: Handle = actor_group.recv_rollout_trajectories(
+                input_channel=actor_channel
+            )
+            recv_handle.wait()
             rollout_handle.wait()
             profiler.stop("env_execution")
 
@@ -234,7 +237,10 @@ def _run_sync_profiled(cfg, profiler: LatencyProfiler) -> None:
             # Collect worker-side durations and backfill vlm/env/rollout.
             env_time, _ = env_handle.consume_durations(return_per_rank=True)
             rollout_time, _ = rollout_handle.consume_durations(return_per_rank=True)
-            backfill_worker_durations(profiler, _step, env_time, rollout_time)
+            actor_time, _ = recv_handle.consume_durations(return_per_rank=True)
+            backfill_worker_durations(
+                profiler, _step, env_time, rollout_time, actor_time
+            )
 
             _, save_model, _ = check_progress(
                 runner.global_step,

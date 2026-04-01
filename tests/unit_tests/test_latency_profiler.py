@@ -80,6 +80,35 @@ def test_backfill_worker_durations_overwrites_latest_step():
     assert rec.layer_ms("rollout_inference") == 750.0
 
 
+def test_backfill_worker_durations_accepts_runtime_timer_aliases():
+    profiler = LatencyProfiler(mode="dummy")
+
+    profiler.step_start(4)
+    profiler.start("rollout_inference")
+    profiler.stop("rollout_inference")
+    profiler.start("env_execution")
+    profiler.stop("env_execution")
+    profiler.start("recv_trajectory")
+    profiler.stop("recv_trajectory")
+    profiler.start("vlm_reward")
+    profiler.stop("vlm_reward")
+    profiler.step_end()
+
+    backfill_worker_durations(
+        profiler,
+        step_id=4,
+        env_time={"env_interact_step": 1.2, "top_reward": 0.4},
+        rollout_time={"generate_one_epoch": 0.8},
+        actor_time={"recv_trajectory": 0.15},
+    )
+
+    rec = profiler.records[-1]
+    assert rec.layer_ms("env_execution") == 1200.0
+    assert rec.layer_ms("vlm_reward") == 400.0
+    assert rec.layer_ms("rollout_inference") == 800.0
+    assert rec.layer_ms("recv_trajectory") == 150.0
+
+
 def test_is_async_runtime_uses_loss_type():
     class AlgoCfg(dict):
         def get(self, key, default=None):

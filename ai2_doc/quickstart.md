@@ -125,7 +125,8 @@ Behavior to expect:
   home, shows the configured cooldown countdown, then restarts from home.
 - `--train-config` makes the desktop server read timing from the same Beaker
   training YAML, so `env.return_home_minutes` and `env.server_cooldown_minutes`
-  only need to be edited once.
+  only need to be edited once for the desktop-side timer. Training rollout
+  length is controlled separately by `env.rollout_horizon_chunks`.
 - If you omit `--train-config`, the launcher now defaults to
   `examples/embodiment/config/yam_ppo_openpi_async.yaml`.
 - You can point `--train-config` at either the `_async` or `_sync` YAM config.

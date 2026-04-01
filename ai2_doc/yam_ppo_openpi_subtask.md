@@ -125,6 +125,8 @@ Reward / planner settings:
 
 ```yaml
 env:
+  return_home_minutes: 0.1
+  rollout_horizon_chunks: 2
   train:
     top_reward_enabled: True
     top_reward_max_frames: 16
@@ -138,6 +140,9 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
 ```
+
+- `env.return_home_minutes` controls the desktop-side return-home timer.
+- `env.rollout_horizon_chunks` controls the training rollout horizon.
 
 Subtask planning requires a non-empty `task_description`. The planner receives
 the main task and the current observation image — there is no planner memory
