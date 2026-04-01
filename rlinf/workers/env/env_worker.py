@@ -108,6 +108,7 @@ class EnvWorker(Worker):
         )
         self._episode_frames: list[np.ndarray] = []
         self._prev_top_score: float = 0.0
+        self._top_reward_has_prev_score: bool = False
         # there can be a sequence of tasks
         # TODO: make task_description a list to avoid uniform stage task descriptions
         self._initial_task_descriptions: list[str] = [
@@ -238,6 +239,10 @@ class EnvWorker(Worker):
         inner_env = getattr(env, "unwrapped", env)
         return str(getattr(inner_env, "task_description", ""))
 
+    def _reset_subtask_update_state(self) -> None:
+        """Reset per-episode subtask planner cadence state."""
+        self._steps_since_subtask_update = 0
+
     def _get_top_reward_instruction(self, stage_id: int) -> str:
         if self._top_reward_instruction_source == "initial_task":
             return self._initial_task_descriptions[stage_id]
@@ -290,7 +295,10 @@ class EnvWorker(Worker):
                     for delta in recent_deltas[-self._subtask_plateau_window :]
                 )
             )
-            score_triggered = self._prev_top_score > self._subtask_score_threshold
+            score_triggered = bool(
+                self._top_reward_has_prev_score
+                and self._prev_top_score > self._subtask_score_threshold
+            )
             should_trigger = should_trigger or plateau_triggered or score_triggered
 
         if not should_trigger:
@@ -318,7 +326,7 @@ class EnvWorker(Worker):
         new_subtask: str = ray.get(subtask_ref)
 
         if self._apply_subtask_update(stage_id, new_subtask):
-            self._steps_since_subtask_update = 0
+            self._reset_subtask_update_state()
 
     def _compute_top_reward(self, env_output: EnvOutput, stage_id: int) -> EnvOutput:
         """Compute TOPReward dense progress reward and inject into env_output.
@@ -361,8 +369,14 @@ class EnvWorker(Worker):
             )
             score_t = ray.get(score_ref)
 
-        reward = float(score_t) - self._prev_top_score
+        if self._top_reward_has_prev_score:
+            reward = float(score_t) - self._prev_top_score
+        else:
+            # Seed the new episode/subtask segment with the first score rather
+            # than comparing it against the reset sentinel.
+            reward = 0.0
         self._prev_top_score = float(score_t)
+        self._top_reward_has_prev_score = True
         self._recent_top_deltas.append(reward)
 
         # Inject reward into the last chunk position.
@@ -376,6 +390,7 @@ class EnvWorker(Worker):
         """Reset TOPReward episode state for a new episode."""
         self._episode_frames = []
         self._prev_top_score = 0.0
+        self._top_reward_has_prev_score = False
         self._recent_top_deltas.clear()
 
     def _setup_env_and_wrappers(self, env_cls, env_cfg, num_envs_per_stage: int):
@@ -576,6 +591,8 @@ class EnvWorker(Worker):
         # Reset TOPReward state on episode done.
         if self._top_reward_enabled and chunk_dones[:, -1].any():
             self._reset_top_reward_state()
+        if chunk_dones[:, -1].any():
+            self._reset_subtask_update_state()
 
         return env_output, env_info
 
@@ -841,12 +858,6 @@ class EnvWorker(Worker):
             )
 
     def bootstrap_step(self) -> list[EnvOutput]:
-        # Reset subtask counter at the start of each rollout epoch.
-        self._steps_since_subtask_update = 0
-        # Reset TOPReward episode state for new rollout epoch.
-        if self._top_reward_enabled:
-            self._reset_top_reward_state()
-
         reset_on_rollout_epoch = bool(
             self.cfg.env.train.get("reset_on_rollout_epoch", True)
         )
@@ -858,6 +869,9 @@ class EnvWorker(Worker):
                     reset_on_rollout_epoch or len(self.last_obs_list) <= stage_id
                 )
                 if should_reset:
+                    self._reset_subtask_update_state()
+                    if self._top_reward_enabled:
+                        self._reset_top_reward_state()
                     self.env_list[stage_id].is_start = True
                     extracted_obs, infos = self.env_list[stage_id].reset()
                     intervene_actions = None
@@ -911,6 +925,9 @@ class EnvWorker(Worker):
 
     def _reset_envs_for_next_rollout_epoch(self) -> list[EnvOutput]:
         env_outputs: list[EnvOutput] = []
+        self._reset_subtask_update_state()
+        if self._top_reward_enabled:
+            self._reset_top_reward_state()
         dones = self._get_zero_dones()
         terminations = dones.clone()
         truncations = dones.clone()

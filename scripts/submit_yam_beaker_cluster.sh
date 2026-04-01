@@ -157,6 +157,7 @@ gantry_args=(
     gantry run --yes --no-python
     --replicas 1
     --gpus "${GPUS}"
+    --shared-memory "300G"
     --host-networking
     --beaker-image "${BEAKER_IMAGE}"
     --workspace "${WORKSPACE}"

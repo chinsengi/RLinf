@@ -178,11 +178,10 @@ env:
 
     # Subtask update interval in CHUNK STEPS (0 to disable VLM planning).
     # With num_action_chunks=30 and max_steps_per_rollout_epoch=60,
-    # n_train_chunk_steps=2. The EnvWorker resets the subtask counter at the
-    # start of each rollout epoch (bootstrap_step), so subtask_interval must
-    # be <= n_train_chunk_steps to fire within an episode.
+    # n_train_chunk_steps=2. Rollout epochs can continue the same episode, so
+    # subtask_interval is not limited to one rollout epoch.
     # 1 chunk step = 30 env steps = subtask update at ~50% and ~100% of episode.
-    subtask_interval: 1
+    subtask_interval: 10
     # Adaptive triggering on TOPReward signals. When enabled, the VLM
     # planner can refresh early on plateau / score-threshold triggers while
     # subtask_interval remains a max-interval fallback.
