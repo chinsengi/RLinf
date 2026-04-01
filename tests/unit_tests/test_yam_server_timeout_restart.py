@@ -170,7 +170,6 @@ def test_chunk_step_discards_stale_actions_while_cooldown_is_active():
     servicer = RobotEnvServicer(env)
     servicer._first_chunk_approved = True
     servicer._restart_required = True
-    servicer._restart_truncation_pending = True
     servicer._cooldown_deadline = time.monotonic() + 30.0
 
     request = SimpleNamespace(
@@ -189,7 +188,7 @@ def test_chunk_step_discards_stale_actions_while_cooldown_is_active():
     response = servicer.ChunkStep(request, None)
 
     assert len(response.step_results) == 2
-    assert response.step_results[-1].truncated is False
+    assert response.step_results[-1].truncated is True
 
 
 def test_episode_timeout_enters_zero_torque_during_cooldown_restart():

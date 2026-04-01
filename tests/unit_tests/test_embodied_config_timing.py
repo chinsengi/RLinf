@@ -20,7 +20,7 @@ import rlinf.config as config_mod
 from rlinf.config import validate_embodied_cfg
 
 
-def test_return_home_minutes_disables_epoch_end_reset(monkeypatch) -> None:
+def test_return_home_minutes_disables_rollout_boundary_resets(monkeypatch) -> None:
     monkeypatch.setattr(config_mod, "Cluster", lambda *args, **kwargs: object())
     monkeypatch.setattr(
         config_mod,
@@ -35,6 +35,7 @@ def test_return_home_minutes_disables_epoch_end_reset(monkeypatch) -> None:
                 "server_cooldown_minutes": 1,
                 "train": {
                     "control_rate_hz": 10.0,
+                    "reset_on_rollout_epoch": True,
                     "reset_on_rollout_epoch_end": True,
                     "total_num_envs": 1,
                     "group_size": 1,
@@ -78,4 +79,5 @@ def test_return_home_minutes_disables_epoch_end_reset(monkeypatch) -> None:
     assert validated.env.train.max_steps_per_rollout_epoch == 1200
     assert validated.env.eval.max_episode_steps == 1200
     assert validated.env.eval.max_steps_per_rollout_epoch == 1200
+    assert validated.env.train.reset_on_rollout_epoch is False
     assert validated.env.train.reset_on_rollout_epoch_end is False
