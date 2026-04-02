@@ -737,6 +737,8 @@ def validate_megatron_cfg(cfg: DictConfig) -> DictConfig:
 
 
 def validate_embodied_cfg(cfg):
+    only_eval = bool(getattr(cfg.runner, "only_eval", False))
+
     return_home_minutes = cfg.env.get("return_home_minutes", None)
     rollout_horizon_chunks = cfg.env.get("rollout_horizon_chunks", None)
     server_cooldown_minutes = cfg.env.get("server_cooldown_minutes", None)
@@ -769,7 +771,7 @@ def validate_embodied_cfg(cfg):
         aligned_steps = rollout_horizon_chunks * num_chunks
         with open_dict(cfg):
             splits = ["train"]
-            if cfg.runner.val_check_interval > 0 or cfg.runner.only_eval:
+            if cfg.runner.val_check_interval > 0 or only_eval:
                 splits.append("eval")
             for split in splits:
                 cfg.env[split].rollout_horizon_steps = aligned_steps
@@ -777,7 +779,7 @@ def validate_embodied_cfg(cfg):
 
     with open_dict(cfg):
         splits = ["train"]
-        if cfg.runner.val_check_interval > 0 or cfg.runner.only_eval:
+        if cfg.runner.val_check_interval > 0 or only_eval:
             splits.append("eval")
         for split in splits:
             horizon_steps = cfg.env[split].get("rollout_horizon_steps", None)
@@ -869,7 +871,7 @@ def validate_embodied_cfg(cfg):
     slot_count = cfg.rollout.pipeline_slot_count
     env_world_size = component_placement.get_world_size("env")
 
-    enable_eval = cfg.runner.val_check_interval > 0 or cfg.runner.only_eval
+    enable_eval = cfg.runner.val_check_interval > 0 or only_eval
 
     if enable_eval:
         assert cfg.env.eval.total_num_envs > 0, (
@@ -900,7 +902,7 @@ def validate_embodied_cfg(cfg):
             "env.eval.max_steps_per_rollout_epoch must be divisible by actor.model.num_action_chunks"
         )
 
-    if not cfg.runner.only_eval:
+    if not only_eval:
         assert cfg.env.train.total_num_envs > 0, (
             "Total number of parallel environments for training must be greater than 0"
         )

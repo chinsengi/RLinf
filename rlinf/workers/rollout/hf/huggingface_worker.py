@@ -58,7 +58,8 @@ class MultiStepRolloutWorker(Worker):
         self._sync_weight_comm_options = CollectiveGroupOptions(
             accel_max_ctas=max_ctas, accel_min_ctas=min_ctas
         )
-        self.enable_eval = cfg.runner.val_check_interval > 0 or cfg.runner.only_eval
+        only_eval = bool(getattr(cfg.runner, "only_eval", False))
+        self.enable_eval = cfg.runner.val_check_interval > 0 or only_eval
         self.total_num_train_envs = cfg.env.train.total_num_envs
         self.total_num_eval_envs = (
             cfg.env.eval.total_num_envs if self.enable_eval else 0
