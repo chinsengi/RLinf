@@ -36,7 +36,6 @@
 
 defaults:
   - env/remote_yam@env.train
-  - env/remote_yam@env.eval
   - model/pi0_5@actor.model
   - training_backend/fsdp@actor.fsdp_config
   - override hydra/job_logging: stdout
@@ -77,7 +76,7 @@ runner:
   max_epochs: 2000
   max_steps: -1
 
-  only_eval: False
+  # Validation is disabled for this YAM training config.
   val_check_interval: -1
   save_interval: 50
 
@@ -94,8 +93,6 @@ algorithm:
   staleness_threshold: 1
 
   rollout_epoch: 1
-  eval_rollout_epoch: 1
-
   reward_type: chunk_level
   logprob_type: chunk_level
   entropy_type: chunk_level
@@ -124,7 +121,6 @@ algorithm:
   sampling_params:
     do_sample: True
     temperature_train: 1.0
-    temperature_eval: 0.6
     top_k: 50
     top_p: 1.0
     repetition_penalty: 1.0
@@ -149,8 +145,8 @@ env:
   # RobotServer automatically, so RemoteEnv still talks over gRPC but no
   # separate desktop machine or reverse SSH tunnel is required.
   #
-  # Keep env.train.remote_server_url / env.eval.remote_server_url pointed at
-  # localhost:<port> when using this mode.
+  # Keep env.train.remote_server_url pointed at localhost:<port> when using
+  # this mode.
   remote_desktop_simulation:
     enabled: False
     dummy: True
@@ -196,14 +192,6 @@ env:
     # RemoteEnv does not read is_dummy — it proxies calls over gRPC to the server.
     # To test without real hardware, start the robot server with --dummy:
     #   bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml --dummy
-
-  eval:
-    total_num_envs: 1
-    # Derived automatically from env.rollout_horizon_chunks.
-    max_episode_steps: 60
-    max_steps_per_rollout_epoch: 60
-    control_rate_hz: 10.0
-    task_description: "fold the towel"
 
 # VLM planner: Qwen3-VL-8B for both subtask planning and TOPReward scoring.
 # reward_scale is read from THIS section by TOPReward (not from reward.reward_scale).

@@ -44,7 +44,7 @@ except Exception:
     sys.modules.setdefault("ray", ray_stub)
     sys.modules.setdefault("ray.actor", ray_actor_stub)
 
-from rlinf.workers.env.env_worker import EnvWorker
+from rlinf.workers.env.env_worker import EnvWorker, _apply_action_chunk_smoothing
 
 
 class _CfgNode(dict):
@@ -449,6 +449,76 @@ def test_env_interact_step_resets_subtask_counter_on_episode_done(monkeypatch):
     assert env_output.dones[:, -1].item() is True
     assert env_info == {}
     assert worker._steps_since_subtask_update == 0
+
+
+def test_apply_action_chunk_smoothing_ema_numpy():
+    chunk_actions = np.array([[[0.0], [10.0], [10.0]]], dtype=np.float32)
+
+    smoothed = _apply_action_chunk_smoothing(
+        chunk_actions,
+        {"enabled": True, "method": "ema", "alpha": 0.5},
+    )
+
+    assert smoothed.shape == chunk_actions.shape
+    assert smoothed[0, 0, 0] == 0.0
+    assert smoothed[0, 1, 0] == 5.0
+    assert smoothed[0, 2, 0] == 7.5
+
+
+def test_env_interact_step_applies_action_chunk_smoothing(monkeypatch):
+    monkeypatch.setattr(
+        "rlinf.workers.env.env_worker.prepare_actions",
+        lambda **kwargs: kwargs["raw_chunk_actions"].numpy(),
+    )
+
+    captured = {}
+
+    def _chunk_step(chunk_actions):
+        captured["chunk_actions"] = chunk_actions
+        return (
+            [{"states": "next"}],
+            torch.zeros((1, 3), dtype=torch.float32),
+            torch.zeros((1, 3), dtype=torch.bool),
+            torch.zeros((1, 3), dtype=torch.bool),
+            [{}],
+        )
+
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.cfg = _cfg_node(
+        {
+            "env": {
+                "train": {
+                    "env_type": "yam",
+                    "auto_reset": False,
+                    "ignore_terminations": False,
+                    "wm_env_type": None,
+                    "action_chunk_smoothing": {
+                        "enabled": True,
+                        "method": "ema",
+                        "alpha": 0.5,
+                    },
+                }
+            },
+            "actor": {
+                "model": {
+                    "model_type": "openpi",
+                    "num_action_chunks": 3,
+                    "action_dim": 1,
+                }
+            },
+        }
+    )
+    worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
+    worker._top_reward_enabled = False
+    worker._vlm_planner = None
+    worker._steps_since_subtask_update = 0
+    worker.env_list = [SimpleNamespace(chunk_step=_chunk_step)]
+
+    worker.env_interact_step(torch.tensor([[[0.0], [10.0], [10.0]]]), 0)
+
+    assert captured["chunk_actions"][0, 0, 0] == 0.0
+    assert captured["chunk_actions"][0, 1, 0] == 5.0
+    assert captured["chunk_actions"][0, 2, 0] == 7.5
 
 
 def test_maybe_update_subtask_triggers_on_plateau(monkeypatch):

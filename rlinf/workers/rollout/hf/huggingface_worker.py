@@ -58,8 +58,11 @@ class MultiStepRolloutWorker(Worker):
         self._sync_weight_comm_options = CollectiveGroupOptions(
             accel_max_ctas=max_ctas, accel_min_ctas=min_ctas
         )
+        self.enable_eval = cfg.runner.val_check_interval > 0 or cfg.runner.only_eval
         self.total_num_train_envs = cfg.env.train.total_num_envs
-        self.total_num_eval_envs = cfg.env.eval.total_num_envs
+        self.total_num_eval_envs = (
+            cfg.env.eval.total_num_envs if self.enable_eval else 0
+        )
         self.num_pipeline_stages = cfg.rollout.pipeline_stage_num
 
         self.train_batch_size = (
@@ -67,9 +70,10 @@ class MultiStepRolloutWorker(Worker):
         )
         self.eval_batch_size = (
             self.total_num_eval_envs // self._world_size // self.num_pipeline_stages
+            if self.enable_eval
+            else 0
         )
         self.enable_cuda_graph = cfg.rollout.get("enable_cuda_graph", False)
-        self.enable_eval = cfg.runner.val_check_interval > 0 or cfg.runner.only_eval
 
         self.n_train_chunk_steps = (
             cfg.env.train.max_steps_per_rollout_epoch
@@ -78,6 +82,8 @@ class MultiStepRolloutWorker(Worker):
         self.n_eval_chunk_steps = (
             cfg.env.eval.max_steps_per_rollout_epoch
             // cfg.actor.model.num_action_chunks
+            if self.enable_eval
+            else 0
         )
         self.collect_prev_infos = self.cfg.rollout.get("collect_prev_infos", True)
         self.version = 0

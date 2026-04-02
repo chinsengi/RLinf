@@ -37,6 +37,58 @@ from rlinf.utils.metric_utils import compute_split_num
 from rlinf.utils.placement import HybridComponentPlacement
 
 
+def _apply_action_chunk_smoothing(
+    chunk_actions: torch.Tensor | np.ndarray,
+    smoothing_cfg: DictConfig | dict[str, Any] | None,
+) -> torch.Tensor | np.ndarray:
+    """Optionally smooth a chunk of actions along the time axis.
+
+    The smoother is intentionally lightweight and post-processes already prepared
+    chunk actions right before env execution so users can quickly test whether
+    visible shakiness comes from noisy predictions rather than runtime jitter.
+    """
+    if smoothing_cfg is None:
+        return chunk_actions
+
+    enabled = bool(smoothing_cfg.get("enabled", False))
+    if not enabled:
+        return chunk_actions
+
+    method = str(smoothing_cfg.get("method", "ema")).lower()
+    if method not in {"ema", "exponential_moving_average"}:
+        raise ValueError(
+            "env.*.action_chunk_smoothing.method must be 'ema' or "
+            "'exponential_moving_average'."
+        )
+
+    alpha = float(smoothing_cfg.get("alpha", 0.6))
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("env.*.action_chunk_smoothing.alpha must be in [0, 1].")
+
+    if isinstance(chunk_actions, torch.Tensor):
+        if chunk_actions.ndim < 3 or chunk_actions.shape[1] <= 1:
+            return chunk_actions
+        smoothed = chunk_actions.clone()
+        for chunk_idx in range(1, smoothed.shape[1]):
+            smoothed[:, chunk_idx, :] = (
+                alpha * smoothed[:, chunk_idx, :]
+                + (1.0 - alpha) * smoothed[:, chunk_idx - 1, :]
+            )
+        return smoothed
+
+    chunk_actions_np = np.asarray(chunk_actions)
+    if chunk_actions_np.ndim < 3 or chunk_actions_np.shape[1] <= 1:
+        return chunk_actions
+
+    smoothed_np = chunk_actions_np.astype(np.float32, copy=True)
+    for chunk_idx in range(1, smoothed_np.shape[1]):
+        smoothed_np[:, chunk_idx, :] = (
+            alpha * smoothed_np[:, chunk_idx, :]
+            + (1.0 - alpha) * smoothed_np[:, chunk_idx - 1, :]
+        )
+    return smoothed_np.astype(chunk_actions_np.dtype, copy=False)
+
+
 class EnvWorker(Worker):
     def __init__(self, cfg: DictConfig):
         Worker.__init__(self)
@@ -138,6 +190,8 @@ class EnvWorker(Worker):
         self.n_eval_chunk_steps = (
             self.cfg.env.eval.max_steps_per_rollout_epoch
             // self.cfg.actor.model.num_action_chunks
+            if self.enable_eval
+            else 0
         )
         self.actor_split_num = self.get_actor_split_num()
 
@@ -164,7 +218,11 @@ class EnvWorker(Worker):
         self.log_info(f"Env worker initialized with dst_ranks: {self.dst_ranks}")
         self.log_info(f"Env worker initialized with src_ranks: {self.src_ranks}")
         train_env_cls = get_env_cls(self.cfg.env.train.env_type, self.cfg.env.train)
-        eval_env_cls = get_env_cls(self.cfg.env.eval.env_type, self.cfg.env.eval)
+        eval_env_cls = (
+            get_env_cls(self.cfg.env.eval.env_type, self.cfg.env.eval)
+            if self.enable_eval
+            else None
+        )
 
         # This is a barrier to ensure all envs' initial setup upon import is done
         # Essential for RealWorld env to ensure initial ROS node setup is done
@@ -174,7 +232,11 @@ class EnvWorker(Worker):
         )
 
         train_env_cls = get_env_cls(self.cfg.env.train.env_type, self.cfg.env.train)
-        eval_env_cls = get_env_cls(self.cfg.env.eval.env_type, self.cfg.env.eval)
+        eval_env_cls = (
+            get_env_cls(self.cfg.env.eval.env_type, self.cfg.env.eval)
+            if self.enable_eval
+            else None
+        )
 
         if not self.only_eval:
             self.env_list = self._setup_env_and_wrappers(
@@ -524,6 +586,10 @@ class EnvWorker(Worker):
             policy=self.cfg.actor.model.get("policy_setup", None),
             wm_env_type=self.cfg.env.train.get("wm_env_type", None),
         )
+        chunk_actions = _apply_action_chunk_smoothing(
+            chunk_actions,
+            self.cfg.env.train.get("action_chunk_smoothing", None),
+        )
         env_info = {}
 
         # Only time the actual environment interaction (chunk_step) so the
@@ -599,6 +665,11 @@ class EnvWorker(Worker):
         """
         This function is used to evaluate the environment.
         """
+        if not self.enable_eval:
+            raise RuntimeError(
+                "EnvWorker.evaluate_step called without env.eval configured."
+            )
+
         chunk_actions = prepare_actions(
             raw_chunk_actions=raw_actions,
             env_type=self.cfg.env.eval.env_type,
@@ -607,6 +678,10 @@ class EnvWorker(Worker):
             action_dim=self.cfg.actor.model.action_dim,
             policy=self.cfg.actor.model.get("policy_setup", None),
             wm_env_type=self.cfg.env.eval.get("wm_env_type", None),
+        )
+        chunk_actions = _apply_action_chunk_smoothing(
+            chunk_actions,
+            self.cfg.env.eval.get("action_chunk_smoothing", None),
         )
         env_info = {}
 
@@ -1130,6 +1205,9 @@ class EnvWorker(Worker):
         return env_metrics
 
     def evaluate(self, input_channel: Channel, output_channel: Channel):
+        if not self.enable_eval:
+            raise RuntimeError("EnvWorker.evaluate called with evaluation disabled.")
+
         eval_metrics = defaultdict(list)
 
         for eval_rollout_epoch in range(self.cfg.algorithm.eval_rollout_epoch):

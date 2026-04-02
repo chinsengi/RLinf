@@ -775,7 +775,10 @@ def validate_embodied_cfg(cfg):
             raise ValueError("env.rollout_horizon_chunks must be greater than 0.")
         aligned_steps = rollout_horizon_chunks * num_chunks
         with open_dict(cfg):
-            for split in ("train", "eval"):
+            splits = ["train"]
+            if cfg.runner.val_check_interval > 0 or cfg.runner.only_eval:
+                splits.append("eval")
+            for split in splits:
                 cfg.env[split].max_episode_steps = aligned_steps
                 cfg.env[split].max_steps_per_rollout_epoch = aligned_steps
 
@@ -809,7 +812,6 @@ def validate_embodied_cfg(cfg):
                 "Set rollout.collect_prev_infos: true in the config."
             )
 
-    subtask_interval = cfg.env.train.get("subtask_interval", 0)
     subtask_adaptive = bool(cfg.env.train.get("subtask_adaptive", True))
 
     if subtask_adaptive and not cfg.env.train.get("top_reward_enabled", False):
@@ -852,7 +854,9 @@ def validate_embodied_cfg(cfg):
     stage_num = cfg.rollout.pipeline_stage_num
     env_world_size = component_placement.get_world_size("env")
 
-    if cfg.runner.val_check_interval > 0 or cfg.runner.only_eval:
+    enable_eval = cfg.runner.val_check_interval > 0 or cfg.runner.only_eval
+
+    if enable_eval:
         assert cfg.env.eval.total_num_envs > 0, (
             "Total number of parallel environments for evaluation must be greater than 0"
         )
@@ -915,9 +919,9 @@ def validate_embodied_cfg(cfg):
         weight_sync_interval = cfg.runner.get("weight_sync_interval", 1)
         assert weight_sync_interval > 0, "weight_sync_interval must be greater than 0"
         cfg.runner.weight_sync_interval = weight_sync_interval
-        if (
-            SupportedEnvType(cfg.env.train.env_type) == SupportedEnvType.MANISKILL
-            or SupportedEnvType(cfg.env.eval.env_type) == SupportedEnvType.MANISKILL
+        if SupportedEnvType(cfg.env.train.env_type) == SupportedEnvType.MANISKILL or (
+            enable_eval
+            and SupportedEnvType(cfg.env.eval.env_type) == SupportedEnvType.MANISKILL
         ):
 
             def get_robot_control_mode(robot: str):
@@ -939,12 +943,13 @@ def validate_embodied_cfg(cfg):
             cfg.env.train.init_params.control_mode = get_robot_control_mode(
                 cfg.actor.model.policy_setup
             )
-            cfg.env.eval.init_params.control_mode = get_robot_control_mode(
-                cfg.actor.model.policy_setup
-            )
-        elif (
-            SupportedEnvType(cfg.env.train.env_type) == SupportedEnvType.BEHAVIOR
-            or SupportedEnvType(cfg.env.eval.env_type) == SupportedEnvType.BEHAVIOR
+            if enable_eval:
+                cfg.env.eval.init_params.control_mode = get_robot_control_mode(
+                    cfg.actor.model.policy_setup
+                )
+        elif SupportedEnvType(cfg.env.train.env_type) == SupportedEnvType.BEHAVIOR or (
+            enable_eval
+            and SupportedEnvType(cfg.env.eval.env_type) == SupportedEnvType.BEHAVIOR
         ):
             import omnigibson as og
 
@@ -962,7 +967,8 @@ def validate_embodied_cfg(cfg):
             with open_dict(omnigibson_cfg):
                 omnigibson_cfg.robots[0].obs_modalities = ["rgb", "depth", "proprio"]
             cfg.env.train.omnigibson_cfg = omnigibson_cfg
-            cfg.env.eval.omnigibson_cfg = omnigibson_cfg
+            if enable_eval:
+                cfg.env.eval.omnigibson_cfg = omnigibson_cfg
 
     return cfg
 
