@@ -415,7 +415,12 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             self._wait_for_first_chunk_approval(actions)
 
         if self._step_by_step:
-            input("[SBS] Press Enter to execute this chunk...")
+            print("[SBS] Press Enter to execute this chunk...", flush=True)
+            try:
+                with open("/dev/tty", "r") as tty:
+                    tty.readline()
+            except OSError:
+                input()
 
         with self._env_lock:
             (
