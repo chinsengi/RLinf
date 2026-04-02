@@ -162,7 +162,7 @@ env:
     # Optional chunk post-processing for debugging shaky motions. This smooths
     # each predicted action chunk before it is executed by the env worker.
     action_chunk_smoothing:
-      enabled: True
+      enabled: False
       method: ema
       alpha: 0.35
     # Do not return home when a new rollout epoch starts.
@@ -175,7 +175,7 @@ env:
 
     # Enable TOPReward dense progress signal.
     top_reward_enabled: True
-    top_reward_max_frames: 1000
+    top_reward_max_frames: 16
 
     # Fixed-task TOPReward mode. Set subtask_interval > 0 to enable
     # VLM subtask predictions and make TOPReward follow the current subtask.
@@ -200,7 +200,7 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
   top_reward_enabled: True
-  top_reward_max_frames: 1000
+  top_reward_max_frames: 16
   reward_scale: 1.0  # multiplied onto each log-prob score before delta computation
 
 rollout:
@@ -246,7 +246,7 @@ actor:
       config_name: "pi05_yam_follower"
       num_images_in_input: 3
       discrete_state_input: True
-      noise_method: "flow_cps"
+      noise_method: "flow_sde"
       action_horizon: 30
       action_env_dim: 14
       noise_params: [0.16, 0.12, 200]
