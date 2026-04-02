@@ -161,7 +161,7 @@ class MultiStepRolloutWorker(Worker):
             "do_sample": True
             if self._sampling_params.get("temperature_eval", -1) > 0
             else False,
-            "temperature": self._sampling_params["temperature_eval"],
+            "temperature": self._sampling_params.get("temperature_eval", -1),
             "top_k": self._sampling_params["top_k"],
             "top_p": self._sampling_params["top_p"],
             "max_new_tokens": self._length_params["max_new_token"],
