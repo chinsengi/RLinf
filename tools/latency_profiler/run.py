@@ -15,15 +15,66 @@
 """Run embodied RL training with latency profiling enabled.
 
 Drop-in replacement for ``train_embodied_agent_staged.py`` /
-``train_embodied_agent_staged_async.py``.  Uses the same Hydra config
-interface, same Beaker submission flow — just swap the entry point.
+``train_embodied_agent_staged_async.py``. Uses the same Hydra config
+interface and Beaker submission flow; only the Python entry point changes.
 
-The full pipeline runs identically to normal training.  Dummy mode only
+Quick start from the repo root::
+
+    # Sync staged config (default config_name in this file).
+    python tools/latency_profiler/run.py \
+        --config-name yam_ppo_openpi_sync \
+        runner.max_steps=4
+
+    # Async staged config.
+    python tools/latency_profiler/run.py \
+        --config-name yam_ppo_openpi_async \
+        runner.max_steps=4
+
+If your current directory is ``tools/latency_profiler/``, use::
+
+    python run.py \
+        --config-name yam_ppo_openpi_sync \
+        runner.max_steps=4 \
+        +profiler.mode=dummy
+
+Common Hydra overrides::
+
+    # Force profiler mode for remote-env dummy runs started with desktop-side
+    # ``--dummy``. This is useful because the Beaker-side Hydra config cannot
+    # see that robot-server flag.
+    python tools/latency_profiler/run.py \
+        --config-name yam_ppo_openpi_sync \
+        runner.max_steps=4 \
+        +profiler.mode=dummy
+
+    # Write outputs to a dedicated directory / experiment name.
+    python tools/latency_profiler/run.py \
+        --config-name yam_ppo_openpi_sync \
+        runner.max_steps=4 \
+        runner.logger.log_path=../results/profiler \
+        runner.logger.experiment_name=yam_sync_latency_smoke
+
+    # Enable the built-in local simulated desktop instead of an external
+    # RobotServer. Keep remote_server_url pointed at localhost when using this.
+    python tools/latency_profiler/run.py \
+        --config-name yam_ppo_openpi_sync \
+        runner.max_steps=4 \
+        env.remote_desktop_simulation.enabled=true \
+        +profiler.mode=dummy
+
+What gets saved::
+
+    <runner.logger.log_path>/<runner.logger.experiment_name>/latency_report/
+      latency_<mode>.csv
+      latency_<mode>.json
+      latency_<mode>.txt
+
+The full pipeline runs identically to normal training. Dummy mode only
 means YAMEnv does not connect to real hardware (returns zero observations);
-everything else — Beaker, Ray, gRPC, actor training, rollout inference,
-VLM reward — runs for real.
+everything else - Beaker, Ray, gRPC, actor training, rollout inference,
+VLM reward - runs for real.
 
-Topology 1 — Remote env (single Beaker node, robot server on desktop)::
+Topology 1 - Remote env (single Beaker node, robot server on desktop)::
 
     # Step 1: submit Beaker job
     bash scripts/submit_yam_training.sh --interactive \
@@ -35,7 +86,13 @@ Topology 1 — Remote env (single Beaker node, robot server on desktop)::
         --config .../yam_pi05_follower.yaml \
         --use-follower-servers --remote-host beaker-0 [--dummy]
 
-Topology 2 — Desktop-driven (Beaker GPUs + desktop env)::
+    # Step 3: replace the normal training entry point with the profiler
+    # entry point inside the Beaker shell.
+    python tools/latency_profiler/run.py \
+        --config-name yam_ppo_openpi_sync \
+        runner.max_steps=20
+
+Topology 2 - Desktop-driven (Beaker GPUs + desktop env)::
 
     # Step 1: submit Beaker cluster
     bash scripts/submit_yam_beaker_cluster.sh \
@@ -47,8 +104,7 @@ Topology 2 — Desktop-driven (Beaker GPUs + desktop env)::
         --config yam_ppo_openpi_desktop_sync \
         --model-path thomas0829/folding_towel_pi05
 
-Results are saved to ``<log_path>/<experiment_name>/latency_report/``
-when training finishes or is interrupted (Ctrl+C).
+Results are saved when training finishes or is interrupted (Ctrl+C).
 """
 
 import json
