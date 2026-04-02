@@ -331,6 +331,11 @@ because PPO now backpropagates through a learned standard deviation.
 
 ### 5.3 `noise_method: flow_cps`
 
+Implementation note: the final `flow_cps` denoising step has `t' = 0`, so its
+transition is deterministic. PPO therefore skips that tail step when sampling a
+single denoising transition or aggregating joint denoising log-probs; otherwise
+the policy update would include a zero-information log-prob term.
+
 This uses a cosine–sine parameterization controlled by `noise_level`:
 
 ```math
