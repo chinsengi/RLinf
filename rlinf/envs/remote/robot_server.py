@@ -205,6 +205,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._last_rpc_time: float = time.monotonic()
         self._client_connected: bool = False
         self._chunk_count: int = 0
+        self._base_task_description: str = self._read_env_task_description()
         self._episode_cooldown_s: float = float(
             getattr(self._env, "_episode_cooldown_s", 0.0)
         )
@@ -214,6 +215,40 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
         self._env_lock = threading.Lock()
+
+    def _read_env_task_description(self) -> str:
+        """Return the current task/subtask string from the wrapped env."""
+        task_description = getattr(self._env, "task_description", "")
+        return str(task_description or "").strip()
+
+    def _format_chunk_task_context(self) -> str:
+        """Return a compact terminal string for the live task/subtask state."""
+        current_task = self._read_env_task_description()
+        if current_task and not self._base_task_description:
+            self._base_task_description = current_task
+
+        if self._base_task_description and current_task:
+            if current_task != self._base_task_description:
+                return (
+                    f'task="{self._base_task_description}" | subtask="{current_task}"'
+                )
+            return f'task="{current_task}"'
+
+        if current_task:
+            return f'task="{current_task}"'
+
+        if self._base_task_description:
+            return f'task="{self._base_task_description}"'
+
+        return 'task=""'
+
+    def _print_chunk_task_context(self) -> None:
+        """Print the current task/subtask context for each received chunk."""
+        chunk_index = self._chunk_count + 1
+        print(
+            f"[RobotServer][ChunkStep {chunk_index}] {self._format_chunk_task_context()}",
+            flush=True,
+        )
 
     def _touch(self) -> None:
         """Record that a client RPC was received."""
@@ -415,6 +450,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
         )
+        self._print_chunk_task_context()
         if self._verbose:
             logger.info(
                 f"[ChunkStep] Received chunk: num_envs={request.num_envs}, "
@@ -498,6 +534,9 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
     def SetTaskDescription(self, request, context):
         self._touch()
         self._env.task_description = request.task_description
+        task_description = str(request.task_description or "").strip()
+        if task_description and not self._base_task_description:
+            self._base_task_description = task_description
         return robot_env_pb2.Empty()
 
     def EnterZeroTorqueMode(self, request, context):

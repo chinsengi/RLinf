@@ -14,7 +14,9 @@
 
 """Regression tests for YAM timeout/restart handling."""
 
+import io
 import time
+from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -217,3 +219,43 @@ def test_poll_restart_if_ready_finishes_cooldown_without_waiting_for_client_rpc(
     assert servicer._restart_required is False
     assert servicer._cooldown_deadline is None
     assert obs is not None
+
+
+def test_chunk_step_prints_task_and_subtask_context_to_terminal():
+    class _FakeChunkEnv(_FakeServicerEnv):
+        def __init__(self):
+            super().__init__()
+            self.task_description = "fold the towel"
+
+        def chunk_step(self, actions):
+            self.chunk_step_calls += 1
+            obs = self._wrap_obs(self._dummy_obs())
+            obs["task_descriptions"] = [self.task_description]
+            chunk_size = actions.shape[1]
+            rewards = np.zeros((1, chunk_size), dtype=np.float32)
+            terminations = np.zeros((1, chunk_size), dtype=bool)
+            truncations = np.zeros((1, chunk_size), dtype=bool)
+            infos_list = [{} for _ in range(chunk_size)]
+            return [obs], rewards, terminations, truncations, infos_list
+
+    env = _FakeChunkEnv()
+    servicer = RobotEnvServicer(env)
+    servicer._first_chunk_approved = True
+    servicer.SetTaskDescription(
+        SimpleNamespace(task_description="grasp the left corner"),
+        None,
+    )
+    request = SimpleNamespace(
+        actions=np.zeros((1, 2, 14), dtype=np.float32).tobytes(),
+        num_envs=1,
+        chunk_size=2,
+        action_dim=14,
+    )
+
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        servicer.ChunkStep(request, None)
+
+    output = stdout.getvalue()
+    assert '[RobotServer][ChunkStep 1] task="fold the towel"' in output
+    assert 'subtask="grasp the left corner"' in output
