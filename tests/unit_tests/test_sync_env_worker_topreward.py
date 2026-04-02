@@ -112,7 +112,6 @@ def _make_adaptive_worker(
     worker._subtask_plateau_threshold = plateau_threshold
     worker._subtask_score_threshold = score_threshold
     worker._top_reward_enabled = True
-    worker._top_reward_instruction_source = "initial_task"
     worker._prev_top_score = prev_top_score
     worker._top_reward_has_prev_score = True
     worker._steps_since_subtask_update = steps_since_update
@@ -126,14 +125,14 @@ def _make_adaptive_worker(
     return worker
 
 
-def _make_top_reward_worker(scores, *, instruction_source="initial_task"):
+def _make_top_reward_worker(scores, *, subtask_interval=0):
     worker = EnvWorker.__new__(EnvWorker)
     worker.env_list = [
         SimpleNamespace(unwrapped=SimpleNamespace(task_description="fold the towel"))
     ]
     worker._initial_task_descriptions = ["fold the towel"]
     worker._top_reward_enabled = True
-    worker._top_reward_instruction_source = instruction_source
+    worker._subtask_interval = subtask_interval
     worker._top_reward_max_frames = 16
     worker._episode_frames = []
     worker._prev_top_score = 0.0
@@ -156,7 +155,6 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     worker = EnvWorker.__new__(EnvWorker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
     worker._top_reward_enabled = True
-    worker._top_reward_instruction_source = "current_task"
     worker._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
     worker._prev_top_score = 1.5
     worker._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
@@ -173,13 +171,12 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     assert list(worker._recent_top_deltas) == []
 
 
-def test_apply_subtask_update_resets_for_initial_task():
-    """Subtask updates reset reward state even with initial_task source."""
+def test_apply_subtask_update_resets_when_subtask_changes():
+    """Subtask updates reset reward state when TOPReward is enabled."""
     inner_env = SimpleNamespace(task_description="fold the towel")
     worker = EnvWorker.__new__(EnvWorker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
     worker._top_reward_enabled = True
-    worker._top_reward_instruction_source = "initial_task"
     worker._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
     worker._prev_top_score = 1.5
     worker._top_reward_has_prev_score = True
@@ -242,13 +239,13 @@ def test_get_next_subtask_prompt_includes_main_task():
 
 
 # ---------------------------------------------------------------------------
-# Plan step 4: TOPReward instruction source selection
+# Plan step 4: TOPReward instruction selection by subtask_interval
 # ---------------------------------------------------------------------------
 
 
-def test_instruction_source_initial_task():
+def test_top_reward_uses_initial_task_when_subtask_planning_disabled():
     worker = EnvWorker.__new__(EnvWorker)
-    worker._top_reward_instruction_source = "initial_task"
+    worker._subtask_interval = 0
     worker._initial_task_descriptions = ["fold the towel"]
     worker.env_list = [
         SimpleNamespace(unwrapped=SimpleNamespace(task_description="grasp the corner"))
@@ -256,9 +253,9 @@ def test_instruction_source_initial_task():
     assert worker._get_top_reward_instruction(0) == "fold the towel"
 
 
-def test_instruction_source_current_task():
+def test_top_reward_uses_current_task_when_subtask_planning_enabled():
     worker = EnvWorker.__new__(EnvWorker)
-    worker._top_reward_instruction_source = "current_task"
+    worker._subtask_interval = 10
     worker._initial_task_descriptions = ["fold the towel"]
     worker.env_list = [
         SimpleNamespace(unwrapped=SimpleNamespace(task_description="grasp the corner"))
@@ -294,7 +291,7 @@ def test_compute_top_reward_seeds_zero_delta_after_subtask_reset(monkeypatch):
     import ray
 
     monkeypatch.setattr(ray, "get", lambda ref: ref)
-    worker = _make_top_reward_worker([2.0], instruction_source="current_task")
+    worker = _make_top_reward_worker([2.0], subtask_interval=10)
     worker._episode_frames = [np.zeros((8, 8, 3), dtype=np.uint8)]
     worker._prev_top_score = 1.5
     worker._top_reward_has_prev_score = True
