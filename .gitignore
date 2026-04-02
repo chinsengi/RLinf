@@ -13,10 +13,7 @@ docs/build
 dist
 logs/*
 outputs/*
-tools/results/**/events.out.tfevents.*
-tools/results/**/latency_report/*.csv
-tools/results/**/latency_report/*.json
-tools/results/**/latency_report/*.txt
+tools/results/
 *.so
 .venv
 .docs-venv
