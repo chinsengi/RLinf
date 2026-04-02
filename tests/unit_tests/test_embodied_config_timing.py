@@ -36,8 +36,8 @@ fake_placement_module.ModelParallelComponentPlacement = object
 fake_placement_module.PlacementMode = _FakePlacementMode
 sys.modules.setdefault("rlinf.utils.placement", fake_placement_module)
 
-import rlinf.config as config_mod
-from rlinf.config import validate_embodied_cfg
+import rlinf.config as config_mod  # noqa: E402
+from rlinf.config import validate_embodied_cfg  # noqa: E402
 
 
 def test_return_home_minutes_only_sets_server_timing(monkeypatch) -> None:
@@ -58,6 +58,7 @@ def test_return_home_minutes_only_sets_server_timing(monkeypatch) -> None:
                     "reset_on_rollout_epoch": True,
                     "reset_on_rollout_epoch_end": True,
                     "max_episode_steps": 24000,
+                    "rollout_horizon_steps": 24000,
                     "max_steps_per_rollout_epoch": 24000,
                     "total_num_envs": 1,
                     "group_size": 1,
@@ -66,6 +67,7 @@ def test_return_home_minutes_only_sets_server_timing(monkeypatch) -> None:
                 "eval": {
                     "control_rate_hz": 10.0,
                     "max_episode_steps": 24000,
+                    "rollout_horizon_steps": 24000,
                     "max_steps_per_rollout_epoch": 24000,
                     "total_num_envs": 1,
                     "group_size": 1,
@@ -90,7 +92,7 @@ def test_return_home_minutes_only_sets_server_timing(monkeypatch) -> None:
             },
             "rollout": {
                 "collect_prev_infos": True,
-                "pipeline_stage_num": 1,
+                "pipeline_slot_count": 1,
             },
         }
     )
@@ -100,8 +102,10 @@ def test_return_home_minutes_only_sets_server_timing(monkeypatch) -> None:
     assert validated.env.server_episode_duration_s == 120.0
     assert validated.env.server_cooldown_s == 60.0
     assert validated.env.train.max_episode_steps == 24000
+    assert validated.env.train.rollout_horizon_steps == 24000
     assert validated.env.train.max_steps_per_rollout_epoch == 24000
     assert validated.env.eval.max_episode_steps == 24000
+    assert validated.env.eval.rollout_horizon_steps == 24000
     assert validated.env.eval.max_steps_per_rollout_epoch == 24000
     assert validated.env.train.reset_on_rollout_epoch is False
     assert validated.env.train.reset_on_rollout_epoch_end is False
@@ -163,10 +167,14 @@ def test_rollout_horizon_chunks_sets_rollout_steps(monkeypatch) -> None:
 
     assert validated.env.server_episode_duration_s == 120.0
     assert validated.env.server_cooldown_s == 60.0
-    assert validated.env.train.max_episode_steps == 60
+    assert validated.env.train.rollout_horizon_steps == 60
     assert validated.env.train.max_steps_per_rollout_epoch == 60
-    assert validated.env.eval.max_episode_steps == 60
+    assert validated.env.train.get("max_episode_steps", None) is None
+    assert validated.env.eval.rollout_horizon_steps == 60
     assert validated.env.eval.max_steps_per_rollout_epoch == 60
+    assert validated.env.eval.get("max_episode_steps", None) is None
+    assert validated.rollout.pipeline_slot_count == 1
+    assert validated.rollout.pipeline_stage_num == 1
 
 
 def test_rollout_horizon_minutes_is_rejected(monkeypatch) -> None:

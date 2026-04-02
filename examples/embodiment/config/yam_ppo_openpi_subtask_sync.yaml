@@ -155,7 +155,10 @@ env:
   train:
     total_num_envs: 1
     # Derived automatically from env.rollout_horizon_chunks.
-    max_episode_steps: 60
+    # For YAM this is the training-side rollout horizon, not the true robot
+    # episode timeout. The actual episode length comes from
+    # env/yam_pi05_follower.yaml: episode_duration_s (default: 120s).
+    rollout_horizon_steps: 60
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
 
@@ -166,7 +169,7 @@ env:
 
     # Enable TOPReward dense progress signal.
     top_reward_enabled: True
-    top_reward_max_frames: 16
+    top_reward_max_frames: 1000
     # Anchor TOPReward to the episode-level goal so reward semantics are stable
     # across subtask changes. Use "current_task" only if stage-conditioned dense
     # reward is explicitly desired.
@@ -191,7 +194,6 @@ env:
     # RemoteEnv does not read is_dummy — it proxies calls over gRPC to the server.
     # To test without real hardware, start the robot server with --dummy:
     #   bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml --dummy
-
 # VLM planner: Qwen3-VL-8B for both subtask planning and TOPReward scoring.
 # reward_scale is read from THIS section by TOPReward (not from reward.reward_scale).
 vlm_planner:
@@ -208,7 +210,7 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
   top_reward_enabled: True
-  top_reward_max_frames: 16
+  top_reward_max_frames: 1000
   reward_scale: 1.0  # multiplied onto each log-prob score before delta computation
 
 rollout:
@@ -217,7 +219,7 @@ rollout:
   recompute_logprobs: False
   unnorm_key: libero_10
   enable_offload: False
-  pipeline_stage_num: 1
+  pipeline_slot_count: 1
 
   collect_transitions: True
   collect_prev_infos: True  # required for adv_type: gae — prev_values must be collected for GAE bootstrap

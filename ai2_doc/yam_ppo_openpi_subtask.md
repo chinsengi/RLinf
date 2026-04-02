@@ -16,8 +16,7 @@ Runtime split:
 - `yam_ppo_openpi_subtask_async` uses
   `train_embodied_agent_staged_async.py` and
   `algorithm.loss_type: decoupled_actor_critic`
-- `yam_ppo_openpi_subtask_sync` uses `train_embodied_agent_staged.py` and
-  `algorithm.loss_type: actor_critic`
+- `yam_ppo_openpi_subtask_sync` uses `train_embodied_agent_staged.py`
 
 For the simpler TOPReward-only variant, see
 [yam_ppo_openpi](yam_ppo_openpi.md).

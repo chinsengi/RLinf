@@ -739,7 +739,6 @@ def validate_megatron_cfg(cfg: DictConfig) -> DictConfig:
 def validate_embodied_cfg(cfg):
     return_home_minutes = cfg.env.get("return_home_minutes", None)
     rollout_horizon_chunks = cfg.env.get("rollout_horizon_chunks", None)
-    rollout_horizon_minutes = cfg.env.get("rollout_horizon_minutes", None)
     server_cooldown_minutes = cfg.env.get("server_cooldown_minutes", None)
     if return_home_minutes is not None:
         return_home_minutes = float(return_home_minutes)
@@ -758,12 +757,6 @@ def validate_embodied_cfg(cfg):
             cfg.env.train.reset_on_rollout_epoch = False
             cfg.env.train.reset_on_rollout_epoch_end = False
 
-    if rollout_horizon_minutes is not None:
-        raise ValueError(
-            "env.rollout_horizon_minutes has been removed. "
-            "Use env.rollout_horizon_chunks instead."
-        )
-
     num_chunks = cfg.actor.model.get("num_action_chunks", None)
     if rollout_horizon_chunks is not None:
         if num_chunks is None or num_chunks <= 0:
@@ -779,8 +772,21 @@ def validate_embodied_cfg(cfg):
             if cfg.runner.val_check_interval > 0 or cfg.runner.only_eval:
                 splits.append("eval")
             for split in splits:
-                cfg.env[split].max_episode_steps = aligned_steps
+                cfg.env[split].rollout_horizon_steps = aligned_steps
                 cfg.env[split].max_steps_per_rollout_epoch = aligned_steps
+
+    with open_dict(cfg):
+        splits = ["train"]
+        if cfg.runner.val_check_interval > 0 or cfg.runner.only_eval:
+            splits.append("eval")
+        for split in splits:
+            horizon_steps = cfg.env[split].get("rollout_horizon_steps", None)
+            if horizon_steps is None:
+                horizon_steps = cfg.env[split].get("max_steps_per_rollout_epoch", None)
+            if horizon_steps is None:
+                horizon_steps = cfg.env[split].get("max_episode_steps", None)
+            if horizon_steps is not None:
+                cfg.env[split].rollout_horizon_steps = int(horizon_steps)
 
     assert get_supported_model(cfg.actor.model.model_type).category == "embodied", (
         f"Model type: '{cfg.actor.model.model_type}' is not an embodied model. "
@@ -850,8 +856,17 @@ def validate_embodied_cfg(cfg):
             )
 
     # process num-envs
+    pipeline_slot_count = int(
+        cfg.rollout.get(
+            "pipeline_slot_count",
+            1,
+        )
+    )
+    with open_dict(cfg):
+        cfg.rollout.pipeline_slot_count = pipeline_slot_count
+
     component_placement = HybridComponentPlacement(cfg, Cluster())
-    stage_num = cfg.rollout.pipeline_stage_num
+    slot_count = cfg.rollout.pipeline_slot_count
     env_world_size = component_placement.get_world_size("env")
 
     enable_eval = cfg.runner.val_check_interval > 0 or cfg.runner.only_eval
@@ -863,20 +878,20 @@ def validate_embodied_cfg(cfg):
         assert cfg.env.eval.total_num_envs % env_world_size == 0, (
             "Total number of parallel environments for evaluation must be divisible by the number of environment processes"
         )
-        assert cfg.env.eval.total_num_envs % env_world_size % stage_num == 0, (
-            "Total number of parallel environments for evaluation must be divisible by the number of environment processes and the number of pipeline stages"
+        assert cfg.env.eval.total_num_envs % env_world_size % slot_count == 0, (
+            "Total number of parallel environments for evaluation must be divisible by the number of environment processes and the number of pipeline slots"
         )
-        assert cfg.env.eval.total_num_envs // env_world_size // stage_num > 0, (
-            "env.eval.total_num_envs // env_world_size // rollout.pipeline_stage_num must be greater than 0"
+        assert cfg.env.eval.total_num_envs // env_world_size // slot_count > 0, (
+            "env.eval.total_num_envs // env_world_size // rollout.pipeline_slot_count must be greater than 0"
         )
         assert (
             cfg.env.eval.total_num_envs
             // env_world_size
-            // stage_num
+            // slot_count
             % cfg.env.eval.group_size
             == 0
         ), (
-            "env.eval.total_num_envs // env_world_size // rollout.pipeline_stage_num must be divisible by the group size"
+            "env.eval.total_num_envs // env_world_size // rollout.pipeline_slot_count must be divisible by the group size"
         )
         assert (
             cfg.env.eval.max_steps_per_rollout_epoch % cfg.actor.model.num_action_chunks
@@ -892,20 +907,20 @@ def validate_embodied_cfg(cfg):
         assert cfg.env.train.total_num_envs % env_world_size == 0, (
             "Total number of parallel environments for training must be divisible by the number of environment processes"
         )
-        assert cfg.env.train.total_num_envs % env_world_size % stage_num == 0, (
-            "Total number of parallel environments for training must be divisible by the number of environment processes and the number of pipeline stages"
+        assert cfg.env.train.total_num_envs % env_world_size % slot_count == 0, (
+            "Total number of parallel environments for training must be divisible by the number of environment processes and the number of pipeline slots"
         )
-        assert cfg.env.train.total_num_envs // env_world_size // stage_num > 0, (
-            "env.train.total_num_envs // env_world_size // rollout.pipeline_stage_num must be greater than 0"
+        assert cfg.env.train.total_num_envs // env_world_size // slot_count > 0, (
+            "env.train.total_num_envs // env_world_size // rollout.pipeline_slot_count must be greater than 0"
         )
         assert (
             cfg.env.train.total_num_envs
             // env_world_size
-            // stage_num
+            // slot_count
             % cfg.env.train.group_size
             == 0
         ), (
-            "env.train.total_num_envs // env_world_size // rollout.pipeline_stage_num must be divisible by the group size"
+            "env.train.total_num_envs // env_world_size // rollout.pipeline_slot_count must be divisible by the group size"
         )
         assert (
             cfg.env.train.max_steps_per_rollout_epoch

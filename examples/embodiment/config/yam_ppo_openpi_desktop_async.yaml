@@ -136,7 +136,10 @@ env:
 
   train:
     total_num_envs: 1
+    # Local YAM env truncation cap. This is the real env-side episode limit.
     max_episode_steps: 100
+    # Training-side rollout horizon used for rollout/result bookkeeping.
+    rollout_horizon_steps: 60
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
 
@@ -157,12 +160,11 @@ env:
     # Enable TOPReward dense progress signal.
     # EnvWorker calls VLMPlannerWorker (on Beaker GPU 2) via Ray RPC.
     top_reward_enabled: True
-    top_reward_max_frames: 16
+    top_reward_max_frames: 1000
     top_reward_instruction_source: initial_task
 
     # Subtask planning disabled — VLM is used for TOPReward only.
     subtask_interval: 0
-
 # VLM planner: Qwen3-VL-8B for TOPReward scoring only (no subtask planning).
 vlm_planner:
   model_path: "Qwen/Qwen3-VL-8B-Instruct"
@@ -178,7 +180,7 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
   top_reward_enabled: True
-  top_reward_max_frames: 16
+  top_reward_max_frames: 1000
   reward_scale: 1.0
 
 rollout:
@@ -187,7 +189,7 @@ rollout:
   recompute_logprobs: False
   unnorm_key: libero_10
   enable_offload: False
-  pipeline_stage_num: 1
+  pipeline_slot_count: 1
 
   collect_transitions: True
   collect_prev_infos: True

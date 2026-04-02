@@ -92,7 +92,7 @@ algorithm:
   logprob_type: chunk_level
   entropy_type: chunk_level
 
-  update_epoch: 5
+  update_epoch: 2
   adv_type: gae
   loss_type: decoupled_actor_critic
   loss_agg_func: "token-mean"
@@ -131,8 +131,8 @@ env:
   # home and rest. This does NOT define the training rollout horizon.
   return_home_minutes: 2
   # Training-side rollout horizon in action chunks. With
-  # actor.model.num_action_chunks=30, forty chunks means 1200 low-level steps.
-  rollout_horizon_chunks: 40
+  # actor.model.num_action_chunks=30, two chunks means 60 low-level steps.
+  rollout_horizon_chunks: 2
   # Desktop RobotServer cooldown after the timer expires and the arms have
   # already returned home. Keep this at the top level so Beaker and desktop
   # can share one timing source.
@@ -154,8 +154,11 @@ env:
   train:
     total_num_envs: 1
     # Derived automatically from env.rollout_horizon_chunks.
-    max_episode_steps: 1200
-    max_steps_per_rollout_epoch: 1200
+    # For YAM this is the training-side rollout horizon, not the true robot
+    # episode timeout. The actual episode length comes from
+    # env/yam_pi05_follower.yaml: episode_duration_s (default: 120s).
+    rollout_horizon_steps: 60
+    max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
     # Do not return home when a new rollout epoch starts.
     reset_on_rollout_epoch: False
@@ -167,7 +170,7 @@ env:
 
     # Enable TOPReward dense progress signal.
     top_reward_enabled: True
-    top_reward_max_frames: 16
+    top_reward_max_frames: 1000
     top_reward_instruction_source: initial_task
 
     # Subtask planning disabled — VLM is used for TOPReward only.
@@ -178,7 +181,6 @@ env:
     # RemoteEnv does not read is_dummy — it proxies calls over gRPC to the server.
     # To test without real hardware, start the robot server with --dummy:
     #   bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml --dummy
-
 # VLM planner: Qwen3-VL-8B for TOPReward scoring only (no subtask planning).
 # reward_scale is read from THIS section by TOPReward (not from reward.reward_scale).
 vlm_planner:
@@ -194,7 +196,7 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
   top_reward_enabled: True
-  top_reward_max_frames: 16
+  top_reward_max_frames: 1000
   reward_scale: 1.0  # multiplied onto each log-prob score before delta computation
 
 rollout:
@@ -203,7 +205,7 @@ rollout:
   recompute_logprobs: False
   unnorm_key: libero_10
   enable_offload: False
-  pipeline_stage_num: 1
+  pipeline_slot_count: 1
 
   collect_transitions: True
   collect_prev_infos: True  # required for adv_type: gae — prev_values must be collected for GAE bootstrap
@@ -219,7 +221,7 @@ actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
 
-  # rollout_size = n_chunk_steps * total_num_envs * rollout_epoch = 800 * 1 * 1 = 800
+  # rollout_size = n_chunk_steps * total_num_envs * rollout_epoch = 2 * 1 * 1 = 2
   # global_batch_size must divide rollout_size; micro_batch_size must divide global_batch_size.
   micro_batch_size: 2
   global_batch_size: 2

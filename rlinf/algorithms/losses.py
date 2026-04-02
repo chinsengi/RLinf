@@ -33,13 +33,54 @@ def compute_decoupled_ppo_actor_loss(
     loss_mask: Optional[torch.Tensor] = None,
     clip_ratio_c: Optional[float] = None,
     loss_agg_func: Optional[Callable[..., torch.Tensor]] = masked_mean,
-    max_episode_steps: Optional[int] = None,
+    rollout_horizon_steps: Optional[int] = None,
     loss_mask_sum: Optional[torch.Tensor] = None,
     critic_warmup: Optional[bool] = False,
     behave_weight_threshold: Optional[float] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, dict]:
-    """Compute actor loss for decoupled PPO with optional proximal policy anchor."""
+    """Compute decoupled PPO actor loss with an optional proximal anchor.
+
+    This variant clips the policy gradient update against `proximal_logprobs`
+    instead of always clipping against `old_logprobs`. When
+    `proximal_logprobs` is not provided, the function either reuses
+    `old_logprobs` or reconstructs an intermediate proximal policy from
+    `versions` and `current_version`, then reweights the loss by the behavior
+    policy ratio `exp(proximal_logprobs - old_logprobs)`.
+
+    Args:
+        logprobs: Log probabilities produced by the current policy.
+        old_logprobs: Log probabilities from the behavior policy used to
+            collect the samples.
+        clip_ratio_low: Lower clipping bound applied to the proximal ratio.
+        clip_ratio_high: Upper clipping bound applied to the proximal ratio.
+        advantages: Advantage estimates aligned with `logprobs`.
+        proximal_logprobs: Optional log probabilities from the proximal policy
+            used as the clipping anchor.
+        versions: Optional per-sample policy version indices used to
+            interpolate a proximal anchor when `proximal_logprobs` is absent.
+        current_version: Version index of the current policy.
+        loss_mask: Optional mask selecting valid tokens or timesteps.
+        clip_ratio_c: Optional dual-clip coefficient. Must be greater than 1.0
+            when provided.
+        loss_agg_func: Reduction function applied to the masked loss.
+        rollout_horizon_steps: Optional rollout horizon used when normalizing
+            with `masked_mean_ratio`.
+        loss_mask_sum: Optional count of valid items paired with
+            `rollout_horizon_steps`.
+        critic_warmup: Whether to zero the actor loss during critic warmup.
+        behave_weight_threshold: Optional upper bound on the behavior weight
+            `exp(proximal_logprobs - old_logprobs)` used to filter unstable
+            samples.
+        **kwargs: Unused extra keyword arguments forwarded by the loss
+            registry.
+
+    Returns:
+        A tuple of `(actor_loss, metrics_dict)` where `actor_loss` is the
+        reduced scalar loss tensor and `metrics_dict` contains diagnostic
+        metrics such as clipping fractions, proximal and behavior KL
+        approximations, and optional version statistics.
+    """
     assert logprobs.dtype == torch.float32, (
         "logprobs must be float32 to keep numerical stability"
     )
@@ -55,11 +96,11 @@ def compute_decoupled_ppo_actor_loss(
 
     loss_mask_ratio = None
     if (
-        max_episode_steps is not None
+        rollout_horizon_steps is not None
         and loss_mask_sum is not None
         and loss_mask is not None
     ):
-        loss_mask_ratio = (loss_mask_sum * 1.0) / max_episode_steps
+        loss_mask_ratio = (loss_mask_sum * 1.0) / rollout_horizon_steps
         loss_agg_func = masked_mean_ratio
 
     if proximal_logprobs is None:
@@ -173,7 +214,7 @@ def compute_ppo_actor_loss(
     loss_mask: Optional[torch.Tensor] = None,
     clip_ratio_c: Optional[float] = None,
     loss_agg_func: Optional[Callable[..., torch.Tensor]] = masked_mean,
-    max_episode_steps: Optional[int] = None,
+    rollout_horizon_steps: Optional[int] = None,
     loss_mask_sum: Optional[torch.Tensor] = None,
     critic_warmup: Optional[bool] = False,
     clip_log_ratio_min: Optional[float] = None,
@@ -193,7 +234,7 @@ def compute_ppo_actor_loss(
         loss_mask (Optional[torch.BoolTensor], optional): Mask for valid entries. Defaults to None.
         clip_ratio_c (Optional[float], optional): Optional clipping coefficient. Defaults to None.
         loss_agg_func (callable, optional): Aggregation function (e.g., masked_mean). Defaults to None.
-        max_episode_steps (Optional[int], optional): Max episode length for normalization. Defaults to None.
+        rollout_horizon_steps (Optional[int], optional): Rollout horizon for normalization. Defaults to None.
 
     Returns:
         Tuple[torch.Tensor, Dict]: (actor_loss, metrics_dict)
@@ -216,11 +257,11 @@ def compute_ppo_actor_loss(
     loss_mask_ratio = None
 
     if (
-        max_episode_steps is not None
+        rollout_horizon_steps is not None
         and loss_mask_sum is not None
         and loss_mask is not None
     ):
-        loss_mask_ratio = (loss_mask_sum * 1.0) / max_episode_steps
+        loss_mask_ratio = (loss_mask_sum * 1.0) / rollout_horizon_steps
         loss_agg_func = masked_mean_ratio
 
     if loss_mask is None:
@@ -266,7 +307,7 @@ def compute_ppo_actor_loss(
     )
     policy_loss = loss_agg_func(
         policy_loss, loss_mask, loss_mask_ratio
-    )  # default max_episode_steps is None
+    )  # default rollout_horizon_steps is None
 
     clip_mask = policy_loss1.detach() < policy_loss2.detach()
     dual_clip_mask = (dual_clip_mask * loss_mask).bool()
@@ -316,7 +357,7 @@ def compute_ppo_critic_loss(
     value_clip: float,
     huber_delta: float,
     loss_mask: Optional[torch.Tensor] = None,
-    max_episode_steps: Optional[int] = None,
+    rollout_horizon_steps: Optional[int] = None,
     loss_mask_sum: Optional[torch.Tensor] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, dict]:
@@ -337,11 +378,11 @@ def compute_ppo_critic_loss(
     loss_agg_func = masked_mean
 
     if (
-        max_episode_steps is not None
+        rollout_horizon_steps is not None
         and loss_mask_sum is not None
         and loss_mask is not None
     ):
-        loss_mask_ratio = (loss_mask_sum * 1.0) / max_episode_steps
+        loss_mask_ratio = (loss_mask_sum * 1.0) / rollout_horizon_steps
         loss_agg_func = masked_mean_ratio
 
     value_pred_clipped = prev_values + (values - prev_values).clamp(

@@ -108,11 +108,12 @@ class EnvWorker(Worker):
 
         self.collect_transitions = self.cfg.rollout.get("collect_transitions", False)
         self.collect_prev_infos = self.cfg.rollout.get("collect_prev_infos", True)
-        self.stage_num = self.cfg.rollout.pipeline_stage_num
+        self.slot_count = int(self.cfg.rollout.get("pipeline_slot_count", 1))
+        self.stage_num = self.slot_count  # Legacy alias for older call sites/tests.
 
         # Env configurations
         self.enable_offload = self.cfg.env.train.get("enable_offload", False)
-        # VLM planner integration (optional stage-aware subtask updates).
+        # VLM planner integration (optional slot-indexed subtask updates).
         # When subtask_interval > 0 the env worker calls the VLM planner every
         # subtask_interval chunk steps and updates env.task_description.
         self._subtask_interval: int = int(self.cfg.env.train.get("subtask_interval", 0))
@@ -139,8 +140,6 @@ class EnvWorker(Worker):
         self._vlm_planner = None  # set via set_vlm_planner() after construction
 
         # TOPReward dense reward state.
-        # NOTE: _episode_frames and _prev_top_score are worker-global (not
-        # per-stage). This is correct for pipeline_stage_num=1.
         self._top_reward_enabled: bool = bool(
             self.cfg.env.train.get("top_reward_enabled", False)
         )
@@ -158,15 +157,23 @@ class EnvWorker(Worker):
         self._top_reward_max_frames: int = int(
             self.cfg.env.train.get("top_reward_max_frames", 16)
         )
+        # NOTE: _episode_frames and _prev_top_score are worker-global (not
+        # per-slot). This is correct only when there is a single pipeline slot.
         self._episode_frames: list[np.ndarray] = []
         self._prev_top_score: float = 0.0
         self._top_reward_has_prev_score: bool = False
         # there can be a sequence of tasks
-        # TODO: make task_description a list to avoid uniform stage task descriptions
+        # TODO: make task_description a list to avoid uniform slot task descriptions
         self._initial_task_descriptions: list[str] = [
             str(self.cfg.env.train.get("task_description", ""))
-            for _ in range(self.stage_num)
+            for _ in range(self.slot_count)
         ]
+        if self._top_reward_enabled and self.slot_count != 1:
+            raise ValueError(
+                "TOPReward currently supports exactly one pipeline slot. "
+                "Set rollout.pipeline_slot_count=1 "
+                "when env.train.top_reward_enabled=true."
+            )
         if self._subtask_interval > 0 and not any(self._initial_task_descriptions):
             raise ValueError(
                 "Subtask planning (subtask_interval > 0) requires a non-empty "
@@ -177,11 +184,11 @@ class EnvWorker(Worker):
         self.enable_eval = self.cfg.runner.val_check_interval > 0 or self.only_eval
         if not self.only_eval:
             self.train_num_envs_per_stage = (
-                self.cfg.env.train.total_num_envs // self._world_size // self.stage_num
+                self.cfg.env.train.total_num_envs // self._world_size // self.slot_count
             )
         if self.enable_eval:
             self.eval_num_envs_per_stage = (
-                self.cfg.env.eval.total_num_envs // self._world_size // self.stage_num
+                self.cfg.env.eval.total_num_envs // self._world_size // self.slot_count
             )
         self.n_train_chunk_steps = (
             self.cfg.env.train.max_steps_per_rollout_epoch
@@ -199,21 +206,21 @@ class EnvWorker(Worker):
         self._close_enabled = False
         self.dst_ranks = {
             "train": self._setup_dst_ranks(
-                self.cfg.env.train.total_num_envs // self.stage_num
+                self.cfg.env.train.total_num_envs // self.slot_count
             ),
         }
         self.src_ranks = {
             "train": self._setup_src_ranks(
-                self.cfg.env.train.total_num_envs // self.stage_num
+                self.cfg.env.train.total_num_envs // self.slot_count
             ),
         }
 
         if self.enable_eval:
             self.dst_ranks["eval"] = self._setup_dst_ranks(
-                self.cfg.env.eval.total_num_envs // self.stage_num
+                self.cfg.env.eval.total_num_envs // self.slot_count
             )
             self.src_ranks["eval"] = self._setup_src_ranks(
-                self.cfg.env.eval.total_num_envs // self.stage_num
+                self.cfg.env.eval.total_num_envs // self.slot_count
             )
         self.log_info(f"Env worker initialized with dst_ranks: {self.dst_ranks}")
         self.log_info(f"Env worker initialized with src_ranks: {self.src_ranks}")
@@ -296,8 +303,8 @@ class EnvWorker(Worker):
             f"{self._subtask_interval})."
         )
 
-    def _get_current_task_description(self, stage_id: int) -> str:
-        env = self.env_list[stage_id]
+    def _get_current_task_description(self, slot_id: int) -> str:
+        env = self.env_list[slot_id]
         inner_env = getattr(env, "unwrapped", env)
         return str(getattr(inner_env, "task_description", ""))
 
@@ -305,29 +312,26 @@ class EnvWorker(Worker):
         """Reset per-episode subtask planner cadence state."""
         self._steps_since_subtask_update = 0
 
-    def _get_top_reward_instruction(self, stage_id: int) -> str:
+    def _get_top_reward_instruction(self, slot_id: int) -> str:
         if self._top_reward_instruction_source == "initial_task":
-            return self._initial_task_descriptions[stage_id]
-        return self._get_current_task_description(stage_id)
+            return self._initial_task_descriptions[slot_id]
+        return self._get_current_task_description(slot_id)
 
-    def _apply_subtask_update(self, stage_id: int, new_subtask: str) -> bool:
-        env = self.env_list[stage_id]
+    def _apply_subtask_update(self, slot_id: int, new_subtask: str) -> bool:
+        env = self.env_list[slot_id]
         inner_env = getattr(env, "unwrapped", env)
         if not new_subtask or not hasattr(inner_env, "task_description"):
             return False
 
         inner_env.task_description = new_subtask
-        if (
-            self._top_reward_enabled
-            and self._top_reward_instruction_source == "current_task"
-        ):
+        if self._top_reward_enabled:
             self._reset_top_reward_state()
         self.log_info(
-            f"[EnvWorker] Subtask updated for stage {stage_id}: '{new_subtask}'"
+            f"[EnvWorker] Subtask updated for slot {slot_id}: '{new_subtask}'"
         )
         return True
 
-    def _maybe_update_subtask(self, stage_id: int) -> None:
+    def _maybe_update_subtask(self, slot_id: int) -> None:
         """Optionally call the VLM planner to refresh the current subtask.
 
         Called each chunk step from :meth:`interact`.  When
@@ -336,7 +340,7 @@ class EnvWorker(Worker):
         the next observation includes the updated ``task_descriptions`` text.
 
         Args:
-            stage_id: Pipeline stage index (used to select the correct env
+            slot_id: Pipeline slot index (used to select the correct env
                 from ``self.env_list``).
         """
         if self._subtask_interval <= 0 or self._vlm_planner is None:
@@ -366,7 +370,7 @@ class EnvWorker(Worker):
         if not should_trigger:
             return
 
-        env = self.env_list[stage_id]
+        env = self.env_list[slot_id]
 
         # Collect the most recent observation image for the planner.
         import ray
@@ -383,14 +387,14 @@ class EnvWorker(Worker):
             else:
                 images.append(main_images)
 
-        main_task = self._initial_task_descriptions[stage_id]
+        main_task = self._initial_task_descriptions[slot_id]
         subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
         new_subtask: str = ray.get(subtask_ref)
 
-        if self._apply_subtask_update(stage_id, new_subtask):
+        if self._apply_subtask_update(slot_id, new_subtask):
             self._reset_subtask_update_state()
 
-    def _compute_top_reward(self, env_output: EnvOutput, stage_id: int) -> EnvOutput:
+    def _compute_top_reward(self, env_output: EnvOutput, slot_id: int) -> EnvOutput:
         """Compute TOPReward dense progress reward and inject into env_output.
 
         Extracts the current frame, queries the VLM planner for a progress
@@ -398,7 +402,7 @@ class EnvWorker(Worker):
 
         Args:
             env_output: The env output from ``env_interact_step``.
-            stage_id: Pipeline stage index.
+            slot_id: Pipeline slot index.
 
         Returns:
             Modified env_output with dense reward injected.
@@ -424,7 +428,7 @@ class EnvWorker(Worker):
 
             # Get instruction from the unwrapped env so wrapper attribute shadowing
             # can never return a stale value.
-            instruction = self._get_top_reward_instruction(stage_id)
+            instruction = self._get_top_reward_instruction(slot_id)
 
             score_ref = self._vlm_planner.compute_top_reward.remote(
                 self._episode_frames, instruction
@@ -458,12 +462,12 @@ class EnvWorker(Worker):
     def _setup_env_and_wrappers(self, env_cls, env_cfg, num_envs_per_stage: int):
         env_list = []
 
-        for stage_id in range(self.stage_num):
+        for slot_id in range(self.slot_count):
             env = env_cls(
                 cfg=env_cfg,
                 num_envs=num_envs_per_stage,
-                seed_offset=self._rank * self.stage_num + stage_id,
-                total_num_processes=self._world_size * self.stage_num,
+                seed_offset=self._rank * self.slot_count + slot_id,
+                total_num_processes=self._world_size * self.slot_count,
                 worker_info=self.worker_info,
             )
             if env_cfg.video_cfg.save_video:
@@ -504,7 +508,7 @@ class EnvWorker(Worker):
         env outputs and receiving action chunks.
 
         Args:
-            batch_size: Total env batch size per pipeline stage across all workers.
+            batch_size: Total env batch size per pipeline slot across all workers.
 
         Returns:
             Ordered ``(rollout_rank, batch_size)`` tuples this env worker should send
@@ -532,7 +536,7 @@ class EnvWorker(Worker):
 
     def _init_env(self):
         if self.cfg.env.train.auto_reset:
-            for i in range(self.stage_num):
+            for i in range(self.slot_count):
                 extracted_obs, _ = self.env_list[i].reset()
                 self.last_obs_list.append(extracted_obs)
                 self.last_intervened_info_list.append((None, None))
@@ -552,9 +556,9 @@ class EnvWorker(Worker):
         dones = self._get_zero_dones()
         terminations = dones.clone()
         truncations = dones.clone()
-        for stage_id in range(self.stage_num):
-            self.env_list[stage_id].is_start = True
-            extracted_obs, infos = self.env_list[stage_id].reset()
+        for slot_id in range(self.slot_count):
+            self.env_list[slot_id].is_start = True
+            extracted_obs, infos = self.env_list[slot_id].reset()
             env_outputs.append(
                 EnvOutput(
                     obs=extracted_obs,
@@ -572,7 +576,7 @@ class EnvWorker(Worker):
 
     @Worker.timer("env_interact_step")
     def env_interact_step(
-        self, chunk_actions: torch.Tensor, stage_id: int
+        self, chunk_actions: torch.Tensor, slot_id: int
     ) -> tuple[EnvOutput, dict[str, Any]]:
         """
         This function is used to interact with the environment.
@@ -602,7 +606,7 @@ class EnvWorker(Worker):
                 chunk_terminations,
                 chunk_truncations,
                 infos_list,
-            ) = self.env_list[stage_id].chunk_step(chunk_actions)
+            ) = self.env_list[slot_id].chunk_step(chunk_actions)
 
         if isinstance(obs_list, (list, tuple)):
             extracted_obs = obs_list[-1] if obs_list else None
@@ -649,7 +653,7 @@ class EnvWorker(Worker):
         )
 
         # Inject TOPReward dense reward if enabled.
-        env_output = self._compute_top_reward(env_output, stage_id)
+        env_output = self._compute_top_reward(env_output, slot_id)
 
         # Reset TOPReward state on episode done.
         if self._top_reward_enabled and chunk_dones[:, -1].any():
@@ -660,7 +664,7 @@ class EnvWorker(Worker):
         return env_output, env_info
 
     def env_evaluate_step(
-        self, raw_actions: torch.Tensor, stage_id: int
+        self, raw_actions: torch.Tensor, slot_id: int
     ) -> tuple[EnvOutput, dict[str, Any]]:
         """
         This function is used to evaluate the environment.
@@ -686,7 +690,7 @@ class EnvWorker(Worker):
         env_info = {}
 
         obs_list, _, chunk_terminations, chunk_truncations, infos_list = (
-            self.eval_env_list[stage_id].chunk_step(chunk_actions)
+            self.eval_env_list[slot_id].chunk_step(chunk_actions)
         )
         if isinstance(obs_list, (list, tuple)):
             extracted_obs = obs_list[-1] if obs_list else None
@@ -827,7 +831,7 @@ class EnvWorker(Worker):
     def finish_rollout(self, mode="train"):
         # reset
         if mode == "train":
-            for i in range(self.stage_num):
+            for i in range(self.slot_count):
                 if self.cfg.env.train.video_cfg.save_video and isinstance(
                     self.env_list[i], RecordVideo
                 ):
@@ -835,7 +839,7 @@ class EnvWorker(Worker):
                 if hasattr(self.env_list[i], "update_reset_state_ids"):
                     self.env_list[i].update_reset_state_ids()
         elif mode == "eval":
-            for i in range(self.stage_num):
+            for i in range(self.slot_count):
                 if self.cfg.env.eval.video_cfg.save_video and isinstance(
                     self.eval_env_list[i], RecordVideo
                 ):
@@ -916,7 +920,7 @@ class EnvWorker(Worker):
 
         Args:
             output_channel: Channel carrying env->rollout outputs.
-            env_batch: Env output dictionary for one pipeline stage.
+            env_batch: Env output dictionary for one pipeline slot.
             mode: Rollout mode, either ``"train"`` or ``"eval"``.
         """
         assert mode in ["train", "eval"], f"{mode=} is not supported"
@@ -936,23 +940,23 @@ class EnvWorker(Worker):
 
         env_outputs: list[EnvOutput] = []
         if not self.cfg.env.train.auto_reset:
-            for stage_id in range(self.stage_num):
+            for slot_id in range(self.slot_count):
                 should_reset = (
-                    reset_on_rollout_epoch or len(self.last_obs_list) <= stage_id
+                    reset_on_rollout_epoch or len(self.last_obs_list) <= slot_id
                 )
                 if should_reset:
                     self._reset_subtask_update_state()
                     if self._top_reward_enabled:
                         self._reset_top_reward_state()
-                    self.env_list[stage_id].is_start = True
-                    extracted_obs, infos = self.env_list[stage_id].reset()
+                    self.env_list[slot_id].is_start = True
+                    extracted_obs, infos = self.env_list[slot_id].reset()
                     intervene_actions = None
                     intervene_flags = None
                 else:
-                    extracted_obs = self.last_obs_list[stage_id]
+                    extracted_obs = self.last_obs_list[slot_id]
                     infos = {}
-                    intervene_actions = self.last_intervened_info_list[stage_id][0]
-                    intervene_flags = self.last_intervened_info_list[stage_id][1]
+                    intervene_actions = self.last_intervened_info_list[slot_id][0]
+                    intervene_flags = self.last_intervened_info_list[slot_id][1]
                 dones = self._get_zero_dones()
                 terminations = dones.clone()
                 truncations = dones.clone()
@@ -974,15 +978,15 @@ class EnvWorker(Worker):
             terminations = dones.clone()
             truncations = dones.clone()
 
-            for stage_id in range(self.stage_num):
+            for slot_id in range(self.slot_count):
                 env_output = EnvOutput(
-                    obs=self.last_obs_list[stage_id],
+                    obs=self.last_obs_list[slot_id],
                     rewards=None,
                     dones=dones,
                     terminations=terminations,
                     truncations=truncations,
-                    intervene_actions=self.last_intervened_info_list[stage_id][0],
-                    intervene_flags=self.last_intervened_info_list[stage_id][1],
+                    intervene_actions=self.last_intervened_info_list[slot_id][0],
+                    intervene_flags=self.last_intervened_info_list[slot_id][1],
                 )
                 env_outputs.append(env_output)
 
@@ -1003,9 +1007,9 @@ class EnvWorker(Worker):
         dones = self._get_zero_dones()
         terminations = dones.clone()
         truncations = dones.clone()
-        for stage_id in range(self.stage_num):
-            self.env_list[stage_id].is_start = True
-            extracted_obs, infos = self.env_list[stage_id].reset()
+        for slot_id in range(self.slot_count):
+            self.env_list[slot_id].is_start = True
+            extracted_obs, infos = self.env_list[slot_id].reset()
             env_outputs.append(
                 EnvOutput(
                     obs=extracted_obs,
@@ -1062,16 +1066,16 @@ class EnvWorker(Worker):
     ) -> dict[str, torch.Tensor]:
         self.rollout_results: list[EmbodiedRolloutResult] = [
             EmbodiedRolloutResult(
-                max_episode_length=self.cfg.env.train.max_episode_steps,
+                rollout_horizon_steps=self.cfg.env.train.rollout_horizon_steps,
             )
-            for _ in range(self.stage_num)
+            for _ in range(self.slot_count)
         ]
         env_metrics = defaultdict(list)
 
         for epoch in range(self.rollout_epoch):
             env_outputs = self.bootstrap_step()
-            for stage_id in range(self.stage_num):
-                env_output: EnvOutput = env_outputs[stage_id]
+            for slot_id in range(self.slot_count):
+                env_output: EnvOutput = env_outputs[slot_id]
                 env_batch = env_output.to_dict()
                 self.send_env_batch(
                     output_channel,
@@ -1082,14 +1086,14 @@ class EnvWorker(Worker):
                 )
 
             for _ in range(self.n_train_chunk_steps):
-                for stage_id in range(self.stage_num):
+                for slot_id in range(self.slot_count):
                     if cooperative_yield:
                         await asyncio.sleep(0)
 
-                    env_output = env_outputs[stage_id]
+                    env_output = env_outputs[slot_id]
                     curr_obs = env_output.obs
                     if env_output.intervene_actions is not None:
-                        self.rollout_results[stage_id].update_last_actions(
+                        self.rollout_results[slot_id].update_last_actions(
                             env_output.intervene_actions,
                             env_output.intervene_flags,
                         )
@@ -1115,12 +1119,12 @@ class EnvWorker(Worker):
                         terminations=env_output.terminations,
                         rewards=rewards,
                     )
-                    self.rollout_results[stage_id].append_step_result(chunk_step_result)
+                    self.rollout_results[slot_id].append_step_result(chunk_step_result)
 
                     env_output, env_info = self.env_interact_step(
-                        rollout_result.actions, stage_id
+                        rollout_result.actions, slot_id
                     )
-                    self._maybe_update_subtask(stage_id)
+                    self._maybe_update_subtask(slot_id)
                     env_batch = env_output.to_dict()
                     self.send_env_batch(
                         output_channel,
@@ -1135,17 +1139,17 @@ class EnvWorker(Worker):
                             if env_output.dones.any() and self.cfg.env.train.auto_reset
                             else env_output.obs
                         )
-                        self.rollout_results[stage_id].append_transitions(
+                        self.rollout_results[slot_id].append_transitions(
                             curr_obs, next_obs
                         )
 
-                    env_outputs[stage_id] = env_output
+                    env_outputs[slot_id] = env_output
                     self.record_env_metrics(env_metrics, env_info, epoch)
 
-            for stage_id in range(self.stage_num):
-                env_output = env_outputs[stage_id]
+            for slot_id in range(self.slot_count):
+                env_output = env_outputs[slot_id]
                 if env_output.intervene_actions is not None:
-                    self.rollout_results[stage_id].update_last_actions(
+                    self.rollout_results[slot_id].update_last_actions(
                         env_output.intervene_actions,
                         env_output.intervene_flags,
                     )
@@ -1163,7 +1167,7 @@ class EnvWorker(Worker):
                     terminations=env_output.terminations,
                     rewards=rewards,
                 )
-                self.rollout_results[stage_id].append_step_result(chunk_step_result)
+                self.rollout_results[slot_id].append_step_result(chunk_step_result)
 
             if not self.cfg.env.train.auto_reset and self.cfg.env.train.get(
                 "reset_on_rollout_epoch_end", False
@@ -1174,9 +1178,9 @@ class EnvWorker(Worker):
             self.finish_rollout()
 
         if actor_channel is not None:
-            for stage_id in range(self.stage_num):
+            for slot_id in range(self.slot_count):
                 await self.send_rollout_trajectories(
-                    self.rollout_results[stage_id], actor_channel
+                    self.rollout_results[slot_id], actor_channel
                 )
 
         for key, value in env_metrics.items():
@@ -1212,9 +1216,9 @@ class EnvWorker(Worker):
 
         for eval_rollout_epoch in range(self.cfg.algorithm.eval_rollout_epoch):
             if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == 0:
-                for stage_id in range(self.stage_num):
-                    self.eval_env_list[stage_id].is_start = True
-                    extracted_obs, infos = self.eval_env_list[stage_id].reset()
+                for slot_id in range(self.slot_count):
+                    self.eval_env_list[slot_id].is_start = True
+                    extracted_obs, infos = self.eval_env_list[slot_id].reset()
                     env_output = EnvOutput(
                         obs=extracted_obs,
                         final_obs=infos["final_observation"]
@@ -1232,12 +1236,12 @@ class EnvWorker(Worker):
                     )
 
             for eval_step in range(self.n_eval_chunk_steps):
-                for stage_id in range(self.stage_num):
+                for slot_id in range(self.slot_count):
                     raw_chunk_actions = self.recv_chunk_actions(
                         input_channel, mode="eval"
                     )
                     env_output, env_info = self.env_evaluate_step(
-                        raw_chunk_actions, stage_id
+                        raw_chunk_actions, slot_id
                     )
 
                     for key, value in env_info.items():
@@ -1264,11 +1268,11 @@ class EnvWorker(Worker):
                     )
 
             self.finish_rollout(mode="eval")
-        for stage_id in range(self.stage_num):
+        for slot_id in range(self.slot_count):
             if self.cfg.env.eval.get("enable_offload", False) and hasattr(
-                self.eval_env_list[stage_id], "offload"
+                self.eval_env_list[slot_id], "offload"
             ):
-                self.eval_env_list[stage_id].offload()
+                self.eval_env_list[slot_id].offload()
 
         for key, value in eval_metrics.items():
             eval_metrics[key] = torch.cat(value, dim=0).contiguous().cpu()
@@ -1276,7 +1280,7 @@ class EnvWorker(Worker):
         return eval_metrics
 
     def get_actor_split_num(self):
-        send_num = self._component_placement.get_world_size("env") * self.stage_num
+        send_num = self._component_placement.get_world_size("env") * self.slot_count
         recv_num = self._component_placement.get_world_size("actor")
         split_num = compute_split_num(recv_num, send_num)
         return split_num
