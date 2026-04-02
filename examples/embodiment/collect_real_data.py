@@ -87,7 +87,7 @@ class DataCollector(Worker):
         )
 
         current_rollout = EmbodiedRolloutResult(
-            max_episode_length=self.cfg.env.eval.max_episode_steps,
+            rollout_horizon_steps=self.cfg.env.eval.rollout_horizon_steps,
         )
 
         current_obs_processed = self._process_obs(obs)
@@ -167,7 +167,7 @@ class DataCollector(Worker):
                 obs, _ = self.env.reset()
                 current_obs_processed = self._process_obs(obs)
                 current_rollout = EmbodiedRolloutResult(
-                    max_episode_length=self.cfg.env.eval.max_episode_steps,
+                    rollout_horizon_steps=self.cfg.env.eval.rollout_horizon_steps,
                 )
                 progress_bar.update(1)
 

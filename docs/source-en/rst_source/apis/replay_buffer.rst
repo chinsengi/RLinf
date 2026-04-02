@@ -30,7 +30,7 @@ Each trajectory entry includes:
 - `trajectory_id`: increasing integer ID
 - `num_samples`: number of samples in the trajectory (`T * B`)
 - `shape`: trajectory tensor shape
-- `max_episode_length`: maximum episode length
+- `rollout_horizon_steps`: training-side rollout horizon
 
 Index and metadata files:
 

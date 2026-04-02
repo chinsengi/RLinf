@@ -18,7 +18,7 @@ from rlinf.data.embodied_io_struct import EmbodiedRolloutResult
 
 
 def test_append_transitions_keeps_live_obs_task_descriptions() -> None:
-    rollout_result = EmbodiedRolloutResult(max_episode_length=10)
+    rollout_result = EmbodiedRolloutResult(rollout_horizon_steps=10)
     curr_obs = {
         "states": torch.zeros((1, 14)),
         "task_descriptions": ["fold the towel"],
@@ -34,3 +34,11 @@ def test_append_transitions_keeps_live_obs_task_descriptions() -> None:
     assert next_obs["task_descriptions"] == ["fold the towel"]
     assert "task_descriptions" not in rollout_result.curr_obs[0]
     assert "task_descriptions" not in rollout_result.next_obs[0]
+
+
+def test_rollout_horizon_steps_propagates_to_trajectory() -> None:
+    rollout_result = EmbodiedRolloutResult(rollout_horizon_steps=12)
+
+    trajectory = rollout_result.to_trajectory()
+
+    assert trajectory.rollout_horizon_steps == 12

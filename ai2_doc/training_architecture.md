@@ -20,7 +20,7 @@ All four remote configs use TOPReward (Qwen3-VL-8B on GPU 2) and `group_size: 1`
 The `openpi` pair uses reward scoring only; the `subtask` pair also injects
 language subtask descriptions. The runtime split is explicit:
 - `_async` uses `train_embodied_agent_staged_async.py` and `decoupled_actor_critic`
-- `_sync` uses `train_embodied_agent_staged.py` and `actor_critic`
+- `_sync` uses `train_embodied_agent_staged.py`
 
 > **`collect_prev_infos: true` required for GAE.** Both configs use `adv_type: gae`,
 > which requires the value estimates (`prev_values`) collected by the rollout worker
@@ -148,6 +148,28 @@ Step 6. Refresh rollout policy
 
 `n_train_chunk_steps = max_steps_per_rollout_epoch // num_action_chunks`
 (e.g. `60 // 30 = 2` for the shipped `yam_ppo_openpi_subtask_{async,sync}` configs).
+
+### YAM timing terms
+
+For YAM there are two separate notions of "episode length":
+
+- training-side step horizons:
+  `rollout_horizon_steps`, `max_steps_per_rollout_epoch`, and the derived
+  `n_train_chunk_steps`
+- the real robot episode timeout:
+  `episode_duration_s` in `env/yam_pi05_follower.yaml`
+
+The important behavior difference is that `YAMEnv.step()` truncates on the
+wall-clock timer `episode_duration_s`, not on the training YAML's
+`rollout_horizon_steps`. The shipped YAM configs therefore use:
+
+- `rollout_horizon_chunks: 2`
+- `num_action_chunks: 30`
+- `rollout_horizon_steps = max_steps_per_rollout_epoch = 60`
+- `episode_duration_s = 120`
+
+So one rollout epoch is 60 low-level steps, but a real YAM episode can span
+multiple rollout epochs until the 120-second timer expires.
 
 The post-loop `recv_env_output` (in `generate_one_epoch`) receives the last env step result
 (observation + reward + done from the final `env_interact_step`). It serves two purposes:
@@ -298,7 +320,7 @@ The fix reshapes `loss_mask` to `entropy.shape` before calling `masked_mean`, wh
 
 ### YAMEnv base reward is always zero
 
-`YAMEnv.step()` always returns `reward = np.zeros(num_envs)` and `terminated = np.zeros(num_envs, bool)`. There is no task-success signal wired from the robot hardware — success detection is not implemented at the environment level. The training reward comes **entirely from TOPReward** (delta log-prob injected by `_compute_top_reward`). Episodes end only via time-limit truncation (`_elapsed_steps >= max_episode_steps`).
+`YAMEnv.step()` always returns `reward = np.zeros(num_envs)` and `terminated = np.zeros(num_envs, bool)`. There is no task-success signal wired from the robot hardware — success detection is not implemented at the environment level. The training reward comes **entirely from TOPReward** (delta log-prob injected by `_compute_top_reward`). Episodes end only via the YAM wall-clock timeout (`episode_duration_s`, or the `max_episode_steps / control_rate_hz` fallback when that timer is absent).
 
 As a result, the `success_once` field in `episode_info` will always be `False` for YAM training — this is expected behavior, not a bug. The policy's only learning signal is the TOPReward progress score.
 

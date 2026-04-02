@@ -39,7 +39,8 @@ group_size: 1
 
 # NOTE: max_episode_steps / control_rate_hz are NOT read from this file.
 # RemoteEnv fetches them from the server at init via GetSpaces().
-# Set max_episode_steps here only if the runner needs it before env init.
+# Training-side rollout sizing should use env.{train,eval}.rollout_horizon_steps
+# or env.{train,eval}.max_steps_per_rollout_epoch in the top-level training YAML.
 
 video_cfg:
   save_video: false

@@ -987,7 +987,7 @@ class EnvWorker(Worker):
     ) -> dict[str, torch.Tensor]:
         self.rollout_results: list[EmbodiedRolloutResult] = [
             EmbodiedRolloutResult(
-                max_episode_length=self.cfg.env.train.max_episode_steps,
+                rollout_horizon_steps=self.cfg.env.train.rollout_horizon_steps,
             )
             for _ in range(self.stage_num)
         ]

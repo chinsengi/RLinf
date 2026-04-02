@@ -157,7 +157,10 @@ env:
   train:
     total_num_envs: 1
     # Derived automatically from env.rollout_horizon_chunks.
-    max_episode_steps: 60
+    # For YAM this is the training-side rollout horizon, not the true robot
+    # episode timeout. The actual episode length comes from
+    # env/yam_pi05_follower.yaml: episode_duration_s (default: 120s).
+    rollout_horizon_steps: 60
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
     # Do not return home when a new rollout epoch starts.
@@ -184,8 +187,10 @@ env:
 
   eval:
     total_num_envs: 1
-    # Derived automatically from env.rollout_horizon_chunks.
-    max_episode_steps: 60
+    # Derived automatically from env.rollout_horizon_chunks. As above, this is
+    # not the real YAM episode timeout; the wall-clock timer lives in
+    # env/yam_pi05_follower.yaml: episode_duration_s.
+    rollout_horizon_steps: 60
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
     task_description: "Fold the towel."

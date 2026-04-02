@@ -95,7 +95,7 @@ algorithm:
   logprob_type: chunk_level
   entropy_type: chunk_level
 
-  update_epoch: 5
+  update_epoch: 2
   adv_type: gae
   loss_type: decoupled_actor_critic
   loss_agg_func: "token-mean"
@@ -135,8 +135,8 @@ env:
   # home and rest. This does NOT define the training rollout horizon.
   return_home_minutes: 2
   # Training-side rollout horizon in action chunks. With
-  # actor.model.num_action_chunks=30, forty chunks means 1200 low-level steps.
-  rollout_horizon_chunks: 40
+  # actor.model.num_action_chunks=30, two chunks means 60 low-level steps.
+  rollout_horizon_chunks: 2
   # Desktop RobotServer cooldown after the timer expires and the arms have
   # already returned home. Keep this at the top level so Beaker and desktop
   # can share one timing source.
@@ -158,8 +158,11 @@ env:
   train:
     total_num_envs: 1
     # Derived automatically from env.rollout_horizon_chunks.
-    max_episode_steps: 1200
-    max_steps_per_rollout_epoch: 1200
+    # For YAM this is the training-side rollout horizon, not the true robot
+    # episode timeout. The actual episode length comes from
+    # env/yam_pi05_follower.yaml: episode_duration_s (default: 120s).
+    rollout_horizon_steps: 60
+    max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
     # Do not return home when a new rollout epoch starts.
     reset_on_rollout_epoch: False
@@ -185,9 +188,11 @@ env:
 
   eval:
     total_num_envs: 1
-    # Derived automatically from env.rollout_horizon_chunks.
-    max_episode_steps: 1200
-    max_steps_per_rollout_epoch: 1200
+    # Derived automatically from env.rollout_horizon_chunks. As above, this is
+    # not the real YAM episode timeout; the wall-clock timer lives in
+    # env/yam_pi05_follower.yaml: episode_duration_s.
+    rollout_horizon_steps: 60
+    max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
     task_description: "Fold the towel."
 
@@ -231,7 +236,7 @@ actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
 
-  # rollout_size = n_chunk_steps * total_num_envs * rollout_epoch = 800 * 1 * 1 = 800
+  # rollout_size = n_chunk_steps * total_num_envs * rollout_epoch = 2 * 1 * 1 = 2
   # global_batch_size must divide rollout_size; micro_batch_size must divide global_batch_size.
   micro_batch_size: 2
   global_batch_size: 2

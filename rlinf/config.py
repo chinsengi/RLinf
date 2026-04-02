@@ -739,7 +739,6 @@ def validate_megatron_cfg(cfg: DictConfig) -> DictConfig:
 def validate_embodied_cfg(cfg):
     return_home_minutes = cfg.env.get("return_home_minutes", None)
     rollout_horizon_chunks = cfg.env.get("rollout_horizon_chunks", None)
-    rollout_horizon_minutes = cfg.env.get("rollout_horizon_minutes", None)
     server_cooldown_minutes = cfg.env.get("server_cooldown_minutes", None)
     if return_home_minutes is not None:
         return_home_minutes = float(return_home_minutes)
@@ -758,11 +757,6 @@ def validate_embodied_cfg(cfg):
             cfg.env.train.reset_on_rollout_epoch = False
             cfg.env.train.reset_on_rollout_epoch_end = False
 
-    if rollout_horizon_minutes is not None:
-        raise ValueError(
-            "env.rollout_horizon_minutes has been removed. "
-            "Use env.rollout_horizon_chunks instead."
-        )
 
     num_chunks = cfg.actor.model.get("num_action_chunks", None)
     if rollout_horizon_chunks is not None:
@@ -776,8 +770,18 @@ def validate_embodied_cfg(cfg):
         aligned_steps = rollout_horizon_chunks * num_chunks
         with open_dict(cfg):
             for split in ("train", "eval"):
-                cfg.env[split].max_episode_steps = aligned_steps
+                cfg.env[split].rollout_horizon_steps = aligned_steps
                 cfg.env[split].max_steps_per_rollout_epoch = aligned_steps
+
+    with open_dict(cfg):
+        for split in ("train", "eval"):
+            horizon_steps = cfg.env[split].get("rollout_horizon_steps", None)
+            if horizon_steps is None:
+                horizon_steps = cfg.env[split].get("max_steps_per_rollout_epoch", None)
+            if horizon_steps is None:
+                horizon_steps = cfg.env[split].get("max_episode_steps", None)
+            if horizon_steps is not None:
+                cfg.env[split].rollout_horizon_steps = int(horizon_steps)
 
     assert get_supported_model(cfg.actor.model.model_type).category == "embodied", (
         f"Model type: '{cfg.actor.model.model_type}' is not an embodied model. "
@@ -809,7 +813,6 @@ def validate_embodied_cfg(cfg):
                 "Set rollout.collect_prev_infos: true in the config."
             )
 
-    subtask_interval = cfg.env.train.get("subtask_interval", 0)
     subtask_adaptive = bool(cfg.env.train.get("subtask_adaptive", True))
 
     if subtask_adaptive and not cfg.env.train.get("top_reward_enabled", False):

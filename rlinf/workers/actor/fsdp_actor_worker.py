@@ -1551,7 +1551,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         "huber_delta": self.cfg.algorithm.get("huber_delta", None),
                         "loss_mask": loss_mask,
                         "loss_mask_sum": loss_mask_sum,
-                        "max_episode_steps": self.cfg.env.train.max_episode_steps,
+                        "rollout_horizon_steps": self.cfg.env.train.rollout_horizon_steps,
                         "task_type": self.cfg.runner.task_type,
                         "critic_warmup": self.optimizer_steps
                         < self.critic_warmup_steps,

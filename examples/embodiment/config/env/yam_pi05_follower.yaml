@@ -17,13 +17,17 @@ env_type: yam
 total_num_envs: null
 
 # Episode settings
+# These step-count fields are safety ceilings only. For YAM, the real episode
+# boundary is the wall-clock timer ``episode_duration_s`` below, enforced inside
+# ``YAMEnv.step()`` after the first real action is executed.
 # Keep the desktop-side step limit comfortably larger than the training-side
-# cadence.  The *real* episode duration is set by ``episode_duration_s`` below.
+# cadence so it never truncates before the timer does.
 max_episode_steps: 1000000
 max_steps_per_rollout_epoch: 1000000
 
-# Wall-clock episode duration in seconds. The desktop launcher can override
-# this from a top-level training config so you only edit timing in one place.
+# Wall-clock episode duration in seconds. This is the true YAM episode length.
+# The desktop launcher can override this from a top-level training config so
+# you only edit timing in one place.
 episode_duration_s: ${oc.env:RLINF_EPISODE_DURATION_S,120}
 
 # After the server-side episode timer expires, return both arms to home and
