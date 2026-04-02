@@ -158,6 +158,18 @@ def _compute_flow_cps_schedule(
     return x0_weight, x1_weight, x_t_std
 
 
+def _get_num_scored_denoise_steps(num_steps: int, noise_method: str) -> int:
+    """Return how many denoising transitions should contribute PPO log-probs."""
+    if noise_method == "flow_cps":
+        if num_steps <= 1:
+            raise ValueError(
+                "noise_method='flow_cps' requires num_steps > 1 because "
+                "its last denoising step is deterministic."
+            )
+        return num_steps - 1
+    return num_steps
+
+
 def _pad_vector(vector: torch.Tensor, new_dim: int) -> torch.Tensor:
     if vector.shape[-1] >= new_dim:
         return vector
@@ -590,7 +602,10 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         chains_entropy = []
 
         if self.joint_logprob:
-            num_steps = self.runtime_num_steps
+            num_steps = _get_num_scored_denoise_steps(
+                self.runtime_num_steps,
+                self.noise_method,
+            )
             initial_log_prob = self._get_logprob_norm(
                 chains[:, 0],
                 torch.zeros_like(chains[:, 0]),
@@ -662,13 +677,16 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
             log_probs.append(
                 self._get_logprob_norm(x_t, torch.zeros_like(x_t), torch.ones_like(x_t))
             )
+        num_scored_steps = _get_num_scored_denoise_steps(
+            self.runtime_num_steps,
+            self.noise_method,
+        )
         if mode == "train":
             if self.joint_logprob:
                 denoise_inds = torch.arange(self.runtime_num_steps, device=device)
             else:
                 denoise_inds = torch.tensor(
-                    [random.randint(0, self.runtime_num_steps - 1)]
-                    * self.runtime_num_steps,
+                    [random.randint(0, num_scored_steps - 1)] * self.runtime_num_steps,
                     device=device,
                 )
         else:
@@ -699,7 +717,7 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
             :, :, : self.runtime_action_chunk, : self.runtime_action_env_dim
         ]
         if self.joint_logprob:
-            prev_logprobs = log_probs_tensor.mean(dim=1)
+            prev_logprobs = log_probs_tensor[:, : 1 + num_scored_steps].mean(dim=1)
         else:
             prev_logprobs = log_probs_tensor[
                 torch.arange(log_probs_tensor.shape[0], device=device),

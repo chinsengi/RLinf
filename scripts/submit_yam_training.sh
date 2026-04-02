@@ -229,6 +229,7 @@ if [ -n "$INTERACTIVE" ]; then
     session_args=(
         beaker session create
         --detach --bare
+        --shared-memory "300G"
         --host-networking
         --cluster "${CLUSTER}"
         --gpus "${GPUS}"
@@ -363,6 +364,7 @@ else
         gantry run --yes --no-python
         --replicas "${REPLICAS}"
         --gpus "${GPUS}"
+        --shared-memory "300G"
         --host-networking
         --beaker-image "${BEAKER_IMAGE}"
         --workspace "${WORKSPACE}"

@@ -26,7 +26,7 @@ Replay Buffer
 - `trajectory_id`：递增 ID
 - `num_samples`：轨迹内样本总数（`T * B`）
 - `shape`：轨迹张量形状
-- `max_episode_length`：最大 episode 长度
+- `rollout_horizon_steps`：训练侧 rollout horizon 步数
 
 索引与元数据分别写入：
 

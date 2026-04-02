@@ -361,10 +361,10 @@ class ChunkStepResult:
 @dataclass
 class Trajectory:
     """
-    trajectory contains multiple episodes.
+    Trajectory tensors plus rollout-horizon metadata.
     """
 
-    max_episode_length: int = 0  # max episode length
+    rollout_horizon_steps: int = 0  # training-side rollout horizon
     model_weights_id: str = ""  # str(uuid(versions))
     actions: torch.Tensor = None
     intervene_flags: torch.Tensor = None
@@ -458,7 +458,7 @@ class Trajectory:
             dones = self.dones[field_mask]
 
         return Trajectory(
-            max_episode_length=self.max_episode_length,
+            rollout_horizon_steps=self.rollout_horizon_steps,
             model_weights_id=self.model_weights_id,
             actions=actions,
             intervene_flags=intervene_flags,
@@ -481,7 +481,7 @@ class EmbodiedRolloutResult:
     and convert them into trajectory tensors.
     """
 
-    max_episode_length: int = 0
+    rollout_horizon_steps: int = 0
 
     actions: list[torch.Tensor] = field(default_factory=list)  # trajectory_length
     intervene_flags: list[torch.Tensor] = field(
@@ -583,7 +583,7 @@ class EmbodiedRolloutResult:
     def to_trajectory(self) -> Trajectory:
         # return [trajectory_length, B, ...]
         trajectory = Trajectory(
-            max_episode_length=self.max_episode_length,
+            rollout_horizon_steps=self.rollout_horizon_steps,
         )
         if len(self.actions) > 0:
             trajectory.actions = torch.stack(self.actions, dim=0).cpu().contiguous()
@@ -638,6 +638,22 @@ class EmbodiedRolloutResult:
         return trajectory
 
     def to_splited_trajectories(self, split_size: int) -> list[Trajectory]:
+        """
+        Splits the current embodied data into a list of smaller trajectories.
+        This method converts the current instance to a primary `Trajectory` and then 
+        splits its batched data (observations, inputs, and tensor fields) along the 
+        batch dimension (dim=1) into the specified number of chunks. Primitive types 
+        (int, str) are duplicated across all split trajectories.
+        Args:
+            split_size (int): The number of chunks to split the trajectory into.
+        Returns:
+            list[Trajectory]: A list of `split_size` Trajectory objects containing 
+            the chunked data.
+        Raises:
+            ValueError: If a field in the trajectory contains a value type that is 
+            not supported for splitting (i.e., not a dict, int, str, or torch.Tensor).
+        """
+        
         all_trajectory: Trajectory = self.to_trajectory()
         splited_trajectories: list[Trajectory] = [
             Trajectory() for _ in range(split_size)

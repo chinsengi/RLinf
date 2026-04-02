@@ -26,7 +26,7 @@ CONFIG_NAME="yam_ppo_openpi_desktop_async"
 EXP_NAME=""
 GPUS=0  # 0 = auto-detect based on config
 CLUSTER="ai2/ceres-cirrascale"
-WORKSPACE="ai2/molmoact-ablations"
+WORKSPACE="ai2/molmoact-act"
 BUDGET=""
 PRIORITY="urgent"
 DRY_RUN=""
@@ -54,7 +54,7 @@ Options:
   --gpus N              GPUs (0 = auto based on config)
   --name NAME           Experiment name (default: rlinf-cluster-<config>)
   --cluster CLUSTER     Beaker cluster (default: ai2/ceres-cirrascale)
-  --workspace WORKSPACE Beaker workspace (default: ai2/molmoact-ablations)
+  --workspace WORKSPACE Beaker workspace (default: ai2/molmoact-act)
   --budget BUDGET       Beaker budget account
   --priority PRIORITY   Job priority (default: urgent)
   --show-logs           Stream Beaker logs after submission
@@ -157,6 +157,7 @@ gantry_args=(
     gantry run --yes --no-python
     --replicas 1
     --gpus "${GPUS}"
+    --shared-memory "300G"
     --host-networking
     --beaker-image "${BEAKER_IMAGE}"
     --workspace "${WORKSPACE}"

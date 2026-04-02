@@ -15,11 +15,42 @@ Runtime split:
 
 - `yam_ppo_openpi_async` uses `train_embodied_agent_staged_async.py` and
   `algorithm.loss_type: decoupled_actor_critic`
-- `yam_ppo_openpi_sync` uses `train_embodied_agent_staged.py` and
-  `algorithm.loss_type: actor_critic`
+- `yam_ppo_openpi_sync` uses `train_embodied_agent_staged.py`
 
 For the variant that also enables VLM subtask planning, see
 [yam_ppo_openpi_subtask](yam_ppo_openpi_subtask.md).
+
+## Timing Terms
+
+The YAM configs use several names that sound similar but refer to different
+layers of the system:
+
+- `episode_duration_s`: the real YAM episode length. `YAMEnv.step()` truncates
+  the episode when this wall-clock timer expires. The default desktop env value
+  is 120 seconds.
+- `rollout_horizon_steps`: a training-side step-count horizon used by RLinf
+  rollout bookkeeping and tensor sizing. For YAM it is not the true robot
+  timeout.
+- `max_steps_per_rollout_epoch`: how many low-level env steps RLinf collects in
+  one rollout epoch before handing data to the actor update path.
+- `rollout_horizon_chunks`: a config convenience knob. RLinf derives
+  `rollout_horizon_steps` and `max_steps_per_rollout_epoch` from this as
+  `rollout_horizon_chunks * actor.model.num_action_chunks`.
+- `rollout_epoch`: how many rollout epochs are collected per training step.
+- `reset_on_rollout_epoch`: whether a new rollout epoch should force an env
+  reset. The shipped YAM configs set this to `false`, so rollout-epoch
+  boundaries can continue the same real episode.
+
+For the shipped YAM configs with `num_action_chunks: 30` and
+`rollout_horizon_chunks: 2`:
+
+- one chunk step = 30 low-level env steps
+- one rollout epoch = 2 chunk steps = 60 low-level env steps
+- but the real episode still lasts until `episode_duration_s` expires, which is
+  120 seconds by default
+
+So `rollout_horizon_steps: 60` in the training YAML should be read as "rollout
+window size", not "the robot episode is only 60 steps long."
 
 ## Topology
 
@@ -136,11 +167,12 @@ Timing / shutdown behavior:
 ```yaml
 env:
   return_home_minutes: 2
+  rollout_horizon_chunks: 2
   train:
     control_rate_hz: 10.0
-    max_episode_steps: 24000
-    max_steps_per_rollout_epoch: 24000
-    reset_on_rollout_epoch: True
+    rollout_horizon_steps: 60
+    max_steps_per_rollout_epoch: 60
+    reset_on_rollout_epoch: False
 ```
 
 Desktop server timing:
@@ -152,10 +184,15 @@ episode_cooldown_minutes: 1
 client_idle_timeout_s: 0
 ```
 
-- Change only `env.return_home_minutes` when you want a different cadence.
+- Change `env.return_home_minutes` when you want a different desktop-side
+  return-home cadence.
+- Change `env.rollout_horizon_chunks` when you want a different training
+  rollout horizon.
 - Change only `env.server_cooldown_minutes` when you want a different restart
   wait time on the desktop server.
-- At `10 Hz`, `40` minutes becomes `24000` steps.
+- At `num_action_chunks: 30`, `rollout_horizon_chunks: 2` becomes `60`
+  rollout steps.
+- That is `2` chunk steps per rollout epoch at `10 Hz`.
 - `episode_duration_s` is the desktop-side hard stop: once it expires, the
   server returns to home, starts the cooldown countdown, then restarts from
   home instead of continuing the old chunk.
@@ -165,11 +202,11 @@ client_idle_timeout_s: 0
   so the server keeps running until you explicitly stop it. Set a positive
   number of seconds only if you want automatic safe recovery after a silent
   Beaker disconnect.
-- The YAM OpenPI training configs now use the async PPO runtime
-  (`algorithm.loss_type: decoupled_actor_critic`) so the robot can keep
-  executing rollout chunks while actor training runs in the background.
+- The YAM OpenPI async config uses the async staged runtime with
+  `algorithm.loss_type: decoupled_actor_critic` and
+  `algorithm.staleness_threshold: 1`.
 - The matching sync config keeps the same topology and reward setup, but uses
-  `train_embodied_agent_staged.py` with `algorithm.loss_type: actor_critic`.
+  `train_embodied_agent_staged.py`.
 - A Beaker-side `Ctrl+C` now asks the desktop server to return home and enter
   zero-torque / zero-gravity while staying alive for the next client.
 - A desktop-side `Ctrl+C` still performs the full local shutdown: return home,

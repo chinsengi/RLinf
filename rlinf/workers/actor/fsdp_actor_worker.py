@@ -1013,8 +1013,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self._rollout_group_name = cfg.rollout.group_name
         self._component_placement = HybridComponentPlacement(cfg, Cluster())
 
-        # stage_num: default to 2, use for pipeline rollout process
-        self.stage_num = cfg.rollout.pipeline_stage_num
+        # slot_count: rollout/env pipeline slot count (legacy alias: stage_num).
+        self.slot_count = int(
+            cfg.rollout.get(
+                "pipeline_slot_count",
+                1
+            )
+        )
+        self.stage_num = self.slot_count
 
         self.enable_offload = self.cfg.actor.get("enable_offload", False)
         self.entropy_op_type = self.cfg.algorithm.get("entropy_op_type", "torch")
@@ -1122,6 +1128,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.enable_offload and not self.is_weight_offloaded:
             self.offload_param_and_grad()
 
+    @Worker.timer("recv_trajectory")
     async def recv_rollout_trajectories(self, input_channel: Channel) -> None:
         """
         Receive rollout trajectories from rollout workers.
@@ -1129,7 +1136,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         Args:
             input_channel: The input channel to read from.
         """
-        send_num = self._component_placement.get_world_size("env") * self.stage_num
+        send_num = self._component_placement.get_world_size("env") * self.slot_count
         recv_num = self._component_placement.get_world_size("actor")
         split_num = compute_split_num(send_num, recv_num)
 
@@ -1550,7 +1557,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         "huber_delta": self.cfg.algorithm.get("huber_delta", None),
                         "loss_mask": loss_mask,
                         "loss_mask_sum": loss_mask_sum,
-                        "max_episode_steps": self.cfg.env.train.max_episode_steps,
+                        "rollout_horizon_steps": self.cfg.env.train.rollout_horizon_steps,
                         "task_type": self.cfg.runner.task_type,
                         "critic_warmup": self.optimizer_steps
                         < self.critic_warmup_steps,

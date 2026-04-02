@@ -34,6 +34,36 @@ from rlinf.utils.logging import get_logger
 from rlinf.utils.nested_dict_process import copy_dict_tensor
 
 
+def _get_num_scored_denoise_steps(num_steps: int, noise_method: str) -> int:
+    """Return how many denoising transitions should contribute PPO log-probs."""
+    if noise_method == "flow_cps":
+        if num_steps <= 1:
+            raise ValueError(
+                "noise_method='flow_cps' requires num_steps > 1 because "
+                "its last denoising step is deterministic."
+            )
+        return num_steps - 1
+    return num_steps
+
+
+def _get_num_single_step_candidates(
+    num_steps: int,
+    noise_method: str,
+    *,
+    ignore_last: bool,
+) -> int:
+    """Return how many denoising steps can be sampled in single-step PPO mode."""
+    candidates = _get_num_scored_denoise_steps(num_steps, noise_method)
+    if ignore_last:
+        candidates -= 1
+    if candidates <= 0:
+        raise ValueError(
+            "No stochastic denoising steps are available for PPO. "
+            f"Got {num_steps=}, {noise_method=}, {ignore_last=}."
+        )
+    return candidates
+
+
 @dataclass(frozen=True)
 class OpenPi0Config(Pi0Config):
     # config for rl
@@ -689,18 +719,22 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         # In the joint logprob mode, we need to sample the logprob for each denoise step
         # In the non-joint logprob mode, only one denoise step is sampled and ode-sde mix sampling is used
         # denoise index
+        num_scored_steps = _get_num_scored_denoise_steps(
+            num_steps,
+            self.config.noise_method,
+        )
         if mode == "train":
             if self.config.joint_logprob:
                 denoise_inds = torch.arange(num_steps)
             else:
-                if self.config.ignore_last:
-                    denoise_inds = torch.tensor(
-                        [random.randint(0, num_steps - 2)] * num_steps
-                    )
-                else:
-                    denoise_inds = torch.tensor(
-                        [random.randint(0, num_steps - 1)] * num_steps
-                    )
+                num_single_step_candidates = _get_num_single_step_candidates(
+                    num_steps,
+                    self.config.noise_method,
+                    ignore_last=self.config.ignore_last,
+                )
+                denoise_inds = torch.tensor(
+                    [random.randint(0, num_single_step_candidates - 1)] * num_steps
+                )
         else:
             denoise_inds = torch.tensor([-1] * num_steps)
         denoise_inds = denoise_inds[None].repeat(bsize, 1)
@@ -736,7 +770,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             :, :, : self.config.action_chunk, : self.config.action_env_dim
         ]
         if self.config.joint_logprob:
-            log_probs = log_probs.mean(dim=1)
+            log_probs = log_probs[:, : 1 + num_scored_steps].mean(dim=1)
         else:
             log_probs = log_probs[
                 torch.arange(log_probs.shape[0]),
@@ -986,7 +1020,10 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
 
         # get log prob
         if self.config.joint_logprob:
-            num_steps = self.config.num_steps
+            num_steps = _get_num_scored_denoise_steps(
+                self.config.num_steps,
+                self.config.noise_method,
+            )
             initial_log_prob = self.get_logprob_norm(
                 chains[:, 0],
                 torch.zeros_like(chains[:, 0]),

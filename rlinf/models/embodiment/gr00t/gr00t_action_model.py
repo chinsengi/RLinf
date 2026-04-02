@@ -44,6 +44,36 @@ from rlinf.models.embodiment.modules.explore_noise_net import ExploreNoiseNet
 from rlinf.models.embodiment.modules.value_head import ValueHead
 
 
+def _get_num_scored_denoise_steps(num_steps: int, noise_method: str) -> int:
+    """Return how many denoising transitions should contribute PPO log-probs."""
+    if noise_method == "flow_cps":
+        if num_steps <= 1:
+            raise ValueError(
+                "noise_method='flow_cps' requires num_steps > 1 because "
+                "its last denoising step is deterministic."
+            )
+        return num_steps - 1
+    return num_steps
+
+
+def _get_num_single_step_candidates(
+    num_steps: int,
+    noise_method: str,
+    *,
+    ignore_last: bool,
+) -> int:
+    """Return how many denoising steps can be sampled in single-step PPO mode."""
+    candidates = _get_num_scored_denoise_steps(num_steps, noise_method)
+    if ignore_last:
+        candidates -= 1
+    if candidates <= 0:
+        raise ValueError(
+            "No stochastic denoising steps are available for PPO. "
+            f"Got {num_steps=}, {noise_method=}, {ignore_last=}."
+        )
+    return candidates
+
+
 class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
     def __init__(
         self,
@@ -253,24 +283,14 @@ class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
             if self.rl_config.joint_logprob:
                 denoise_inds = torch.arange(num_steps)
             else:
-                if self.rl_config.noise_method == "flow_sde":
-                    if self.rl_config.ignore_last:
-                        denoise_inds = torch.tensor(
-                            [random.randint(0, num_steps - 2)] * num_steps
-                        )
-                    else:
-                        denoise_inds = torch.tensor(
-                            [random.randint(0, num_steps - 1)] * num_steps
-                        )
-                elif self.rl_config.noise_method == "flow_cps":
-                    # the last denoising step of the flow-cps is deterministic
-                    denoise_inds = torch.tensor(
-                        [random.randint(0, num_steps - 1)] * num_steps
-                    )
-                elif self.rl_config.noise_method == "reinflow":
-                    denoise_inds = torch.tensor(
-                        [random.randint(0, num_steps - 1)] * num_steps
-                    )
+                num_single_step_candidates = _get_num_single_step_candidates(
+                    num_steps,
+                    self.rl_config.noise_method,
+                    ignore_last=getattr(self.rl_config, "ignore_last", False),
+                )
+                denoise_inds = torch.tensor(
+                    [random.randint(0, num_single_step_candidates - 1)] * num_steps
+                )
         else:
             denoise_inds = torch.tensor([-1] * num_steps)
         denoise_inds = denoise_inds[None].repeat(batch_size, 1)
@@ -348,7 +368,10 @@ class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
         chains_log_probs = []
 
         if self.rl_config.joint_logprob:
-            num_steps = self.config.num_steps
+            num_steps = _get_num_scored_denoise_steps(
+                self.config.num_steps,
+                self.rl_config.noise_method,
+            )
             initial_log_prob = self.get_logprob_norm(
                 chains[:, 0],
                 torch.zeros_like(chains[:, 0]),
@@ -539,8 +562,12 @@ class GR00T_N1_5_ForRLActionPrediction(GR00T_N1_5, BasePolicy):
         ]
         # post process
         if self.action_head.rl_config.joint_logprob:
-            log_probs = log_probs.mean(dim=1)
-            prev_logprobs = kwargs["prev_logprobs"].mean(dim=1)
+            num_logprob_terms = 1 + _get_num_scored_denoise_steps(
+                self.num_inference_timesteps,
+                self.action_head.rl_config.noise_method,
+            )
+            log_probs = log_probs[:, :num_logprob_terms].mean(dim=1)
+            prev_logprobs = kwargs["prev_logprobs"][:, :num_logprob_terms].mean(dim=1)
         else:
             bsize = log_probs.shape[0]
             log_probs = log_probs[:, 0]

@@ -282,7 +282,7 @@ class TrajectoryReplayBuffer:
         # Each entry: {
         #   "num_samples": int,  # T * B (total samples in this trajectory)
         #   "trajectory_id": int,  # trajectory ID
-        #   "max_episode_length": int,  # max episode length
+        #   "rollout_horizon_steps": int,  # training-side rollout horizon
         #   "shape": tuple,  # (T, B, ...)
         #   "model_weights_id": str,  # model weights ID
         # }
@@ -430,7 +430,7 @@ class TrajectoryReplayBuffer:
 
         # Reconstruct Trajectory object from dictionary
         trajectory = Trajectory(
-            max_episode_length=trajectory_info["max_episode_length"]
+            rollout_horizon_steps=trajectory_info["rollout_horizon_steps"]
         )
         for field_name, value in trajectory_dict.items():
             setattr(trajectory, field_name, value)
@@ -484,7 +484,7 @@ class TrajectoryReplayBuffer:
                 trajectory_info = {
                     "num_samples": num_samples,
                     "trajectory_id": trajectory_id,
-                    "max_episode_length": trajectory.max_episode_length,
+                    "rollout_horizon_steps": trajectory.rollout_horizon_steps,
                     "shape": tuple(trajectory_shape),
                     "model_weights_id": model_weights_id,
                 }
@@ -949,7 +949,7 @@ class TrajectoryReplayBuffer:
                 T, B = shape[:2]
                 model_weights_id = info.get("model_weights_id", "")
                 trajectory = Trajectory(
-                    max_episode_length=info.get("max_episode_length", 0),
+                    rollout_horizon_steps=info.get("rollout_horizon_steps", 0),
                     model_weights_id=model_weights_id,
                 )
                 for field_name in trajectory.__dataclass_fields__.keys():

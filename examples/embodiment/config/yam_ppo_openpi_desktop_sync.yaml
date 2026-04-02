@@ -34,7 +34,6 @@
 
 defaults:
   - env/yam_pi05_follower@env.train
-  - env/yam_pi05_follower@env.eval
   - model/pi0_5@actor.model
   - training_backend/fsdp@actor.fsdp_config
   - override hydra/job_logging: stdout
@@ -77,7 +76,7 @@ runner:
   max_epochs: 2000
   max_steps: -1
 
-  only_eval: False
+  # Validation is disabled for this YAM training config.
   val_check_interval: -1
   save_interval: 50
 
@@ -93,8 +92,6 @@ algorithm:
   reward_coef: 1.0
 
   rollout_epoch: 1
-  eval_rollout_epoch: 1
-
   reward_type: chunk_level
   logprob_type: chunk_level
   entropy_type: chunk_level
@@ -123,7 +120,6 @@ algorithm:
   sampling_params:
     do_sample: True
     temperature_train: 1.0
-    temperature_eval: 0.6
     top_k: 50
     top_p: 1.0
     repetition_penalty: 1.0
@@ -139,7 +135,10 @@ env:
 
   train:
     total_num_envs: 1
+    # Local YAM env truncation cap. This is the real env-side episode limit.
     max_episode_steps: 100
+    # Training-side rollout horizon used for rollout/result bookkeeping.
+    rollout_horizon_steps: 60
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
 
@@ -160,24 +159,11 @@ env:
     # Enable TOPReward dense progress signal.
     # EnvWorker calls VLMPlannerWorker (on Beaker GPU 2) via Ray RPC.
     top_reward_enabled: True
-    top_reward_max_frames: 16
-    top_reward_instruction_source: initial_task
+    top_reward_max_frames: 1000
 
-    # Subtask planning disabled — VLM is used for TOPReward only.
+    # Fixed-task TOPReward mode. Set subtask_interval > 0 to enable
+    # VLM subtask predictions and make TOPReward follow the current subtask.
     subtask_interval: 0
-
-  eval:
-    total_num_envs: 1
-    max_episode_steps: 100
-    max_steps_per_rollout_epoch: 60
-    control_rate_hz: 10.0
-    task_description: "bimanual pick and place"
-    is_dummy: False
-    robot_cfgs:
-      left: null
-      right: null
-    camera_cfgs: null
-
 # VLM planner: Qwen3-VL-8B for TOPReward scoring only (no subtask planning).
 vlm_planner:
   model_path: "Qwen/Qwen3-VL-8B-Instruct"
@@ -193,7 +179,7 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
   top_reward_enabled: True
-  top_reward_max_frames: 16
+  top_reward_max_frames: 1000
   reward_scale: 1.0
 
 rollout:
@@ -202,7 +188,7 @@ rollout:
   recompute_logprobs: False
   unnorm_key: libero_10
   enable_offload: False
-  pipeline_stage_num: 1
+  pipeline_slot_count: 1
 
   collect_transitions: True
   collect_prev_infos: True

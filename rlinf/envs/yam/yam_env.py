@@ -672,10 +672,58 @@ class YAMEnv(gym.Env):
 
         return obs, reward, terminated, truncated, infos
 
+    def _step_lightweight(self, actions):
+        """Execute one env step but skip the expensive ``_wrap_obs``.
+
+        Only computes reward / terminated / truncated.  Used by
+        ``chunk_step`` for intermediate actions whose observations are
+        never consumed by the caller.
+        """
+        if isinstance(actions, torch.Tensor):
+            actions = actions.detach().cpu().numpy()
+        if actions is not None:
+            actions = np.asarray(actions, dtype=np.float32)
+            if actions.ndim == 2:
+                actions = actions[0]
+
+        if actions is not None and self._episode_start_time is None:
+            self._episode_start_time = time.monotonic()
+            self._logger.info(
+                "[YAMEnv] Episode timer started (%.1fs budget).",
+                self._episode_duration_s,
+            )
+
+        self._elapsed_steps += 1
+        self._num_steps += 1
+
+        if self._episode_start_time is not None:
+            elapsed_s = time.monotonic() - self._episode_start_time
+            truncated = np.array([elapsed_s >= self._episode_duration_s], dtype=bool)
+        else:
+            truncated = np.zeros(self.num_envs, dtype=bool)
+
+        # Actually move the robot so the state is correct, but do NOT
+        # build the full observation dict.  Skip get_obs on truncation —
+        # the caller will build a full obs separately if needed.
+        if not self._is_dummy and not np.any(truncated):
+            action_dict = self._format_action(actions)
+            self._robot_env.step(action_dict)
+
+        reward = np.zeros(self.num_envs, dtype=np.float32)
+        terminated = np.zeros(self.num_envs, dtype=bool)
+        infos = self._record_metrics(reward, terminated, np.zeros_like(terminated), {})
+
+        return reward, terminated, truncated, infos
+
     def chunk_step(self, chunk_actions):
         """Execute a chunk of actions and return stacked results.
 
         Follows the same contract as ``RealWorldEnv.chunk_step()``.
+
+        Only the **last** step builds a full observation (with images).
+        Intermediate steps use the lightweight path that skips image
+        capture, ``_wrap_obs``, and tensor conversion — the caller
+        (``env_interact_step``) only uses ``obs_list[-1]`` anyway.
 
         Parameters
         ----------
@@ -696,21 +744,42 @@ class YAMEnv(gym.Env):
         raw_chunk_rewards = []
         raw_chunk_terminations = []
         raw_chunk_truncations = []
+        last_idx = chunk_size - 1
 
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
-            obs, step_reward, terminations, truncations, infos = self.step(
-                actions, auto_reset=False
-            )
-            obs_list.append(obs)
+
+            if i == last_idx:
+                # Last step: build full observation with images.
+                obs, step_reward, terminations, truncations, infos = self.step(
+                    actions, auto_reset=False
+                )
+                obs_list.append(obs)
+            else:
+                # Intermediate step: skip image capture & _wrap_obs.
+                step_reward, terminations, truncations, infos = self._step_lightweight(
+                    actions
+                )
+
             infos_list.append(infos)
             raw_chunk_rewards.append(step_reward)
             raw_chunk_terminations.append(terminations)
             raw_chunk_truncations.append(truncations)
             if np.any(terminations) or np.any(truncations):
+                # Episode ended early.  Build a full obs for the
+                # termination step if we haven't already (intermediate
+                # steps use the lightweight path).
+                if not obs_list:
+                    obs = self._wrap_obs(
+                        self._dummy_obs()
+                        if self._is_dummy
+                        else self._robot_env.get_obs()
+                    )
+                    obs_list.append(obs)
+                last_obs = obs_list[-1]
                 remaining_steps = chunk_size - i - 1
                 for _ in range(remaining_steps):
-                    obs_list.append(obs)
+                    obs_list.append(last_obs)
                     infos_list.append(infos)
                     raw_chunk_rewards.append(np.zeros_like(step_reward))
                     raw_chunk_terminations.append(terminations.copy())

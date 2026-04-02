@@ -43,6 +43,30 @@ logger = get_logger()
 _DEFAULT_PORT = 50051
 _DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16 MB
 _JPEG_QUALITY = 90
+_BIND_ADDRESSES = ("[::]:{port}", "0.0.0.0:{port}")
+
+
+def _bind_server(server: grpc.Server, port: int) -> str:
+    """Bind the gRPC server to the first available listen address."""
+    errors: list[str] = []
+    for address_template in _BIND_ADDRESSES:
+        address = address_template.format(port=port)
+        try:
+            bound_port = server.add_insecure_port(address)
+        except RuntimeError as exc:
+            errors.append(f"{address} ({exc})")
+            continue
+
+        if bound_port:
+            return address
+
+        errors.append(f"{address} (returned port 0)")
+
+    joined_errors = "; ".join(errors)
+    raise RuntimeError(
+        "Failed to bind RobotServer to any listen address for "
+        f"port {port}. Tried: {joined_errors}"
+    )
 
 
 def _compress_image(img: np.ndarray, quality: int = _JPEG_QUALITY) -> bytes:
@@ -166,19 +190,22 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         compress: bool = True,
         jpeg_quality: int = _JPEG_QUALITY,
         verbose: bool = False,
+        step_by_step: bool = False,
         request_shutdown=None,
     ):
         self._env = env
         self._compress = compress
         self._jpeg_quality = jpeg_quality
-        self._verbose = verbose
-        self._first_chunk_approved = not verbose
+        self._verbose = verbose or step_by_step
+        self._step_by_step = step_by_step
+        self._first_chunk_approved = not self._verbose
         self._request_shutdown = request_shutdown
 
         # Track last client RPC time for disconnect detection.
         self._last_rpc_time: float = time.monotonic()
         self._client_connected: bool = False
         self._chunk_count: int = 0
+        self._base_task_description: str = self._read_env_task_description()
         self._episode_cooldown_s: float = float(
             getattr(self._env, "_episode_cooldown_s", 0.0)
         )
@@ -188,6 +215,40 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
         self._env_lock = threading.Lock()
+
+    def _read_env_task_description(self) -> str:
+        """Return the current task/subtask string from the wrapped env."""
+        task_description = getattr(self._env, "task_description", "")
+        return str(task_description or "").strip()
+
+    def _format_chunk_task_context(self) -> str:
+        """Return a compact terminal string for the live task/subtask state."""
+        current_task = self._read_env_task_description()
+        if current_task and not self._base_task_description:
+            self._base_task_description = current_task
+
+        if self._base_task_description and current_task:
+            if current_task != self._base_task_description:
+                return (
+                    f'task="{self._base_task_description}" | subtask="{current_task}"'
+                )
+            return f'task="{current_task}"'
+
+        if current_task:
+            return f'task="{current_task}"'
+
+        if self._base_task_description:
+            return f'task="{self._base_task_description}"'
+
+        return 'task=""'
+
+    def _print_chunk_task_context(self) -> None:
+        """Print the current task/subtask context for each received chunk."""
+        chunk_index = self._chunk_count + 1
+        print(
+            f"[RobotServer][ChunkStep {chunk_index}] {self._format_chunk_task_context()}",
+            flush=True,
+        )
 
     def _touch(self) -> None:
         """Record that a client RPC was received."""
@@ -389,6 +450,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
         )
+        self._print_chunk_task_context()
         if self._verbose:
             logger.info(
                 f"[ChunkStep] Received chunk: num_envs={request.num_envs}, "
@@ -412,6 +474,14 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         if not self._first_chunk_approved:
             self._wait_for_first_chunk_approval(actions)
 
+        if self._step_by_step:
+            print("[SBS] Press Enter to execute this chunk...", flush=True)
+            try:
+                with open("/dev/tty", "r") as tty:
+                    tty.readline()
+            except OSError:
+                input()
+
         with self._env_lock:
             (
                 obs_list,
@@ -424,14 +494,22 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
         step_results = []
         chunk_size = request.chunk_size
+        # The env's chunk_step only returns obs for the last step (or
+        # the step where the episode ended).  Use the last entry in
+        # obs_list for the final StepResult and send empty observations
+        # for intermediate steps to save bandwidth.
+        last_obs = obs_list[-1] if obs_list else None
         for i in range(chunk_size):
-            obs_proto = _obs_to_proto(
-                obs_list[i],
-                self._env._img_h,
-                self._env._img_w,
-                compress=self._compress,
-                jpeg_quality=self._jpeg_quality,
-            )
+            if i == chunk_size - 1 and last_obs is not None:
+                obs_proto = _obs_to_proto(
+                    last_obs,
+                    self._env._img_h,
+                    self._env._img_w,
+                    compress=self._compress,
+                    jpeg_quality=self._jpeg_quality,
+                )
+            else:
+                obs_proto = robot_env_pb2.Observation()
             # chunk_rewards shape: (num_envs, chunk_size)
             reward = float(chunk_rewards[0, i])
             terminated = bool(chunk_terminations[0, i])
@@ -456,6 +534,9 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
     def SetTaskDescription(self, request, context):
         self._touch()
         self._env.task_description = request.task_description
+        task_description = str(request.task_description or "").strip()
+        if task_description and not self._base_task_description:
+            self._base_task_description = task_description
         return robot_env_pb2.Empty()
 
     def EnterZeroTorqueMode(self, request, context):
@@ -565,6 +646,7 @@ def serve(
     max_message_size: int = _DEFAULT_MAX_MESSAGE_SIZE,
     dummy: bool = False,
     verbose: bool = False,
+    step_by_step: bool = False,
 ):
     """Start the gRPC server with a YAMEnv instance.
 
@@ -621,13 +703,14 @@ def serve(
         compress=compress,
         jpeg_quality=jpeg_quality,
         verbose=verbose,
+        step_by_step=step_by_step,
         request_shutdown=_request_shutdown,
     )
     robot_env_pb2_grpc.add_RobotEnvServiceServicer_to_server(servicer, server)
 
-    server.add_insecure_port(f"[::]:{port}")
+    bound_address = _bind_server(server, port)
     server.start()
-    logger.info(f"[RobotServer] Serving on port {port}")
+    logger.info(f"[RobotServer] Serving on {bound_address}")
 
     # ---- Watchdog: detect client disconnect and trigger safe recovery ----
     # Only activates after the first ChunkStep has been processed so that
@@ -773,6 +856,11 @@ def main():
         action="store_true",
         help="Show robot state before serving and log every chunk step",
     )
+    parser.add_argument(
+        "--sbs",
+        action="store_true",
+        help="Step-by-step mode: wait for Enter before executing each chunk",
+    )
     args = parser.parse_args()
     serve(
         args.config_path,
@@ -780,6 +868,7 @@ def main():
         args.max_message_size,
         dummy=args.dummy,
         verbose=args.verbose,
+        step_by_step=args.sbs,
     )
 
 

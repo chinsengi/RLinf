@@ -20,7 +20,7 @@ All four remote configs use TOPReward (Qwen3-VL-8B on GPU 2) and `group_size: 1`
 The `openpi` pair uses reward scoring only; the `subtask` pair also injects
 language subtask descriptions. The runtime split is explicit:
 - `_async` uses `train_embodied_agent_staged_async.py` and `decoupled_actor_critic`
-- `_sync` uses `train_embodied_agent_staged.py` and `actor_critic`
+- `_sync` uses `train_embodied_agent_staged.py`
 
 > **`collect_prev_infos: true` required for GAE.** Both configs use `adv_type: gae`,
 > which requires the value estimates (`prev_values`) collected by the rollout worker
@@ -33,22 +33,20 @@ language subtask descriptions. The runtime split is explicit:
 > silently degrading to plain REINFORCE without a value baseline. Training continues
 > but the GAE advantage signal is lost. See [Troubleshooting: Training signal silently degraded](#training-signal-silently-degraded-gae--reinforce-fallback).
 
-> **`bootstrap_step()` resets the robot every training step.** For `auto_reset: false`
-> (the YAM configs), `bootstrap_step()` calls `env.reset()` on every rollout epoch.
-> Since `rollout_epoch: 1`, this means the robot is reset (gRPC `Reset` → `YAMEnv.reset()`)
-> at the start of every training step. Each episode is a fresh rollout. The
-> `store_last_obs_and_intervened_info()` call (after the chunk loop) stores the final
-> observation for use only in `auto_reset: true` configs — it is a no-op for YAM.
+> **Rollout epochs and YAM episodes are decoupled.** For `auto_reset: false`, whether
+> `bootstrap_step()` calls `env.reset()` is controlled by `env.train.reset_on_rollout_epoch`.
+> The shipped YAM configs set this to `false`, so a rollout epoch boundary does not
+> reset the robot by default. The `store_last_obs_and_intervened_info()` call (after
+> the chunk loop) preserves the current observation so the next rollout epoch can
+> continue the same episode.
 
-> **`subtask_interval` unit:** chunk steps (not env steps). The `EnvWorker` resets
-> the subtask counter at `bootstrap_step()` (once per rollout epoch / episode
-> reset). In the shipped `yam_ppo_openpi_subtask_{async,sync}` configs,
+> **`subtask_interval` unit:** chunk steps (not env steps). The `EnvWorker`
+> counts chunk steps within the current episode and resets the counter only on
+> episode boundaries or after a successful subtask update. In the shipped
+> `yam_ppo_openpi_subtask_{async,sync}` configs,
 > `max_steps_per_rollout_epoch: 60` and `num_action_chunks: 30`, so
 > `n_train_chunk_steps = 2`. The shipped `subtask_interval: 1` therefore fires on
-> both chunk steps in the rollout (roughly 50% and 100% of the episode). Setting
-> `subtask_interval > n_train_chunk_steps` disables subtask planning
-> (the config validator warns at startup; the counter resets before reaching the
-> threshold so the planner never fires).
+> both chunk steps in the rollout (roughly 50% and 100% of the episode).
 >
 > **Adaptive subtask triggering:** when `env.train.subtask_adaptive: true` and
 > `top_reward_enabled: true`, `subtask_interval` becomes a max-interval fallback
@@ -56,9 +54,7 @@ language subtask descriptions. The runtime split is explicit:
 > either (1) the last `subtask_plateau_window` TOPReward deltas all satisfy
 > `abs(delta) < subtask_plateau_threshold`, or (2) the latest TOPReward score
 > exceeds `subtask_score_threshold`. `subtask_min_interval` acts as a
-> cooldown between successful updates. If `subtask_interval > n_train_chunk_steps`
-> in adaptive mode, only the fallback is disabled; plateau / score triggers can
-> still fire.
+> cooldown between successful updates.
 
 ## Data Flow
 
@@ -153,6 +149,28 @@ Step 6. Refresh rollout policy
 `n_train_chunk_steps = max_steps_per_rollout_epoch // num_action_chunks`
 (e.g. `60 // 30 = 2` for the shipped `yam_ppo_openpi_subtask_{async,sync}` configs).
 
+### YAM timing terms
+
+For YAM there are two separate notions of "episode length":
+
+- training-side step horizons:
+  `rollout_horizon_steps`, `max_steps_per_rollout_epoch`, and the derived
+  `n_train_chunk_steps`
+- the real robot episode timeout:
+  `episode_duration_s` in `env/yam_pi05_follower.yaml`
+
+The important behavior difference is that `YAMEnv.step()` truncates on the
+wall-clock timer `episode_duration_s`, not on the training YAML's
+`rollout_horizon_steps`. The shipped YAM configs therefore use:
+
+- `rollout_horizon_chunks: 2`
+- `num_action_chunks: 30`
+- `rollout_horizon_steps = max_steps_per_rollout_epoch = 60`
+- `episode_duration_s = 120`
+
+So one rollout epoch is 60 low-level steps, but a real YAM episode can span
+multiple rollout epochs until the 120-second timer expires.
+
 The post-loop `recv_env_output` (in `generate_one_epoch`) receives the last env step result
 (observation + reward + done from the final `env_interact_step`). It serves two purposes:
 (1) collects `prev_values = V(obs_final)` for GAE bootstrapping (the `n_steps+1` value estimate),
@@ -216,17 +234,19 @@ override the template default of 7 would silently truncate actions to single-arm
 
 ### TOPReward reward baseline and episode resets
 
-`_prev_top_score` (the running log-probability baseline for delta computation) is reset to `0.0` in three places:
+`_prev_top_score` (the running log-probability baseline for delta computation) is reset only when a new TOPReward segment starts:
 
-1. **Epoch boundary** — `bootstrap_step()` calls `_reset_top_reward_state()` at the start of every rollout epoch (`env_worker.py:628–629`).
-2. **Episode done** — `env_interact_step()` calls `_reset_top_reward_state()` whenever `chunk_dones[:, -1].any()` (`env_worker.py:434–435`).
-3. **Subtask change** — `_maybe_update_subtask()` calls `_reset_top_reward_state()` whenever the VLM generates a new subtask and `top_reward_enabled` is True (`env_worker.py:219–220`). Without this reset, the first delta after a subtask change would mix log-probs from different instructions (`score_new_subtask(t+1) − score_old_subtask(t)`), which are not comparable.
+1. **Episode start** — whenever the env is actually reset into a new episode (for example the first bootstrap reset, an explicit rollout-epoch env reset, or `reset_on_rollout_epoch_end`).
+2. **Episode done** — `env_interact_step()` calls `_reset_top_reward_state()` whenever `chunk_dones[:, -1].any()`.
+3. **Subtask change** — `_maybe_update_subtask()` calls `_reset_top_reward_state()` whenever the VLM generates a new subtask and `top_reward_enabled` is True. Without this reset, the first delta after a subtask change would mix log-probs from different instructions (`score_new_subtask(t+1) − score_old_subtask(t)`), which are not comparable.
 
-The episode-done and subtask-change resets both clear `_episode_frames` as well, giving the VLM a clean context window for each new episode / subtask phase.
+After either reset, the next TOPReward call seeds the new baseline and injects a reward delta of `0.0`; subsequent steps resume the usual `score_t - score_{t-1}` behavior. Rollout-epoch boundaries that continue the same episode do **not** reset the TOPReward baseline.
+
+The episode-done and subtask-change resets also clear `_episode_frames`, giving the VLM a clean context window for each new episode / subtask phase.
 
 ### Subtask planner context
 
-`_maybe_update_subtask()` reads `env.last_obs` to supply the VLM subtask planner with the most recent camera frame, and passes the episode-level main task (`_initial_task_descriptions[stage_id]`). The planner prompt includes the main goal and the current image — there is no planner memory buffer.
+`_maybe_update_subtask()` reads `env.last_obs` to supply the VLM subtask planner with the most recent camera frame, and passes the episode-level main task (`_initial_task_descriptions[slot_id]`). The planner prompt includes the main goal and the current image — there is no planner memory buffer.
 
 `RemoteEnv` maintains `self.last_obs` and updates it on every `reset()` and `chunk_step()` call. If `last_obs` is `None` (before the first step) or the env wrapper doesn't expose the attribute, `_maybe_update_subtask()` sends an empty image list — the planner still produces a subtask but without visual context.
 
@@ -240,9 +260,9 @@ Note: `last_obs` (single latest frame for subtask planning) is distinct from `_e
 
 ### Subtask interval sizing
 
-`_steps_since_subtask_update` is an instance variable reset to `0` in `bootstrap_step()` (once per rollout epoch). With `rollout_epoch: 1`, this reset happens once per training step. The effective maximum subtask interval within a single episode is therefore `n_train_chunk_steps = max_steps_per_rollout_epoch // num_action_chunks`.
+`_steps_since_subtask_update` is an instance variable reset to `0` only when a new episode starts, when an episode ends, or after a successful subtask update. Rollout-epoch boundaries that continue the same episode do not reset the counter.
 
-For the shipped `yam_ppo_openpi_subtask_{async,sync}` configs (`max_steps_per_rollout_epoch: 60`, `num_action_chunks: 30`): `n_train_chunk_steps = 2`. The shipped `subtask_interval: 1` fires on both chunk steps in the episode. If `subtask_interval > 2`, the subtask planner never fires because the counter is reset before it reaches the threshold.
+For the shipped `yam_ppo_openpi_subtask_{async,sync}` configs (`max_steps_per_rollout_epoch: 60`, `num_action_chunks: 30`): `n_train_chunk_steps = 2`. The shipped `subtask_interval: 1` fires on both chunk steps in the episode. Larger values can span multiple rollout epochs as long as the episode itself continues.
 
 ### TOPReward VLM latency
 
@@ -300,7 +320,7 @@ The fix reshapes `loss_mask` to `entropy.shape` before calling `masked_mean`, wh
 
 ### YAMEnv base reward is always zero
 
-`YAMEnv.step()` always returns `reward = np.zeros(num_envs)` and `terminated = np.zeros(num_envs, bool)`. There is no task-success signal wired from the robot hardware — success detection is not implemented at the environment level. The training reward comes **entirely from TOPReward** (delta log-prob injected by `_compute_top_reward`). Episodes end only via time-limit truncation (`_elapsed_steps >= max_episode_steps`).
+`YAMEnv.step()` always returns `reward = np.zeros(num_envs)` and `terminated = np.zeros(num_envs, bool)`. There is no task-success signal wired from the robot hardware — success detection is not implemented at the environment level. The training reward comes **entirely from TOPReward** (delta log-prob injected by `_compute_top_reward`). Episodes end only via the YAM wall-clock timeout (`episode_duration_s`, or the `max_episode_steps / control_rate_hz` fallback when that timer is absent).
 
 As a result, the `success_once` field in `episode_info` will always be `False` for YAM training — this is expected behavior, not a bug. The policy's only learning signal is the TOPReward progress score.
 

@@ -84,8 +84,15 @@ def _decode_image_stack(
     return np.stack(images, axis=0)[np.newaxis, :]
 
 
-def _proto_to_obs(proto_obs: robot_env_pb2.Observation) -> dict:
-    """Convert a protobuf Observation to a YAMEnv-compatible dict."""
+def _proto_to_obs(proto_obs: robot_env_pb2.Observation) -> dict | None:
+    """Convert a protobuf Observation to a YAMEnv-compatible dict.
+
+    Returns ``None`` when the observation contains no data (intermediate
+    chunk steps where the server omits images to save bandwidth).
+    """
+    if not proto_obs.states and not proto_obs.main_image:
+        return None
+
     # States
     state_shape = tuple(proto_obs.state_shape)
     states = np.frombuffer(proto_obs.states, dtype=np.float32).reshape(state_shape)
@@ -369,11 +376,12 @@ class RemoteEnv(gym.Env):
 
         for sr in resp.step_results:
             obs = _proto_to_obs(sr.observation)
-            # Always use the locally-tracked task_description so the policy
-            # always sees the correct instruction (from config or latest VLM
-            # subtask update) regardless of whether the server includes it.
-            obs["task_descriptions"] = [self._task_description]
-            obs_list.append(obs)
+            # Intermediate chunk steps may have no observation (server
+            # skips images to save bandwidth).  Only append non-None obs
+            # so that obs_list[-1] is always the final observation.
+            if obs is not None:
+                obs["task_descriptions"] = [self._task_description]
+                obs_list.append(obs)
 
             self._elapsed_steps += 1
             self._num_steps += 1

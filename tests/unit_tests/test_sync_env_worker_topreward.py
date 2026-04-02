@@ -23,6 +23,7 @@ Covers:
 """
 
 from collections import deque
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import numpy as np
@@ -43,7 +44,7 @@ except Exception:
     sys.modules.setdefault("ray", ray_stub)
     sys.modules.setdefault("ray.actor", ray_actor_stub)
 
-from rlinf.workers.env.env_worker import EnvWorker
+from rlinf.workers.env.env_worker import EnvWorker, _apply_action_chunk_smoothing
 
 
 class _CfgNode(dict):
@@ -73,6 +74,17 @@ class _PlannerStub:
         return self.result
 
 
+class _TopRewardPlannerStub:
+    def __init__(self, scores):
+        self.scores = list(scores)
+        self.calls = []
+        self.compute_top_reward = SimpleNamespace(remote=self._compute_top_reward)
+
+    def _compute_top_reward(self, frames, instruction):
+        self.calls.append((list(frames), instruction))
+        return self.scores.pop(0)
+
+
 def _make_adaptive_worker(
     *,
     subtask_adaptive=True,
@@ -100,8 +112,8 @@ def _make_adaptive_worker(
     worker._subtask_plateau_threshold = plateau_threshold
     worker._subtask_score_threshold = score_threshold
     worker._top_reward_enabled = True
-    worker._top_reward_instruction_source = "initial_task"
     worker._prev_top_score = prev_top_score
+    worker._top_reward_has_prev_score = True
     worker._steps_since_subtask_update = steps_since_update
     worker._recent_top_deltas = deque(
         recent_deltas or [],
@@ -109,6 +121,25 @@ def _make_adaptive_worker(
     )
     worker._episode_frames = []
     worker._vlm_planner = _PlannerStub()
+    worker.log_info = lambda *_args, **_kwargs: None
+    return worker
+
+
+def _make_top_reward_worker(scores, *, subtask_interval=0):
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.env_list = [
+        SimpleNamespace(unwrapped=SimpleNamespace(task_description="fold the towel"))
+    ]
+    worker._initial_task_descriptions = ["fold the towel"]
+    worker._top_reward_enabled = True
+    worker._subtask_interval = subtask_interval
+    worker._top_reward_max_frames = 16
+    worker._episode_frames = []
+    worker._prev_top_score = 0.0
+    worker._top_reward_has_prev_score = False
+    worker._recent_top_deltas = deque(maxlen=3)
+    worker._vlm_planner = _TopRewardPlannerStub(scores)
+    worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
     worker.log_info = lambda *_args, **_kwargs: None
     return worker
 
@@ -124,38 +155,42 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     worker = EnvWorker.__new__(EnvWorker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
     worker._top_reward_enabled = True
-    worker._top_reward_instruction_source = "current_task"
     worker._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
     worker._prev_top_score = 1.5
     worker._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
     worker.log_info = lambda *_args, **_kwargs: None
 
-    # Should not raise TypeError (the old bug passed stage_id to a no-arg method).
+    # Should not raise TypeError (the old bug passed slot_id to a no-arg method).
     result = worker._apply_subtask_update(0, "grasp the left corner")
     assert result is True
     assert inner_env.task_description == "grasp the left corner"
     # Reward state should be reset.
     assert worker._episode_frames == []
     assert worker._prev_top_score == 0.0
+    assert worker._top_reward_has_prev_score is False
     assert list(worker._recent_top_deltas) == []
 
 
-def test_apply_subtask_update_no_reset_for_initial_task():
-    """With initial_task source, subtask update does NOT reset reward state."""
+def test_apply_subtask_update_resets_when_subtask_changes():
+    """Subtask updates reset reward state when TOPReward is enabled."""
     inner_env = SimpleNamespace(task_description="fold the towel")
     worker = EnvWorker.__new__(EnvWorker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
     worker._top_reward_enabled = True
-    worker._top_reward_instruction_source = "initial_task"
     worker._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
     worker._prev_top_score = 1.5
+    worker._top_reward_has_prev_score = True
+    worker._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
     worker.log_info = lambda *_args, **_kwargs: None
 
     result = worker._apply_subtask_update(0, "grasp the left corner")
     assert result is True
-    # Reward state should NOT be reset.
-    assert len(worker._episode_frames) == 1
-    assert worker._prev_top_score == 1.5
+    assert inner_env.task_description == "grasp the left corner"
+    # Reward state should be reset.
+    assert worker._episode_frames == []
+    assert worker._prev_top_score == 0.0
+    assert worker._top_reward_has_prev_score is False
+    assert list(worker._recent_top_deltas) == []
 
 
 # ---------------------------------------------------------------------------
@@ -204,13 +239,13 @@ def test_get_next_subtask_prompt_includes_main_task():
 
 
 # ---------------------------------------------------------------------------
-# Plan step 4: TOPReward instruction source selection
+# Plan step 4: TOPReward instruction selection by subtask_interval
 # ---------------------------------------------------------------------------
 
 
-def test_instruction_source_initial_task():
+def test_top_reward_uses_initial_task_when_subtask_planning_disabled():
     worker = EnvWorker.__new__(EnvWorker)
-    worker._top_reward_instruction_source = "initial_task"
+    worker._subtask_interval = 0
     worker._initial_task_descriptions = ["fold the towel"]
     worker.env_list = [
         SimpleNamespace(unwrapped=SimpleNamespace(task_description="grasp the corner"))
@@ -218,14 +253,62 @@ def test_instruction_source_initial_task():
     assert worker._get_top_reward_instruction(0) == "fold the towel"
 
 
-def test_instruction_source_current_task():
+def test_top_reward_uses_current_task_when_subtask_planning_enabled():
     worker = EnvWorker.__new__(EnvWorker)
-    worker._top_reward_instruction_source = "current_task"
+    worker._subtask_interval = 10
     worker._initial_task_descriptions = ["fold the towel"]
     worker.env_list = [
         SimpleNamespace(unwrapped=SimpleNamespace(task_description="grasp the corner"))
     ]
     assert worker._get_top_reward_instruction(0) == "grasp the corner"
+
+
+def test_compute_top_reward_seeds_episode_with_zero_delta(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_top_reward_worker([1.25, 1.75])
+    first_env_output = SimpleNamespace(
+        obs={"main_images": torch.zeros((1, 8, 8, 3), dtype=torch.uint8)},
+        rewards=torch.zeros((1, 1), dtype=torch.float32),
+    )
+    second_env_output = SimpleNamespace(
+        obs={"main_images": torch.zeros((1, 8, 8, 3), dtype=torch.uint8)},
+        rewards=torch.zeros((1, 1), dtype=torch.float32),
+    )
+
+    first_output = worker._compute_top_reward(first_env_output, 0)
+    second_output = worker._compute_top_reward(second_env_output, 0)
+
+    assert first_output.rewards[:, -1].item() == pytest.approx(0.0)
+    assert second_output.rewards[:, -1].item() == pytest.approx(0.5)
+    assert worker._prev_top_score == pytest.approx(1.75)
+    assert worker._top_reward_has_prev_score is True
+    assert list(worker._recent_top_deltas) == [0.0, 0.5]
+
+
+def test_compute_top_reward_seeds_zero_delta_after_subtask_reset(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_top_reward_worker([2.0], subtask_interval=10)
+    worker._episode_frames = [np.zeros((8, 8, 3), dtype=np.uint8)]
+    worker._prev_top_score = 1.5
+    worker._top_reward_has_prev_score = True
+    worker._recent_top_deltas.append(0.25)
+
+    assert worker._apply_subtask_update(0, "grasp the left corner") is True
+
+    env_output = SimpleNamespace(
+        obs={"main_images": torch.zeros((1, 8, 8, 3), dtype=torch.uint8)},
+        rewards=torch.zeros((1, 1), dtype=torch.float32),
+    )
+    updated_output = worker._compute_top_reward(env_output, 0)
+
+    assert updated_output.rewards[:, -1].item() == pytest.approx(0.0)
+    assert worker._prev_top_score == pytest.approx(2.0)
+    assert worker._top_reward_has_prev_score is True
+    assert list(worker._recent_top_deltas) == [0.0]
 
 
 def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
@@ -241,11 +324,15 @@ def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
             "actor": {"model": {"num_action_chunks": 1}},
         }
     )
-    worker._top_reward_enabled = False
-    worker.stage_num = 1
+    worker._top_reward_enabled = True
+    worker._prev_top_score = 1.25
+    worker._top_reward_has_prev_score = True
+    worker._recent_top_deltas = deque([0.5], maxlen=3)
+    worker.slot_count = 1
     worker.train_num_envs_per_stage = 1
     worker.last_obs_list = [{"states": "previous"}]
     worker.last_intervened_info_list = [(torch.tensor([1]), torch.tensor([0]))]
+    worker._steps_since_subtask_update = 7
 
     reset_calls = []
 
@@ -264,6 +351,10 @@ def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
     assert env_outputs[0].obs == {"states": "previous"}
     assert torch.equal(env_outputs[0].intervene_actions, torch.tensor([1]))
     assert torch.equal(env_outputs[0].intervene_flags, torch.tensor([0]))
+    assert worker._prev_top_score == pytest.approx(1.25)
+    assert worker._top_reward_has_prev_score is True
+    assert list(worker._recent_top_deltas) == [0.5]
+    assert worker._steps_since_subtask_update == 7
 
 
 def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled():
@@ -279,11 +370,16 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
             "actor": {"model": {"num_action_chunks": 1}},
         }
     )
-    worker._top_reward_enabled = False
-    worker.stage_num = 1
+    worker._top_reward_enabled = True
+    worker._prev_top_score = 1.25
+    worker._top_reward_has_prev_score = True
+    worker._recent_top_deltas = deque([0.5], maxlen=3)
+    worker._episode_frames = [np.zeros((8, 8, 3), dtype=np.uint8)]
+    worker.slot_count = 1
     worker.train_num_envs_per_stage = 1
     worker.last_obs_list = []
     worker.last_intervened_info_list = []
+    worker._steps_since_subtask_update = 4
 
     reset_calls = []
 
@@ -300,6 +396,130 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
 
     assert reset_calls == [True]
     assert env_outputs[0].obs == {"states": "reset"}
+    assert worker._prev_top_score == 0.0
+    assert worker._top_reward_has_prev_score is False
+    assert worker._episode_frames == []
+    assert list(worker._recent_top_deltas) == []
+    assert worker._steps_since_subtask_update == 0
+
+
+def test_env_interact_step_resets_subtask_counter_on_episode_done(monkeypatch):
+    monkeypatch.setattr(
+        "rlinf.workers.env.env_worker.prepare_actions",
+        lambda **kwargs: kwargs["raw_chunk_actions"],
+    )
+
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.cfg = _cfg_node(
+        {
+            "env": {
+                "train": {
+                    "env_type": "yam",
+                    "auto_reset": False,
+                    "ignore_terminations": False,
+                    "wm_env_type": None,
+                }
+            },
+            "actor": {
+                "model": {
+                    "model_type": "openpi",
+                    "num_action_chunks": 1,
+                    "action_dim": 1,
+                }
+            },
+        }
+    )
+    worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
+    worker._top_reward_enabled = False
+    worker._vlm_planner = None
+    worker._steps_since_subtask_update = 5
+    worker.env_list = [
+        SimpleNamespace(
+            chunk_step=lambda _chunk_actions: (
+                [{"states": "next"}],
+                torch.zeros((1, 1), dtype=torch.float32),
+                torch.zeros((1, 1), dtype=torch.bool),
+                torch.ones((1, 1), dtype=torch.bool),
+                [{}],
+            )
+        )
+    ]
+
+    env_output, env_info = worker.env_interact_step(torch.zeros((1, 1)), 0)
+
+    assert env_output.dones[:, -1].item() is True
+    assert env_info == {}
+    assert worker._steps_since_subtask_update == 0
+
+
+def test_apply_action_chunk_smoothing_ema_numpy():
+    chunk_actions = np.array([[[0.0], [10.0], [10.0]]], dtype=np.float32)
+
+    smoothed = _apply_action_chunk_smoothing(
+        chunk_actions,
+        {"enabled": True, "method": "ema", "alpha": 0.5},
+    )
+
+    assert smoothed.shape == chunk_actions.shape
+    assert smoothed[0, 0, 0] == 0.0
+    assert smoothed[0, 1, 0] == 5.0
+    assert smoothed[0, 2, 0] == 7.5
+
+
+def test_env_interact_step_applies_action_chunk_smoothing(monkeypatch):
+    monkeypatch.setattr(
+        "rlinf.workers.env.env_worker.prepare_actions",
+        lambda **kwargs: kwargs["raw_chunk_actions"].numpy(),
+    )
+
+    captured = {}
+
+    def _chunk_step(chunk_actions):
+        captured["chunk_actions"] = chunk_actions
+        return (
+            [{"states": "next"}],
+            torch.zeros((1, 3), dtype=torch.float32),
+            torch.zeros((1, 3), dtype=torch.bool),
+            torch.zeros((1, 3), dtype=torch.bool),
+            [{}],
+        )
+
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.cfg = _cfg_node(
+        {
+            "env": {
+                "train": {
+                    "env_type": "yam",
+                    "auto_reset": False,
+                    "ignore_terminations": False,
+                    "wm_env_type": None,
+                    "action_chunk_smoothing": {
+                        "enabled": True,
+                        "method": "ema",
+                        "alpha": 0.5,
+                    },
+                }
+            },
+            "actor": {
+                "model": {
+                    "model_type": "openpi",
+                    "num_action_chunks": 3,
+                    "action_dim": 1,
+                }
+            },
+        }
+    )
+    worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
+    worker._top_reward_enabled = False
+    worker._vlm_planner = None
+    worker._steps_since_subtask_update = 0
+    worker.env_list = [SimpleNamespace(chunk_step=_chunk_step)]
+
+    worker.env_interact_step(torch.tensor([[[0.0], [10.0], [10.0]]]), 0)
+
+    assert captured["chunk_actions"][0, 0, 0] == 0.0
+    assert captured["chunk_actions"][0, 1, 0] == 5.0
+    assert captured["chunk_actions"][0, 2, 0] == 7.5
 
 
 def test_maybe_update_subtask_triggers_on_plateau(monkeypatch):

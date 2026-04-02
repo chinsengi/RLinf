@@ -15,7 +15,6 @@
 import dataclasses
 import importlib.util
 import logging
-import math
 import os
 from dataclasses import asdict
 from enum import Enum
@@ -738,7 +737,10 @@ def validate_megatron_cfg(cfg: DictConfig) -> DictConfig:
 
 
 def validate_embodied_cfg(cfg):
+    only_eval = bool(getattr(cfg.runner, "only_eval", False))
+
     return_home_minutes = cfg.env.get("return_home_minutes", None)
+    rollout_horizon_chunks = cfg.env.get("rollout_horizon_chunks", None)
     server_cooldown_minutes = cfg.env.get("server_cooldown_minutes", None)
     if return_home_minutes is not None:
         return_home_minutes = float(return_home_minutes)
@@ -746,44 +748,47 @@ def validate_embodied_cfg(cfg):
             raise ValueError("env.return_home_minutes must be greater than 0.")
         if server_cooldown_minutes is not None and float(server_cooldown_minutes) < 0:
             raise ValueError("env.server_cooldown_minutes must be >= 0.")
-        num_chunks = cfg.actor.model.get("num_action_chunks", None)
-        if num_chunks is None or num_chunks <= 0:
-            raise ValueError(
-                "env.return_home_minutes requires actor.model.num_action_chunks > 0."
-            )
         with open_dict(cfg):
             cfg.env.server_episode_duration_s = return_home_minutes * 60.0
             if server_cooldown_minutes is not None:
                 cfg.env.server_cooldown_s = float(server_cooldown_minutes) * 60.0
-            # When cadence is driven by the desktop RobotServer timer, rollout
+            # When a desktop RobotServer enforces the return-home timer, rollout
             # epoch boundaries must never command an extra env.reset(), or the
-            # real robot will return home early for a training bookkeeping
-            # reason instead of a true timeout / operator stop.
+            # robot will return home early for a training bookkeeping reason
+            # instead of a true timeout / operator stop.
             cfg.env.train.reset_on_rollout_epoch = False
             cfg.env.train.reset_on_rollout_epoch_end = False
-            for split in ("train", "eval"):
-                control_rate_hz = float(cfg.env[split].get("control_rate_hz", 0.0))
-                if control_rate_hz <= 0:
-                    raise ValueError(
-                        f"env.{split}.control_rate_hz must be greater than 0 when "
-                        "using env.return_home_minutes."
-                    )
-                raw_steps = int(round(return_home_minutes * 60.0 * control_rate_hz))
-                aligned_steps = int(math.ceil(raw_steps / num_chunks) * num_chunks)
-                if aligned_steps != raw_steps:
-                    logging.warning(
-                        "env.return_home_minutes=%s with env.%s.control_rate_hz=%s "
-                        "produced %s raw steps, which is not divisible by "
-                        "actor.model.num_action_chunks=%s. Rounding up to %s steps.",
-                        return_home_minutes,
-                        split,
-                        control_rate_hz,
-                        raw_steps,
-                        num_chunks,
-                        aligned_steps,
-                    )
-                cfg.env[split].max_episode_steps = aligned_steps
+
+    num_chunks = cfg.actor.model.get("num_action_chunks", None)
+    if rollout_horizon_chunks is not None:
+        if num_chunks is None or num_chunks <= 0:
+            raise ValueError(
+                "env.rollout_horizon_chunks requires actor.model.num_action_chunks > 0."
+            )
+        rollout_horizon_chunks = int(rollout_horizon_chunks)
+        if rollout_horizon_chunks <= 0:
+            raise ValueError("env.rollout_horizon_chunks must be greater than 0.")
+        aligned_steps = rollout_horizon_chunks * num_chunks
+        with open_dict(cfg):
+            splits = ["train"]
+            if cfg.runner.val_check_interval > 0 or only_eval:
+                splits.append("eval")
+            for split in splits:
+                cfg.env[split].rollout_horizon_steps = aligned_steps
                 cfg.env[split].max_steps_per_rollout_epoch = aligned_steps
+
+    with open_dict(cfg):
+        splits = ["train"]
+        if cfg.runner.val_check_interval > 0 or only_eval:
+            splits.append("eval")
+        for split in splits:
+            horizon_steps = cfg.env[split].get("rollout_horizon_steps", None)
+            if horizon_steps is None:
+                horizon_steps = cfg.env[split].get("max_steps_per_rollout_epoch", None)
+            if horizon_steps is None:
+                horizon_steps = cfg.env[split].get("max_episode_steps", None)
+            if horizon_steps is not None:
+                cfg.env[split].rollout_horizon_steps = int(horizon_steps)
 
     assert get_supported_model(cfg.actor.model.model_type).category == "embodied", (
         f"Model type: '{cfg.actor.model.model_type}' is not an embodied model. "
@@ -815,33 +820,7 @@ def validate_embodied_cfg(cfg):
                 "Set rollout.collect_prev_infos: true in the config."
             )
 
-    # Warn if subtask_interval > n_train_chunk_steps: in fixed mode the subtask
-    # planner would never fire because bootstrap_step() resets the counter every
-    # rollout epoch. In adaptive mode the planner can still fire from TOPReward
-    # signals, but the fixed-interval fallback will never fire.
-    subtask_interval = cfg.env.train.get("subtask_interval", 0)
     subtask_adaptive = bool(cfg.env.train.get("subtask_adaptive", True))
-    max_steps = cfg.env.train.get("max_steps_per_rollout_epoch", None)
-    num_chunks = cfg.actor.model.get("num_action_chunks", None)
-    if subtask_interval > 0 and max_steps is not None and num_chunks is not None:
-        n_train_chunk_steps = max_steps // num_chunks
-        if subtask_interval > n_train_chunk_steps:
-            if subtask_adaptive:
-                logging.warning(
-                    f"subtask_interval ({subtask_interval}) > n_train_chunk_steps "
-                    f"({n_train_chunk_steps}). Adaptive subtask triggering can "
-                    f"still fire from TOPReward signals, but the fixed-interval "
-                    f"fallback will never fire because bootstrap_step() resets "
-                    f"the counter each rollout epoch. Set subtask_interval <= "
-                    f"{n_train_chunk_steps} to keep the fallback active."
-                )
-            else:
-                logging.warning(
-                    f"subtask_interval ({subtask_interval}) > n_train_chunk_steps "
-                    f"({n_train_chunk_steps}). The subtask planner will never fire "
-                    f"because bootstrap_step() resets the counter each rollout epoch. "
-                    f"Set subtask_interval <= {n_train_chunk_steps}."
-                )
 
     if subtask_adaptive and not cfg.env.train.get("top_reward_enabled", False):
         logging.warning(
@@ -879,31 +858,42 @@ def validate_embodied_cfg(cfg):
             )
 
     # process num-envs
+    pipeline_slot_count = int(
+        cfg.rollout.get(
+            "pipeline_slot_count",
+            1,
+        )
+    )
+    with open_dict(cfg):
+        cfg.rollout.pipeline_slot_count = pipeline_slot_count
+
     component_placement = HybridComponentPlacement(cfg, Cluster())
-    stage_num = cfg.rollout.pipeline_stage_num
+    slot_count = cfg.rollout.pipeline_slot_count
     env_world_size = component_placement.get_world_size("env")
 
-    if cfg.runner.val_check_interval > 0 or cfg.runner.only_eval:
+    enable_eval = cfg.runner.val_check_interval > 0 or only_eval
+
+    if enable_eval:
         assert cfg.env.eval.total_num_envs > 0, (
             "Total number of parallel environments for evaluation must be greater than 0"
         )
         assert cfg.env.eval.total_num_envs % env_world_size == 0, (
             "Total number of parallel environments for evaluation must be divisible by the number of environment processes"
         )
-        assert cfg.env.eval.total_num_envs % env_world_size % stage_num == 0, (
-            "Total number of parallel environments for evaluation must be divisible by the number of environment processes and the number of pipeline stages"
+        assert cfg.env.eval.total_num_envs % env_world_size % slot_count == 0, (
+            "Total number of parallel environments for evaluation must be divisible by the number of environment processes and the number of pipeline slots"
         )
-        assert cfg.env.eval.total_num_envs // env_world_size // stage_num > 0, (
-            "env.eval.total_num_envs // env_world_size // rollout.pipeline_stage_num must be greater than 0"
+        assert cfg.env.eval.total_num_envs // env_world_size // slot_count > 0, (
+            "env.eval.total_num_envs // env_world_size // rollout.pipeline_slot_count must be greater than 0"
         )
         assert (
             cfg.env.eval.total_num_envs
             // env_world_size
-            // stage_num
+            // slot_count
             % cfg.env.eval.group_size
             == 0
         ), (
-            "env.eval.total_num_envs // env_world_size // rollout.pipeline_stage_num must be divisible by the group size"
+            "env.eval.total_num_envs // env_world_size // rollout.pipeline_slot_count must be divisible by the group size"
         )
         assert (
             cfg.env.eval.max_steps_per_rollout_epoch % cfg.actor.model.num_action_chunks
@@ -912,27 +902,27 @@ def validate_embodied_cfg(cfg):
             "env.eval.max_steps_per_rollout_epoch must be divisible by actor.model.num_action_chunks"
         )
 
-    if not cfg.runner.only_eval:
+    if not only_eval:
         assert cfg.env.train.total_num_envs > 0, (
             "Total number of parallel environments for training must be greater than 0"
         )
         assert cfg.env.train.total_num_envs % env_world_size == 0, (
             "Total number of parallel environments for training must be divisible by the number of environment processes"
         )
-        assert cfg.env.train.total_num_envs % env_world_size % stage_num == 0, (
-            "Total number of parallel environments for training must be divisible by the number of environment processes and the number of pipeline stages"
+        assert cfg.env.train.total_num_envs % env_world_size % slot_count == 0, (
+            "Total number of parallel environments for training must be divisible by the number of environment processes and the number of pipeline slots"
         )
-        assert cfg.env.train.total_num_envs // env_world_size // stage_num > 0, (
-            "env.train.total_num_envs // env_world_size // rollout.pipeline_stage_num must be greater than 0"
+        assert cfg.env.train.total_num_envs // env_world_size // slot_count > 0, (
+            "env.train.total_num_envs // env_world_size // rollout.pipeline_slot_count must be greater than 0"
         )
         assert (
             cfg.env.train.total_num_envs
             // env_world_size
-            // stage_num
+            // slot_count
             % cfg.env.train.group_size
             == 0
         ), (
-            "env.train.total_num_envs // env_world_size // rollout.pipeline_stage_num must be divisible by the group size"
+            "env.train.total_num_envs // env_world_size // rollout.pipeline_slot_count must be divisible by the group size"
         )
         assert (
             cfg.env.train.max_steps_per_rollout_epoch
@@ -946,9 +936,9 @@ def validate_embodied_cfg(cfg):
         weight_sync_interval = cfg.runner.get("weight_sync_interval", 1)
         assert weight_sync_interval > 0, "weight_sync_interval must be greater than 0"
         cfg.runner.weight_sync_interval = weight_sync_interval
-        if (
-            SupportedEnvType(cfg.env.train.env_type) == SupportedEnvType.MANISKILL
-            or SupportedEnvType(cfg.env.eval.env_type) == SupportedEnvType.MANISKILL
+        if SupportedEnvType(cfg.env.train.env_type) == SupportedEnvType.MANISKILL or (
+            enable_eval
+            and SupportedEnvType(cfg.env.eval.env_type) == SupportedEnvType.MANISKILL
         ):
 
             def get_robot_control_mode(robot: str):
@@ -970,12 +960,13 @@ def validate_embodied_cfg(cfg):
             cfg.env.train.init_params.control_mode = get_robot_control_mode(
                 cfg.actor.model.policy_setup
             )
-            cfg.env.eval.init_params.control_mode = get_robot_control_mode(
-                cfg.actor.model.policy_setup
-            )
-        elif (
-            SupportedEnvType(cfg.env.train.env_type) == SupportedEnvType.BEHAVIOR
-            or SupportedEnvType(cfg.env.eval.env_type) == SupportedEnvType.BEHAVIOR
+            if enable_eval:
+                cfg.env.eval.init_params.control_mode = get_robot_control_mode(
+                    cfg.actor.model.policy_setup
+                )
+        elif SupportedEnvType(cfg.env.train.env_type) == SupportedEnvType.BEHAVIOR or (
+            enable_eval
+            and SupportedEnvType(cfg.env.eval.env_type) == SupportedEnvType.BEHAVIOR
         ):
             import omnigibson as og
 
@@ -993,7 +984,8 @@ def validate_embodied_cfg(cfg):
             with open_dict(omnigibson_cfg):
                 omnigibson_cfg.robots[0].obs_modalities = ["rgb", "depth", "proprio"]
             cfg.env.train.omnigibson_cfg = omnigibson_cfg
-            cfg.env.eval.omnigibson_cfg = omnigibson_cfg
+            if enable_eval:
+                cfg.env.eval.omnigibson_cfg = omnigibson_cfg
 
     return cfg
 

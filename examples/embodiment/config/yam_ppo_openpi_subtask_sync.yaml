@@ -36,7 +36,6 @@
 
 defaults:
   - env/remote_yam@env.train
-  - env/remote_yam@env.eval
   - model/pi0_5@actor.model
   - training_backend/fsdp@actor.fsdp_config
   - override hydra/job_logging: stdout
@@ -77,7 +76,7 @@ runner:
   max_epochs: 2000
   max_steps: -1
 
-  only_eval: False
+  # Validation is disabled for this YAM training config.
   val_check_interval: -1
   save_interval: 50
 
@@ -93,8 +92,6 @@ algorithm:
   reward_coef: 1.0
 
   rollout_epoch: 1
-  eval_rollout_epoch: 1
-
   reward_type: chunk_level
   logprob_type: chunk_level
   entropy_type: chunk_level
@@ -123,7 +120,6 @@ algorithm:
   sampling_params:
     do_sample: True
     temperature_train: 1.0
-    temperature_eval: 0.6
     top_k: 50
     top_p: 1.0
     repetition_penalty: 1.0
@@ -135,8 +131,11 @@ algorithm:
     min_length: 1
 
 env:
-  # Single timing source for the YAM home-return cycle.
+  # Desktop-side hardware timer for the YAM home-return cycle.
   return_home_minutes: 0.1
+  # Training-side rollout horizon in action chunks. With
+  # actor.model.num_action_chunks=30, two chunks means 60 low-level steps.
+  rollout_horizon_chunks: 2
   # Desktop RobotServer cooldown after returning home.
   server_cooldown_minutes: 1
   group_name: "EnvGroup"
@@ -145,8 +144,8 @@ env:
   # RobotServer automatically, so RemoteEnv still talks over gRPC but no
   # separate desktop machine or reverse SSH tunnel is required.
   #
-  # Keep env.train.remote_server_url / env.eval.remote_server_url pointed at
-  # localhost:<port> when using this mode.
+  # Keep env.train.remote_server_url pointed at localhost:<port> when using
+  # this mode.
   remote_desktop_simulation:
     enabled: False
     dummy: True
@@ -155,8 +154,11 @@ env:
 
   train:
     total_num_envs: 1
-    # Derived automatically from env.return_home_minutes.
-    max_episode_steps: 100
+    # Derived automatically from env.rollout_horizon_chunks.
+    # For YAM this is the training-side rollout horizon, not the true robot
+    # episode timeout. The actual episode length comes from
+    # env/yam_pi05_follower.yaml: episode_duration_s (default: 120s).
+    rollout_horizon_steps: 60
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
 
@@ -167,19 +169,16 @@ env:
 
     # Enable TOPReward dense progress signal.
     top_reward_enabled: True
-    top_reward_max_frames: 16
-    # Anchor TOPReward to the episode-level goal so reward semantics are stable
-    # across subtask changes. Use "current_task" only if stage-conditioned dense
-    # reward is explicitly desired.
-    top_reward_instruction_source: initial_task
+    top_reward_max_frames: 1000
+    # With subtask planning enabled, TOPReward follows the current subtask
+    # description written back into the env.
 
     # Subtask update interval in CHUNK STEPS (0 to disable VLM planning).
     # With num_action_chunks=30 and max_steps_per_rollout_epoch=60,
-    # n_train_chunk_steps=2. The EnvWorker resets the subtask counter at the
-    # start of each rollout epoch (bootstrap_step), so subtask_interval must
-    # be <= n_train_chunk_steps to fire within an episode.
+    # n_train_chunk_steps=2. Rollout epochs can continue the same episode, so
+    # subtask_interval is not limited to one rollout epoch.
     # 1 chunk step = 30 env steps = subtask update at ~50% and ~100% of episode.
-    subtask_interval: 1
+    subtask_interval: 10
     # Adaptive triggering on TOPReward signals. When enabled, the VLM
     # planner can refresh early on plateau / score-threshold triggers while
     # subtask_interval remains a max-interval fallback.
@@ -193,15 +192,6 @@ env:
     # RemoteEnv does not read is_dummy — it proxies calls over gRPC to the server.
     # To test without real hardware, start the robot server with --dummy:
     #   bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml --dummy
-
-  eval:
-    total_num_envs: 1
-    # Derived automatically from env.return_home_minutes.
-    max_episode_steps: 100
-    max_steps_per_rollout_epoch: 60
-    control_rate_hz: 10.0
-    task_description: "fold the towel"
-
 # VLM planner: Qwen3-VL-8B for both subtask planning and TOPReward scoring.
 # reward_scale is read from THIS section by TOPReward (not from reward.reward_scale).
 vlm_planner:
@@ -218,7 +208,7 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
   top_reward_enabled: True
-  top_reward_max_frames: 16
+  top_reward_max_frames: 1000
   reward_scale: 1.0  # multiplied onto each log-prob score before delta computation
 
 rollout:
@@ -227,7 +217,7 @@ rollout:
   recompute_logprobs: False
   unnorm_key: libero_10
   enable_offload: False
-  pipeline_stage_num: 1
+  pipeline_slot_count: 1
 
   collect_transitions: True
   collect_prev_infos: True  # required for adv_type: gae — prev_values must be collected for GAE bootstrap

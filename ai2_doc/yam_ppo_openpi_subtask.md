@@ -16,8 +16,7 @@ Runtime split:
 - `yam_ppo_openpi_subtask_async` uses
   `train_embodied_agent_staged_async.py` and
   `algorithm.loss_type: decoupled_actor_critic`
-- `yam_ppo_openpi_subtask_sync` uses `train_embodied_agent_staged.py` and
-  `algorithm.loss_type: actor_critic`
+- `yam_ppo_openpi_subtask_sync` uses `train_embodied_agent_staged.py`
 
 For the simpler TOPReward-only variant, see
 [yam_ppo_openpi](yam_ppo_openpi.md).
@@ -125,12 +124,14 @@ Reward / planner settings:
 
 ```yaml
 env:
+  return_home_minutes: 0.1
+  rollout_horizon_chunks: 2
   train:
     top_reward_enabled: True
     top_reward_max_frames: 16
     # Anchor TOPReward to the episode-level goal (stable across subtask changes).
     # Use "current_task" only if stage-conditioned dense reward is needed.
-    top_reward_instruction_source: initial_task
+    # With subtask planning enabled, TOPReward follows the current subtask.
     subtask_interval: 1
 
 vlm_planner:
@@ -138,6 +139,9 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
 ```
+
+- `env.return_home_minutes` controls the desktop-side return-home timer.
+- `env.rollout_horizon_chunks` controls the training rollout horizon.
 
 Subtask planning requires a non-empty `task_description`. The planner receives
 the main task and the current observation image — there is no planner memory
