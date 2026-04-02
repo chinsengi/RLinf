@@ -31,7 +31,8 @@
 #   --remote-user USER    SSH user on the Beaker container (default: shiruic)
 #   --return-home-minutes MIN  Override desktop episode duration from CLI
 #   --cooldown-minutes MIN     Override desktop cooldown from CLI
-#   --use-follower-servers  Launch YAM follower servers on 1234/1235 first
+#   --use-follower-servers  Launch YAM follower servers on 1234/1235 first (default)
+#   --no-follower-servers   Skip follower servers (auto-set by --dummy)
 #   --gripper-open VAL    Optional gripper open limit for follower startup
 #   --gripper-close VAL   Optional gripper close limit for follower startup
 #   --allow-plain-ssh     Allow fallback to plain ssh if autossh is unavailable
@@ -42,6 +43,7 @@
 #   --no-tunnel           Start RobotServer only, no SSH tunnel
 #   --dummy               Run without real hardware (zero observations)
 #   --verbose             Show robot state before serving and log every chunk step
+#   --sbs                 Step-by-step: wait for Enter before each chunk (implies --verbose)
 #   --help                Show this help
 
 set -euo pipefail
@@ -54,7 +56,7 @@ REMOTE_HOST="beaker-0"
 REMOTE_USER="shiruic"
 RETURN_HOME_MINUTES_OVERRIDE=""
 COOLDOWN_MINUTES_OVERRIDE=""
-USE_FOLLOWER_SERVERS=false
+USE_FOLLOWER_SERVERS=true
 GRIPPER_OPEN=""
 GRIPPER_CLOSE=""
 ALLOW_PLAIN_SSH=false
@@ -63,6 +65,7 @@ RESET_CAN=false
 NO_TUNNEL=false
 DUMMY=false
 VERBOSE=false
+SBS=false
 FOLLOWER_PID=""
 TUNNEL_PID=""
 TUNNEL_LOG=""
@@ -86,7 +89,8 @@ Options:
   --remote-user USER    SSH user on the Beaker container (default: shiruic)
   --return-home-minutes MIN  Override desktop episode duration from CLI
   --cooldown-minutes MIN     Override desktop cooldown from CLI
-  --use-follower-servers  Launch YAM follower servers on 1234/1235 first
+  --use-follower-servers  Launch YAM follower servers on 1234/1235 first (default)
+  --no-follower-servers   Skip follower servers (auto-set by --dummy)
   --gripper-open VAL    Optional gripper open limit for follower startup
   --gripper-close VAL   Optional gripper close limit for follower startup
   --allow-plain-ssh     Allow fallback to plain ssh if autossh is unavailable
@@ -97,6 +101,7 @@ Options:
   --no-tunnel           Start RobotServer only, without SSH tunnel
   --dummy               Run without real hardware (zero observations)
   --verbose             Show robot state before serving and log every chunk step
+  --sbs                 Step-by-step: wait for Enter before each chunk (implies --verbose)
   --help                Show this help
 
 Examples:
@@ -141,6 +146,7 @@ while [[ $# -gt 0 ]]; do
         --return-home-minutes) RETURN_HOME_MINUTES_OVERRIDE="$2"; shift 2 ;;
         --cooldown-minutes) COOLDOWN_MINUTES_OVERRIDE="$2"; shift 2 ;;
         --use-follower-servers) USE_FOLLOWER_SERVERS=true; shift ;;
+        --no-follower-servers) USE_FOLLOWER_SERVERS=false; shift ;;
         --gripper-open) GRIPPER_OPEN="$2"; shift 2 ;;
         --gripper-close) GRIPPER_CLOSE="$2"; shift 2 ;;
         --allow-plain-ssh) ALLOW_PLAIN_SSH=true; shift ;;
@@ -151,6 +157,7 @@ while [[ $# -gt 0 ]]; do
         --no-tunnel)    NO_TUNNEL=true; shift ;;
         --dummy)        DUMMY=true; shift ;;
         --verbose)      VERBOSE=true; shift ;;
+        --sbs)          SBS=true; shift ;;
         *)              echo "Unknown option: $1"; usage ;;
     esac
 done
@@ -158,6 +165,11 @@ done
 if [ -z "$CONFIG" ]; then
     echo "Error: --config is required"
     exit 1
+fi
+
+# Dummy mode does not need real follower servers.
+if [ "$DUMMY" = true ]; then
+    USE_FOLLOWER_SERVERS=false
 fi
 
 if [ -z "$TRAIN_CONFIG" ]; then
@@ -452,6 +464,7 @@ SERVER_ARGS=(
 )
 [ "$DUMMY" = true ] && SERVER_ARGS+=(--dummy)
 [ "$VERBOSE" = true ] && SERVER_ARGS+=(--verbose)
+[ "$SBS" = true ] && SERVER_ARGS+=(--sbs)
 
 if [ "$VERBOSE" = true ]; then
     READY_FLAG=$(mktemp /tmp/rlinf_robot_ready.XXXX)
