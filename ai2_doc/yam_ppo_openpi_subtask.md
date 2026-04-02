@@ -131,7 +131,7 @@ env:
     top_reward_max_frames: 16
     # Anchor TOPReward to the episode-level goal (stable across subtask changes).
     # Use "current_task" only if stage-conditioned dense reward is needed.
-    top_reward_instruction_source: initial_task
+    # With subtask planning enabled, TOPReward follows the current subtask.
     subtask_interval: 1
 
 vlm_planner:

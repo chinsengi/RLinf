@@ -171,10 +171,9 @@ env:
     # Enable TOPReward dense progress signal.
     top_reward_enabled: True
     top_reward_max_frames: 1000
-    top_reward_instruction_source: initial_task
 
-    # Subtask planning disabled — VLM is used for TOPReward only.
-    # Set subtask_interval > 0 to enable VLM subtask predictions (see subtask config).
+    # Fixed-task TOPReward mode. Set subtask_interval > 0 to enable
+    # VLM subtask predictions and make TOPReward follow the current subtask.
     subtask_interval: 0
 
     # Dummy mode: controlled at the ROBOT SERVER, not here.

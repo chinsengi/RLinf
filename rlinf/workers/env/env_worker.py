@@ -143,17 +143,6 @@ class EnvWorker(Worker):
         self._top_reward_enabled: bool = bool(
             self.cfg.env.train.get("top_reward_enabled", False)
         )
-        self._top_reward_instruction_source: str = str(
-            self.cfg.env.train.get("top_reward_instruction_source", "current_task")
-        ).lower()
-        if self._top_reward_instruction_source not in {
-            "current_task",
-            "initial_task",
-        }:
-            raise ValueError(
-                "env.train.top_reward_instruction_source must be either "
-                "'current_task' or 'initial_task'."
-            )
         self._top_reward_max_frames: int = int(
             self.cfg.env.train.get("top_reward_max_frames", 16)
         )
@@ -313,7 +302,7 @@ class EnvWorker(Worker):
         self._steps_since_subtask_update = 0
 
     def _get_top_reward_instruction(self, slot_id: int) -> str:
-        if self._top_reward_instruction_source == "initial_task":
+        if self._subtask_interval <= 0:
             return self._initial_task_descriptions[slot_id]
         return self._get_current_task_description(slot_id)
 

@@ -160,9 +160,9 @@ env:
     # EnvWorker calls VLMPlannerWorker (on Beaker GPU 2) via Ray RPC.
     top_reward_enabled: True
     top_reward_max_frames: 1000
-    top_reward_instruction_source: initial_task
 
-    # Subtask planning disabled — VLM is used for TOPReward only.
+    # Fixed-task TOPReward mode. Set subtask_interval > 0 to enable
+    # VLM subtask predictions and make TOPReward follow the current subtask.
     subtask_interval: 0
 # VLM planner: Qwen3-VL-8B for TOPReward scoring only (no subtask planning).
 vlm_planner:

@@ -171,10 +171,8 @@ env:
     # Enable TOPReward dense progress signal.
     top_reward_enabled: True
     top_reward_max_frames: 1000
-    # Anchor TOPReward to the episode-level goal so reward semantics are stable
-    # across subtask changes. Use "current_task" only if stage-conditioned dense
-    # reward is explicitly desired.
-    top_reward_instruction_source: initial_task
+    # With subtask planning enabled, TOPReward follows the current subtask
+    # description written back into the env.
 
     # Subtask update interval in CHUNK STEPS (0 to disable VLM planning).
     # With num_action_chunks=30 and max_steps_per_rollout_epoch=60,
