@@ -43,6 +43,10 @@ class MultiStepRolloutWorker(Worker):
         self.device = self.torch_platform.current_device()
 
         self.num_pipeline_slots = int(cfg.rollout.get("pipeline_slot_count", 1))
+        # Legacy aliases retained while rollout code migrates to slot-based naming.
+        self.slot_count = self.num_pipeline_slots
+        self.stage_num = self.num_pipeline_slots
+        self.num_pipeline_stages = self.num_pipeline_slots
         self.enable_offload = self.cfg.rollout.get("enable_offload", False)
 
         self.placement = HybridComponentPlacement(cfg, Cluster())

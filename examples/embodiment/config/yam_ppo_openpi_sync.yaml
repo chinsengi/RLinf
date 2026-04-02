@@ -164,7 +164,7 @@ env:
     action_chunk_smoothing:
       enabled: False
       method: ema
-      alpha: 0.35
+      alpha: 0.75
     # Do not return home when a new rollout epoch starts.
     reset_on_rollout_epoch: False
     # Keep training epoch boundaries purely for bookkeeping. Real robot
@@ -175,7 +175,7 @@ env:
 
     # Enable TOPReward dense progress signal.
     top_reward_enabled: True
-    top_reward_max_frames: 16
+    top_reward_max_frames: 1000
 
     # Fixed-task TOPReward mode. Set subtask_interval > 0 to enable
     # VLM subtask predictions and make TOPReward follow the current subtask.
@@ -200,7 +200,7 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
   top_reward_enabled: True
-  top_reward_max_frames: 16
+  top_reward_max_frames: 1000
   reward_scale: 1.0  # multiplied onto each log-prob score before delta computation
 
 rollout:
