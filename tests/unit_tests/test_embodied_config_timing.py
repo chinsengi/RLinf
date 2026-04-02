@@ -92,7 +92,7 @@ def test_return_home_minutes_only_sets_server_timing(monkeypatch) -> None:
             },
             "rollout": {
                 "collect_prev_infos": True,
-                "pipeline_stage_num": 1,
+                "pipeline_slot_count": 1,
             },
         }
     )
@@ -173,6 +173,8 @@ def test_rollout_horizon_chunks_sets_rollout_steps(monkeypatch) -> None:
     assert validated.env.eval.rollout_horizon_steps == 60
     assert validated.env.eval.max_steps_per_rollout_epoch == 60
     assert validated.env.eval.get("max_episode_steps", None) is None
+    assert validated.rollout.pipeline_slot_count == 1
+    assert validated.rollout.pipeline_stage_num == 1
 
 
 def test_rollout_horizon_minutes_is_rejected(monkeypatch) -> None:

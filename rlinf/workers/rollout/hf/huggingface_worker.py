@@ -42,7 +42,12 @@ class MultiStepRolloutWorker(Worker):
         self.actor_group_name = cfg.actor.group_name
         self.device = self.torch_platform.current_device()
 
-        self.num_pipeline_stages = cfg.rollout.pipeline_stage_num
+        self.num_pipeline_slots = int(
+            cfg.rollout.get(
+                "pipeline_slot_count",
+                1
+            )
+        )
         self.enable_offload = self.cfg.rollout.get("enable_offload", False)
 
         self.placement = HybridComponentPlacement(cfg, Cluster())
@@ -60,13 +65,12 @@ class MultiStepRolloutWorker(Worker):
         )
         self.total_num_train_envs = cfg.env.train.total_num_envs
         self.total_num_eval_envs = cfg.env.eval.total_num_envs
-        self.num_pipeline_stages = cfg.rollout.pipeline_stage_num
 
         self.train_batch_size = (
-            self.total_num_train_envs // self._world_size // self.num_pipeline_stages
+            self.total_num_train_envs // self._world_size // self.num_pipeline_slots
         )
         self.eval_batch_size = (
-            self.total_num_eval_envs // self._world_size // self.num_pipeline_stages
+            self.total_num_eval_envs // self._world_size // self.num_pipeline_slots
         )
         self.enable_cuda_graph = cfg.rollout.get("enable_cuda_graph", False)
         self.enable_eval = cfg.runner.val_check_interval > 0 or cfg.runner.only_eval
@@ -110,20 +114,20 @@ class MultiStepRolloutWorker(Worker):
 
         self.dst_ranks = {
             "train": self._setup_dst_ranks(
-                self.total_num_train_envs // self.num_pipeline_stages
+                self.total_num_train_envs // self.num_pipeline_slots
             ),
         }
         self.src_ranks = {
             "train": self._setup_src_ranks(
-                self.total_num_train_envs // self.num_pipeline_stages
+                self.total_num_train_envs // self.num_pipeline_slots
             ),
         }
         if self.enable_eval:
             self.dst_ranks["eval"] = self._setup_dst_ranks(
-                self.total_num_eval_envs // self.num_pipeline_stages
+                self.total_num_eval_envs // self.num_pipeline_slots
             )
             self.src_ranks["eval"] = self._setup_src_ranks(
-                self.total_num_eval_envs // self.num_pipeline_stages
+                self.total_num_eval_envs // self.num_pipeline_slots
             )
 
         self.log_info(f"Rollout worker initialized with dst_ranks: {self.dst_ranks}")
@@ -169,7 +173,7 @@ class MultiStepRolloutWorker(Worker):
         outputs and sending action chunks.
 
         Args:
-            batch_size: Total env batch size per pipeline stage across all workers.
+            batch_size: Total env batch size per pipeline slot across all workers.
 
         Returns:
             Ordered ``(env_rank, batch_size)`` tuples this rollout worker should
@@ -265,7 +269,7 @@ class MultiStepRolloutWorker(Worker):
     @Worker.timer("generate_one_epoch")
     async def generate_one_epoch(self, input_channel: Channel, output_channel: Channel):
         for _ in range(self.n_train_chunk_steps):
-            for _ in range(self.num_pipeline_stages):
+            for _ in range(self.num_pipeline_slots):
                 env_output = await self.recv_env_output(input_channel)
                 actions, result = self.predict(env_output["obs"])
 
@@ -288,7 +292,7 @@ class MultiStepRolloutWorker(Worker):
                     ),
                 )
                 self.send_rollout_result(output_channel, rollout_result, mode="train")
-        for _ in range(self.num_pipeline_stages):
+        for _ in range(self.num_pipeline_slots):
             env_output = await self.recv_env_output(input_channel)
             actions, result = self.predict(env_output["obs"])
 
@@ -329,7 +333,7 @@ class MultiStepRolloutWorker(Worker):
             disable=(self._rank != 0),
         ):
             for _ in range(self.n_eval_chunk_steps):
-                for _ in range(self.num_pipeline_stages):
+                for _ in range(self.num_pipeline_slots):
                     env_output = await self.recv_env_output(input_channel, mode="eval")
                     actions, _ = self.predict(env_output["obs"], mode="eval")
                     self.send_chunk_actions(output_channel, actions, mode="eval")

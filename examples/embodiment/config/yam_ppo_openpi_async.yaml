@@ -174,7 +174,7 @@ env:
 
     # Enable TOPReward dense progress signal.
     top_reward_enabled: True
-    top_reward_max_frames: 16
+    top_reward_max_frames: 1000
     top_reward_instruction_source: initial_task
 
     # Subtask planning disabled — VLM is used for TOPReward only.
@@ -211,7 +211,7 @@ vlm_planner:
   max_new_tokens_reward: 16
   success_threshold: 0.5
   top_reward_enabled: True
-  top_reward_max_frames: 16
+  top_reward_max_frames: 1000
   reward_scale: 1.0  # multiplied onto each log-prob score before delta computation
 
 rollout:
@@ -220,7 +220,7 @@ rollout:
   recompute_logprobs: False
   unnorm_key: libero_10
   enable_offload: False
-  pipeline_stage_num: 1
+  pipeline_slot_count: 1
 
   collect_transitions: True
   collect_prev_infos: True  # required for adv_type: gae — prev_values must be collected for GAE bootstrap

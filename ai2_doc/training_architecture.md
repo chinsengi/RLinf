@@ -246,7 +246,7 @@ The episode-done and subtask-change resets also clear `_episode_frames`, giving 
 
 ### Subtask planner context
 
-`_maybe_update_subtask()` reads `env.last_obs` to supply the VLM subtask planner with the most recent camera frame, and passes the episode-level main task (`_initial_task_descriptions[stage_id]`). The planner prompt includes the main goal and the current image — there is no planner memory buffer.
+`_maybe_update_subtask()` reads `env.last_obs` to supply the VLM subtask planner with the most recent camera frame, and passes the episode-level main task (`_initial_task_descriptions[slot_id]`). The planner prompt includes the main goal and the current image — there is no planner memory buffer.
 
 `RemoteEnv` maintains `self.last_obs` and updates it on every `reset()` and `chunk_step()` call. If `last_obs` is `None` (before the first step) or the env wrapper doesn't expose the attribute, `_maybe_update_subtask()` sends an empty image list — the planner still produces a subtask but without visual context.
 

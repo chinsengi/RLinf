@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""VLM Planner Worker for stage-aware embodied RL.
+"""VLM Planner Worker for slot-indexed embodied RL.
 
 This Ray actor runs on the Beaker GPU node and exposes three methods:
 
@@ -83,7 +83,7 @@ Example YAML::
       max_new_tokens_reward: 16
       success_threshold: 0.5
       top_reward_enabled: True
-      top_reward_max_frames: 16
+      top_reward_max_frames: 1000
 """
 
 import os

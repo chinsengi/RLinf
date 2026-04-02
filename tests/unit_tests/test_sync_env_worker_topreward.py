@@ -140,6 +140,7 @@ def _make_top_reward_worker(scores, *, instruction_source="initial_task"):
     worker._top_reward_has_prev_score = False
     worker._recent_top_deltas = deque(maxlen=3)
     worker._vlm_planner = _TopRewardPlannerStub(scores)
+    worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
     worker.log_info = lambda *_args, **_kwargs: None
     return worker
 
@@ -161,7 +162,7 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     worker._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
     worker.log_info = lambda *_args, **_kwargs: None
 
-    # Should not raise TypeError (the old bug passed stage_id to a no-arg method).
+    # Should not raise TypeError (the old bug passed slot_id to a no-arg method).
     result = worker._apply_subtask_update(0, "grasp the left corner")
     assert result is True
     assert inner_env.task_description == "grasp the left corner"
@@ -172,8 +173,8 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     assert list(worker._recent_top_deltas) == []
 
 
-def test_apply_subtask_update_no_reset_for_initial_task():
-    """With initial_task source, subtask update does NOT reset reward state."""
+def test_apply_subtask_update_resets_for_initial_task():
+    """Subtask updates reset reward state even with initial_task source."""
     inner_env = SimpleNamespace(task_description="fold the towel")
     worker = EnvWorker.__new__(EnvWorker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
@@ -182,14 +183,17 @@ def test_apply_subtask_update_no_reset_for_initial_task():
     worker._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
     worker._prev_top_score = 1.5
     worker._top_reward_has_prev_score = True
+    worker._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
     worker.log_info = lambda *_args, **_kwargs: None
 
     result = worker._apply_subtask_update(0, "grasp the left corner")
     assert result is True
-    # Reward state should NOT be reset.
-    assert len(worker._episode_frames) == 1
-    assert worker._prev_top_score == 1.5
-    assert worker._top_reward_has_prev_score is True
+    assert inner_env.task_description == "grasp the left corner"
+    # Reward state should be reset.
+    assert worker._episode_frames == []
+    assert worker._prev_top_score == 0.0
+    assert worker._top_reward_has_prev_score is False
+    assert list(worker._recent_top_deltas) == []
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +331,7 @@ def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
     worker._prev_top_score = 1.25
     worker._top_reward_has_prev_score = True
     worker._recent_top_deltas = deque([0.5], maxlen=3)
-    worker.stage_num = 1
+    worker.slot_count = 1
     worker.train_num_envs_per_stage = 1
     worker.last_obs_list = [{"states": "previous"}]
     worker.last_intervened_info_list = [(torch.tensor([1]), torch.tensor([0]))]
@@ -374,7 +378,7 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
     worker._top_reward_has_prev_score = True
     worker._recent_top_deltas = deque([0.5], maxlen=3)
     worker._episode_frames = [np.zeros((8, 8, 3), dtype=np.uint8)]
-    worker.stage_num = 1
+    worker.slot_count = 1
     worker.train_num_envs_per_stage = 1
     worker.last_obs_list = []
     worker.last_intervened_info_list = []

@@ -72,7 +72,7 @@ return_home_on_close: True
 
 # TOPReward dense reward configuration.
 top_reward_enabled: False
-top_reward_max_frames: 16
+top_reward_max_frames: 1000
 
 robot_cfgs:
   left: ["examples/embodiment/config/env/robot_clients/yam_follower_left.yaml"]
