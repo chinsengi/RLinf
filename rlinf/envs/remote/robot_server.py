@@ -43,6 +43,30 @@ logger = get_logger()
 _DEFAULT_PORT = 50051
 _DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16 MB
 _JPEG_QUALITY = 90
+_BIND_ADDRESSES = ("[::]:{port}", "0.0.0.0:{port}")
+
+
+def _bind_server(server: grpc.Server, port: int) -> str:
+    """Bind the gRPC server to the first available listen address."""
+    errors: list[str] = []
+    for address_template in _BIND_ADDRESSES:
+        address = address_template.format(port=port)
+        try:
+            bound_port = server.add_insecure_port(address)
+        except RuntimeError as exc:
+            errors.append(f"{address} ({exc})")
+            continue
+
+        if bound_port:
+            return address
+
+        errors.append(f"{address} (returned port 0)")
+
+    joined_errors = "; ".join(errors)
+    raise RuntimeError(
+        "Failed to bind RobotServer to any listen address for "
+        f"port {port}. Tried: {joined_errors}"
+    )
 
 
 def _compress_image(img: np.ndarray, quality: int = _JPEG_QUALITY) -> bytes:
@@ -645,9 +669,9 @@ def serve(
     )
     robot_env_pb2_grpc.add_RobotEnvServiceServicer_to_server(servicer, server)
 
-    server.add_insecure_port(f"[::]:{port}")
+    bound_address = _bind_server(server, port)
     server.start()
-    logger.info(f"[RobotServer] Serving on port {port}")
+    logger.info(f"[RobotServer] Serving on {bound_address}")
 
     # ---- Watchdog: detect client disconnect and trigger safe recovery ----
     # Only activates after the first ChunkStep has been processed so that
