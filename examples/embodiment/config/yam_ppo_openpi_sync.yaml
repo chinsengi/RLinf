@@ -73,7 +73,7 @@ runner:
 
   # Validation is disabled for this YAM training config.
   val_check_interval: -1
-  save_interval: 50
+  save_interval: -1
 
   resume_dir: null
   ckpt_path: null
@@ -161,10 +161,10 @@ env:
     control_rate_hz: 10.0
     # Optional chunk post-processing for debugging shaky motions. This smooths
     # each predicted action chunk before it is executed by the env worker.
-    # action_chunk_smoothing:
-    #   enabled: True
-    #   method: ema
-    #   alpha: 0.35
+    action_chunk_smoothing:
+      enabled: True
+      method: ema
+      alpha: 0.35
     # Do not return home when a new rollout epoch starts.
     reset_on_rollout_epoch: False
     # Keep training epoch boundaries purely for bookkeeping. Real robot
@@ -246,7 +246,7 @@ actor:
       config_name: "pi05_yam_follower"
       num_images_in_input: 3
       discrete_state_input: True
-      noise_method: "flow_sde"
+      noise_method: "flow_cps"
       action_horizon: 30
       action_env_dim: 14
       noise_params: [0.16, 0.12, 200]
