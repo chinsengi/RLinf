@@ -128,7 +128,7 @@ algorithm:
 env:
   # Desktop-side hardware timer: how often the robot should return to startup
   # home and rest. This does NOT define the training rollout horizon.
-  return_home_minutes: 2
+  return_home_minutes: 20
   # Training-side rollout horizon in action chunks. With
   # actor.model.num_action_chunks=30, two chunks means 60 low-level steps.
   rollout_horizon_chunks: 2
