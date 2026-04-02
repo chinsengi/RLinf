@@ -166,13 +166,15 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         compress: bool = True,
         jpeg_quality: int = _JPEG_QUALITY,
         verbose: bool = False,
+        step_by_step: bool = False,
         request_shutdown=None,
     ):
         self._env = env
         self._compress = compress
         self._jpeg_quality = jpeg_quality
-        self._verbose = verbose
-        self._first_chunk_approved = not verbose
+        self._verbose = verbose or step_by_step
+        self._step_by_step = step_by_step
+        self._first_chunk_approved = not self._verbose
         self._request_shutdown = request_shutdown
 
         # Track last client RPC time for disconnect detection.
@@ -412,6 +414,14 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         if not self._first_chunk_approved:
             self._wait_for_first_chunk_approval(actions)
 
+        if self._step_by_step:
+            print("[SBS] Press Enter to execute this chunk...", flush=True)
+            try:
+                with open("/dev/tty", "r") as tty:
+                    tty.readline()
+            except OSError:
+                input()
+
         with self._env_lock:
             (
                 obs_list,
@@ -573,6 +583,7 @@ def serve(
     max_message_size: int = _DEFAULT_MAX_MESSAGE_SIZE,
     dummy: bool = False,
     verbose: bool = False,
+    step_by_step: bool = False,
 ):
     """Start the gRPC server with a YAMEnv instance.
 
@@ -629,6 +640,7 @@ def serve(
         compress=compress,
         jpeg_quality=jpeg_quality,
         verbose=verbose,
+        step_by_step=step_by_step,
         request_shutdown=_request_shutdown,
     )
     robot_env_pb2_grpc.add_RobotEnvServiceServicer_to_server(servicer, server)
@@ -781,6 +793,11 @@ def main():
         action="store_true",
         help="Show robot state before serving and log every chunk step",
     )
+    parser.add_argument(
+        "--sbs",
+        action="store_true",
+        help="Step-by-step mode: wait for Enter before executing each chunk",
+    )
     args = parser.parse_args()
     serve(
         args.config_path,
@@ -788,6 +805,7 @@ def main():
         args.max_message_size,
         dummy=args.dummy,
         verbose=args.verbose,
+        step_by_step=args.sbs,
     )
 
 
