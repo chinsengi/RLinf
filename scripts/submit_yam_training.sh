@@ -413,7 +413,7 @@ else
     echo "  1. Check logs for '=== Tailscale IP ===' to get the head node IP"
     echo "  2. Start robot server: bash scripts/start_robot_server.sh \\"
     echo "       --config examples/embodiment/config/env/yam_pi05_follower.yaml \\"
-    echo "       --use-follower-servers --remote-host <tailscale-ip> [--dummy]"
+    echo "       --remote-host <tailscale-ip> [--dummy]"
     echo ""
 
     if [ "$DRY_RUN" = "true" ]; then

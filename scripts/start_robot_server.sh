@@ -38,6 +38,8 @@
 #   --allow-plain-ssh     Allow fallback to plain ssh if autossh is unavailable
 #   --kill-video-holders  Kill stale processes holding /dev/video* before startup
 #   --no-kill-video-holders  Do not kill stale /dev/video* holders before startup
+#   --kill-port-holders   Kill stale processes already listening on --port before startup
+#   --no-kill-port-holders  Do not kill stale --port listeners before startup
 #   --reset-can           Reset CAN interfaces before startup
 #   --no-reset-can        Do not reset CAN interfaces before startup (default)
 #   --no-tunnel           Start RobotServer only, no SSH tunnel
@@ -61,6 +63,7 @@ GRIPPER_OPEN=""
 GRIPPER_CLOSE=""
 ALLOW_PLAIN_SSH=false
 KILL_VIDEO_HOLDERS=true
+KILL_PORT_HOLDERS=true
 RESET_CAN=false
 NO_TUNNEL=false
 DUMMY=false
@@ -96,6 +99,8 @@ Options:
   --allow-plain-ssh     Allow fallback to plain ssh if autossh is unavailable
   --kill-video-holders  Kill stale processes holding /dev/video* before startup (default: on)
   --no-kill-video-holders  Do not kill stale /dev/video* holders before startup
+  --kill-port-holders   Kill stale processes already listening on --port before startup (default: on)
+  --no-kill-port-holders  Do not kill stale --port listeners before startup
   --reset-can           Reset CAN interfaces before startup
   --no-reset-can        Do not reset CAN interfaces before startup (default)
   --no-tunnel           Start RobotServer only, without SSH tunnel
@@ -108,14 +113,12 @@ Examples:
   # Persistent server + auto-reconnecting tunnel (default beaker-0 hostname):
   bash scripts/start_robot_server.sh \
       --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-      --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
-      --use-follower-servers
+      --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml
 
   # Same timing-sharing flow with the sync staged runtime:
   bash scripts/start_robot_server.sh \
       --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-      --train-config examples/embodiment/config/yam_ppo_openpi_sync.yaml \
-      --use-follower-servers
+      --train-config examples/embodiment/config/yam_ppo_openpi_sync.yaml
 
   # Local only (no tunnel, for testing):
   bash scripts/start_robot_server.sh --config examples/embodiment/config/env/yam_pi05_follower.yaml \
@@ -124,12 +127,11 @@ Examples:
   # YAM follower servers + RobotServer:
   bash scripts/start_robot_server.sh \
       --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-      --use-follower-servers --no-tunnel
+      --no-tunnel
 
   # Explicit IP instead of hostname (e.g. for one-off debugging):
   bash scripts/start_robot_server.sh \
       --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-      --use-follower-servers \
       --remote-host 100.87.5.72
 EOF
     exit 0
@@ -152,6 +154,8 @@ while [[ $# -gt 0 ]]; do
         --allow-plain-ssh) ALLOW_PLAIN_SSH=true; shift ;;
         --kill-video-holders) KILL_VIDEO_HOLDERS=true; shift ;;
         --no-kill-video-holders) KILL_VIDEO_HOLDERS=false; shift ;;
+        --kill-port-holders) KILL_PORT_HOLDERS=true; shift ;;
+        --no-kill-port-holders) KILL_PORT_HOLDERS=false; shift ;;
         --reset-can)    RESET_CAN=true; shift ;;
         --no-reset-can) RESET_CAN=false; shift ;;
         --no-tunnel)    NO_TUNNEL=true; shift ;;
@@ -274,6 +278,53 @@ kill_video_device_holders() {
         return 0
     fi
     echo "Killing video device holder(s): $pids"
+    kill $pids 2>/dev/null || true
+    sleep 2
+    kill -9 $pids 2>/dev/null || true
+}
+
+port_holder_pids() {
+    local port="$1"
+
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | sort -u | tr '\n' ' '
+        return 0
+    fi
+
+    if command -v fuser >/dev/null 2>&1; then
+        fuser -n tcp "${port}" 2>/dev/null | tr ' ' '\n' | awk 'NF' | sort -u | tr '\n' ' '
+        return 0
+    fi
+}
+
+report_port_holders() {
+    local port="$1"
+    local holders
+
+    if command -v lsof >/dev/null 2>&1; then
+        holders="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true)"
+    elif command -v fuser >/dev/null 2>&1; then
+        holders="$(fuser -v -n tcp "${port}" 2>/dev/null || true)"
+    else
+        return 0
+    fi
+
+    if [ -n "$holders" ]; then
+        echo "Port ${port} listener(s) detected:"
+        echo "$holders"
+        echo ""
+    fi
+}
+
+kill_port_holders() {
+    local port="$1"
+    local pids
+    pids="$(port_holder_pids "$port")"
+    if [ -z "$pids" ]; then
+        return 0
+    fi
+
+    echo "Killing process(es) listening on port ${port}: $pids"
     kill $pids 2>/dev/null || true
     sleep 2
     kill -9 $pids 2>/dev/null || true
@@ -408,6 +459,16 @@ if [ "$KILL_VIDEO_HOLDERS" = true ]; then
 elif [ -n "$(video_device_holder_pids)" ]; then
     report_video_device_holders
     echo "TIP: rerun with --kill-video-holders to terminate stale /dev/video* holders."
+    echo ""
+fi
+
+if [ "$KILL_PORT_HOLDERS" = true ]; then
+    echo "=== Releasing listener(s) on localhost:${PORT} ==="
+    kill_port_holders "$PORT"
+    echo ""
+elif [ -n "$(port_holder_pids "$PORT")" ]; then
+    report_port_holders "$PORT"
+    echo "TIP: rerun with --kill-port-holders to terminate stale port listeners."
     echo ""
 fi
 

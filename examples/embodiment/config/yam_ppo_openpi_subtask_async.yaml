@@ -21,7 +21,7 @@
 #   RobotServer wrapping YAMEnv, exposed via reverse SSH tunnel on :50051.
 #   Start with: bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml \
 #                   --train-config .../yam_ppo_openpi_subtask_async.yaml \
-#                   --use-follower-servers --remote-host <beaker-tailscale-ip>
+#                   --remote-host <beaker-tailscale-ip>
 #
 # Submit with:
 #   bash scripts/submit_yam_training.sh --config yam_ppo_openpi_subtask_async \
