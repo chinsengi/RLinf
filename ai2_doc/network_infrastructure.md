@@ -410,13 +410,11 @@ bash scripts/start_robot_server.sh \
 
 # Persistent server + auto-reconnecting tunnel (default beaker-0 hostname)
 bash scripts/start_robot_server.sh \
-    --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --use-follower-servers
+    --config examples/embodiment/config/env/yam_pi05_follower.yaml
 
 # With explicit Tailscale IP instead of hostname (e.g. one-off debugging)
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --use-follower-servers \
     --remote-host 100.a.b.c
 ```
 

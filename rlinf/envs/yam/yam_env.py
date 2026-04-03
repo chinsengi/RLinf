@@ -120,6 +120,7 @@ class YAMEnv(gym.Env):
             cfg.get("skip_home_on_initial_reset", False)
         )
         self._has_reset_once = False
+        self._restore_pd_on_next_reset = False
         self._wrist_camera_patterns = self._normalize_camera_patterns(
             cfg.get("wrist_cameras", None)
         )
@@ -332,6 +333,14 @@ class YAMEnv(gym.Env):
                 self._skip_home_on_initial_reset and not self._has_reset_once
             )
             if should_skip_home:
+                if self._restore_pd_on_next_reset:
+                    # After a remote safe-recovery we intentionally leave the
+                    # arms in zero-torque mode while waiting for the next
+                    # client. Re-arm the follower controller before the first
+                    # post-reconnect action so the new client can move the
+                    # robot immediately.
+                    self._restore_robot_pd_gains()
+                    self._restore_pd_on_next_reset = False
                 # On the very first reset we only want to adopt the robot's
                 # current pose as the startup home.  Do NOT send any motor
                 # commands here — the follower servers start in zero-torque
@@ -346,6 +355,7 @@ class YAMEnv(gym.Env):
                     "startup home (no motor commands sent)."
                 )
             else:
+                self._restore_pd_on_next_reset = False
                 self._move_robots_to_reset_pose()
                 raw_obs = self._robot_env.reset()
             self._has_reset_once = True
@@ -903,6 +913,7 @@ class YAMEnv(gym.Env):
         home (same as the very first reset after server boot).
         """
         self._has_reset_once = False
+        self._restore_pd_on_next_reset = True
         self._num_steps = 0
         self._elapsed_steps[:] = 0
         self._episode_start_time = None
@@ -912,6 +923,7 @@ class YAMEnv(gym.Env):
 
     def prepare_for_next_episode(self) -> None:
         """Reset episode bookkeeping without changing the captured startup home."""
+        self._restore_pd_on_next_reset = False
         self._num_steps = 0
         self._elapsed_steps[:] = 0
         self._episode_start_time = None

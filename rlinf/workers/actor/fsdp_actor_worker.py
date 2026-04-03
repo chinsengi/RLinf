@@ -1014,12 +1014,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self._component_placement = HybridComponentPlacement(cfg, Cluster())
 
         # slot_count: rollout/env pipeline slot count (legacy alias: stage_num).
-        self.slot_count = int(
-            cfg.rollout.get(
-                "pipeline_slot_count",
-                1
-            )
-        )
+        self.slot_count = int(cfg.rollout.get("pipeline_slot_count", 1))
         self.stage_num = self.slot_count
 
         self.enable_offload = self.cfg.actor.get("enable_offload", False)

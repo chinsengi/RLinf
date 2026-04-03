@@ -18,7 +18,7 @@
 #   RobotServer wrapping YAMEnv, exposed via reverse SSH tunnel on :50051.
 #   Start with: bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml \
 #                   --train-config .../yam_ppo_openpi_sync.yaml \
-#                   --use-follower-servers --remote-host <beaker-tailscale-ip>
+#                   --remote-host <beaker-tailscale-ip>
 #
 # Submit with:
 #   bash scripts/submit_yam_training.sh --config yam_ppo_openpi_sync \
@@ -128,7 +128,7 @@ algorithm:
 env:
   # Desktop-side hardware timer: how often the robot should return to startup
   # home and rest. This does NOT define the training rollout horizon.
-  return_home_minutes: 2
+  return_home_minutes: 20
   # Training-side rollout horizon in action chunks. With
   # actor.model.num_action_chunks=30, two chunks means 60 low-level steps.
   rollout_horizon_chunks: 2
@@ -162,9 +162,9 @@ env:
     # Optional chunk post-processing for debugging shaky motions. This smooths
     # each predicted action chunk before it is executed by the env worker.
     action_chunk_smoothing:
-      enabled: True
+      enabled: False
       method: ema
-      alpha: 0.35
+      alpha: 0.75
     # Do not return home when a new rollout epoch starts.
     reset_on_rollout_epoch: False
     # Keep training epoch boundaries purely for bookkeeping. Real robot
@@ -255,7 +255,7 @@ actor:
       config_name: "pi05_yam_follower"
       num_images_in_input: 3
       discrete_state_input: True
-      noise_method: "flow_cps"
+      noise_method: "flow_sde"
       action_horizon: 30
       action_env_dim: 14
       noise_params: [0.16, 0.12, 200]

@@ -30,7 +30,7 @@ class AsyncMultiStepRolloutWorker(MultiStepRolloutWorker):
         self.num_envs_per_stage = (
             self.cfg.env.train.total_num_envs
             // self._world_size
-            // self.num_pipeline_stages
+            // self.num_pipeline_slots
         )
         assert not self.enable_offload, (
             "Offload not supported in AsyncMultiStepRolloutWorker"
