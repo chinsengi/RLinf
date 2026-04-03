@@ -31,7 +31,7 @@ classifiers = [
 dependencies = [
     # Core System
     # These are the dependencies of the core scheduler
-    "ray[default]>=2.47.0",
+    "ray[default]>=2.54.1",
     "torch>=2.8.0,<=2.9.0",
     "hydra-core",
     "numpy>=1.22.4,<2.0.0",

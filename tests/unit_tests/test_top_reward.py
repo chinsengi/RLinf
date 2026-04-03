@@ -14,6 +14,7 @@
 
 import sys
 import types
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -155,3 +156,27 @@ def test_top_reward_trims_chat_eos_like_reference(monkeypatch):
     reward.compute_score(frames, "pick and place")
 
     assert "<|im_end|>" not in processor.calls[0]
+
+
+def test_top_reward_logs_full_prompt_when_logger_is_provided(monkeypatch):
+    fake_qwen_utils = types.SimpleNamespace(
+        process_vision_info=lambda messages: (None, ["dummy-video"])
+    )
+    monkeypatch.setitem(sys.modules, "qwen_vl_utils", fake_qwen_utils)
+
+    processor = _FakeProcessor()
+    debug_calls = []
+    reward = TOPReward(
+        {"reward_scale": 1.0, "top_reward_max_frames": 16},
+        model=_FakeModel(),
+        processor=processor,
+        logger=SimpleNamespace(debug=lambda msg, *args: debug_calls.append(msg % args)),
+    )
+
+    frames = [torch.zeros((8, 8, 3), dtype=torch.uint8).numpy() for _ in range(4)]
+    reward.compute_score(frames, "pick up the blue one")
+
+    assert debug_calls == [
+        "[TOPReward] Full prompt: <|im_start|>user\nPROMPTpick up the blue one "
+        "Decide whether the above statement is True or not. The answer is: True"
+    ]

@@ -297,8 +297,12 @@ python -m sglang.launch_server \
     --model-path ~/Model/qwen-vl-instruct \
     --host 127.0.0.1 \
     --port 30000 \
+    --weight-loader-disable-mmap \
     --skip-tokenizer-init
 ```
+
+On our setup, `--weight-loader-disable-mmap` is important to avoid abnormally
+slow model loading from local / network snapshots.
 
 `VLMPlannerWorker` then used:
 

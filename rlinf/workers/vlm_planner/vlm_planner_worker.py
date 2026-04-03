@@ -288,7 +288,10 @@ class VLMPlannerWorker:
                 from rlinf.algorithms.rewards.top_reward import TOPReward
 
                 self._top_reward = TOPReward(
-                    planner_cfg, model=self._model, processor=self._processor
+                    planner_cfg,
+                    model=self._model,
+                    processor=self._processor,
+                    logger=self._logger,
                 )
             self._logger.info("[VLMPlannerWorker] TOPReward enabled.")
 
@@ -409,6 +412,12 @@ class VLMPlannerWorker:
         Raises:
             ValueError: If *main_task* is empty.
         """
+        print(
+            "!!!!![Subtask]"
+            f" planner_request main_task={main_task!r}"
+            f" num_images={len(images)}",
+            flush=True,
+        )
         if not main_task or not main_task.strip():
             raise ValueError(
                 "get_next_subtask() requires a non-empty main_task. "
@@ -425,12 +434,20 @@ class VLMPlannerWorker:
         try:
             subtask = self._generate(messages, self._max_new_tokens_subtask)
         except Exception as exc:
+            print(
+                f"!!!!![Subtask] planner_error main_task={main_task!r} error={exc!r}",
+                flush=True,
+            )
             self._logger.warning(
                 f"[VLMPlannerWorker] get_next_subtask failed: {exc}. "
                 "Returning empty subtask."
             )
             subtask = ""
 
+        print(
+            f"!!!!![Subtask] planner_generated subtask={subtask!r}",
+            flush=True,
+        )
         self._logger.info(f"[VLMPlannerWorker] Next subtask: '{subtask}'")
         return subtask
 
@@ -792,11 +809,16 @@ class VLMPlannerWorker:
             f"{instruction} Decide whether the above statement is True or not. "
             f"The answer is: {self._top_reward_label}"
         )
+        full_prompt = f"{prompt_chat}{instruction_suffix}"
+        if hasattr(self, "_logger") and self._logger is not None:
+            self._logger.debug(
+                "[VLMPlannerWorker] TOPReward full prompt: %s", full_prompt
+            )
         image_inputs, video_inputs, video_kwargs = _process_vision_info_compat(
             process_vision_info, user_messages
         )
         processor_inputs = self._processor(
-            text=[f"{prompt_chat}{instruction_suffix}"],
+            text=[full_prompt],
             images=image_inputs,
             videos=video_inputs,
             padding=True,

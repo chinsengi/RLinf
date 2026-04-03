@@ -80,10 +80,13 @@ python -m sglang.launch_server \
     --model-path ~/Model/qwen-vl-instruct \
     --host 127.0.0.1 \
     --port 30000 \
+    --weight-loader-disable-mmap \
     --skip-tokenizer-init
 ```
 
 Use `xslingcn/sglang` branch `sglang-http` for this path.
+On our setup, `--weight-loader-disable-mmap` is important to avoid abnormally
+slow model loading from local / network snapshots.
 
 Matching config override:
 
@@ -125,6 +128,7 @@ Then start the desktop-side robot server:
 ```bash
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+    --use-follower-servers \
     --remote-host <tailscale-ip>
 ```
 

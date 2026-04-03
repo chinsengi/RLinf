@@ -232,6 +232,47 @@ def test_compute_top_reward_sglang_uses_input_side_logprob_request():
     assert score == pytest.approx(-1.5)
 
 
+def test_prepare_top_reward_request_uses_supplied_instruction(monkeypatch):
+    planner = VLMPlannerWorker.__new__(VLMPlannerWorker)
+    planner._processor = _FakeProcessor()
+    planner._top_reward_label = "True"
+    debug_calls = []
+    planner._logger = SimpleNamespace(
+        debug=lambda msg, *args: debug_calls.append(msg % args)
+    )
+
+    def fake_process_vision_info(messages, **_kwargs):
+        assert messages[0]["content"][1]["text"].startswith(
+            "The above video shows a robot manipulation trajectory"
+        )
+        return (None, ["processed-video"], {"fps": 2.0})
+
+    monkeypatch.setitem(
+        sys.modules,
+        "qwen_vl_utils",
+        SimpleNamespace(process_vision_info=fake_process_vision_info),
+    )
+
+    prepared, expected_token_id = planner._prepare_top_reward_request(
+        [np.zeros((8, 8, 3), dtype=np.uint8)],
+        "pick up the blue one",
+        fps=2.0,
+    )
+
+    assert planner._processor.processor_calls[0]["text"] == [
+        "rendered promptpick up the blue one Decide whether the above statement "
+        "is True or not. The answer is: True"
+    ]
+    assert planner._processor.processor_calls[0]["videos"] == ["processed-video"]
+    assert prepared.input_ids == [101, 102, 103]
+    assert expected_token_id == 103
+    assert debug_calls == [
+        "[VLMPlannerWorker] TOPReward full prompt: rendered promptpick up the "
+        "blue one Decide whether the above statement is True or not. "
+        "The answer is: True"
+    ]
+
+
 def test_extract_top_reward_logprob_requires_input_side_data():
     planner = VLMPlannerWorker.__new__(VLMPlannerWorker)
 

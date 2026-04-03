@@ -22,6 +22,7 @@ Covers:
 - Adaptive subtask triggering (plateau, score threshold, cooldown, fallback)
 """
 
+import asyncio
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -263,6 +264,42 @@ def test_top_reward_uses_current_task_when_subtask_planning_enabled():
     assert worker._get_top_reward_instruction(0) == "grasp the corner"
 
 
+def test_compute_top_reward_sends_initial_task_when_subtask_planning_disabled(
+    monkeypatch,
+):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_top_reward_worker([1.0], subtask_interval=0)
+    worker.env_list[0].unwrapped.task_description = "pick up the blue one"
+    env_output = SimpleNamespace(
+        obs={"main_images": torch.zeros((1, 8, 8, 3), dtype=torch.uint8)},
+        rewards=torch.zeros((1, 1), dtype=torch.float32),
+    )
+
+    worker._compute_top_reward(env_output, 0)
+
+    assert worker._vlm_planner.calls[0][1] == "fold the towel"
+
+
+def test_compute_top_reward_sends_current_subtask_when_subtask_planning_enabled(
+    monkeypatch,
+):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_top_reward_worker([1.0], subtask_interval=10)
+    worker.env_list[0].unwrapped.task_description = "pick up the blue one"
+    env_output = SimpleNamespace(
+        obs={"main_images": torch.zeros((1, 8, 8, 3), dtype=torch.uint8)},
+        rewards=torch.zeros((1, 1), dtype=torch.float32),
+    )
+
+    worker._compute_top_reward(env_output, 0)
+
+    assert worker._vlm_planner.calls[0][1] == "pick up the blue one"
+
+
 def test_compute_top_reward_seeds_episode_with_zero_delta(monkeypatch):
     import ray
 
@@ -370,6 +407,7 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
             "actor": {"model": {"num_action_chunks": 1}},
         }
     )
+    worker._initial_task_descriptions = ["fold the towel"]
     worker._top_reward_enabled = True
     worker._prev_top_score = 1.25
     worker._top_reward_has_prev_score = True
@@ -395,7 +433,8 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
     env_outputs = worker.bootstrap_step()
 
     assert reset_calls == [True]
-    assert env_outputs[0].obs == {"states": "reset"}
+    assert env_outputs[0].obs["states"] == "reset"
+    assert env_outputs[0].obs["task_descriptions"] == ["fold the towel"]
     assert worker._prev_top_score == 0.0
     assert worker._top_reward_has_prev_score is False
     assert worker._episode_frames == []
@@ -610,3 +649,240 @@ def test_maybe_update_subtask_fixed_mode_preserves_old_interval_behavior(monkeyp
 
     assert len(worker._vlm_planner.calls) == 1
     assert worker._steps_since_subtask_update == 0
+
+
+def test_initial_subtask_planning_replaces_parent_task_before_first_send(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = EnvWorker.__new__(EnvWorker)
+    inner_env = SimpleNamespace(task_description="Pick up the stuffed animals.")
+    env = SimpleNamespace(
+        unwrapped=inner_env,
+        last_obs={
+            "main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8),
+            "task_descriptions": ["Pick up the stuffed animals."],
+        },
+    )
+    worker.env_list = [env]
+    worker._initial_task_descriptions = ["Pick up the stuffed animals."]
+    worker._subtask_interval = 10
+    worker._subtask_adaptive = True
+    worker._steps_since_subtask_update = 0
+    worker._vlm_planner = _PlannerStub(result="pick up the blue one")
+    worker._top_reward_enabled = False
+    worker._reset_subtask_update_state = lambda: setattr(
+        worker, "_steps_since_subtask_update", 0
+    )
+    worker.log_info = lambda *_args, **_kwargs: None
+
+    env_output = SimpleNamespace(
+        obs={
+            "main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8),
+            "task_descriptions": ["Pick up the stuffed animals."],
+        },
+        final_obs=None,
+    )
+
+    updated = worker._maybe_plan_initial_subtask(0, env_output)
+
+    assert len(worker._vlm_planner.calls) == 1
+    assert worker._vlm_planner.calls[0][1] == "Pick up the stuffed animals."
+    assert inner_env.task_description == "pick up the blue one"
+    assert updated.obs["task_descriptions"] == ["pick up the blue one"]
+
+
+def test_initial_subtask_planning_skips_after_progress_has_started(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = EnvWorker.__new__(EnvWorker)
+    inner_env = SimpleNamespace(task_description="Pick up the stuffed animals.")
+    env = SimpleNamespace(unwrapped=inner_env, last_obs={})
+    worker.env_list = [env]
+    worker._initial_task_descriptions = ["Pick up the stuffed animals."]
+    worker._subtask_interval = 10
+    worker._subtask_adaptive = True
+    worker._steps_since_subtask_update = 3
+    worker._vlm_planner = _PlannerStub(result="pick up the blue one")
+    worker._top_reward_enabled = False
+    worker.log_info = lambda *_args, **_kwargs: None
+
+    env_output = SimpleNamespace(
+        obs={"task_descriptions": ["Pick up the stuffed animals."]},
+        final_obs=None,
+    )
+
+    updated = worker._maybe_plan_initial_subtask(0, env_output)
+
+    assert len(worker._vlm_planner.calls) == 0
+    assert inner_env.task_description == "Pick up the stuffed animals."
+    assert updated.obs["task_descriptions"] == ["Pick up the stuffed animals."]
+
+
+def test_request_subtask_async_offloads_ray_get(monkeypatch):
+    import ray
+
+    ref = object()
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.env_list = [
+        SimpleNamespace(
+            unwrapped=SimpleNamespace(task_description="Pick up the stuffed animals.")
+        )
+    ]
+    worker._initial_task_descriptions = ["Pick up the stuffed animals."]
+    worker._vlm_planner = _PlannerStub(result=ref)
+
+    captured = []
+
+    async def fake_to_thread(func, arg):
+        captured.append((func, arg))
+        return "pick up the blue one"
+
+    monkeypatch.setattr(
+        "rlinf.workers.env.env_worker.asyncio.to_thread",
+        fake_to_thread,
+    )
+
+    new_subtask = asyncio.run(
+        worker._request_subtask_async(
+            0,
+            {"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+            reason="initial",
+        )
+    )
+
+    assert new_subtask == "pick up the blue one"
+    assert len(captured) == 1
+    assert captured[0][0] is ray.get
+    assert captured[0][1] is ref
+
+
+def test_compute_top_reward_async_offloads_ray_get(monkeypatch):
+    import ray
+
+    ref = object()
+    worker = _make_top_reward_worker([ref], subtask_interval=10)
+
+    captured = []
+
+    async def fake_to_thread(func, arg):
+        captured.append((func, arg))
+        return 1.0
+
+    monkeypatch.setattr(
+        "rlinf.workers.env.env_worker.asyncio.to_thread",
+        fake_to_thread,
+    )
+
+    env_output = SimpleNamespace(
+        obs={"main_images": torch.zeros((1, 8, 8, 3), dtype=torch.uint8)},
+        rewards=torch.zeros((1, 1), dtype=torch.float32),
+    )
+
+    updated = asyncio.run(worker._compute_top_reward_async(env_output, 0))
+
+    assert updated.rewards[:, -1].item() == pytest.approx(0.0)
+    assert len(captured) == 1
+    assert captured[0][0] is ray.get
+    assert captured[0][1] is ref
+
+
+def test_bootstrap_step_restores_main_task_description_on_reset():
+    main_task = "Pick up the stuffed animals."
+    inner_env = SimpleNamespace(task_description="pick up the blue one")
+
+    class _Env:
+        unwrapped = inner_env
+        is_start = False
+
+        def reset(self):
+            return {"states": "reset", "task_descriptions": ["stale subtask"]}, {}
+
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.cfg = _cfg_node(
+        {
+            "env": {
+                "train": {
+                    "auto_reset": False,
+                    "reset_on_rollout_epoch": False,
+                }
+            },
+            "actor": {"model": {"num_action_chunks": 1}},
+        }
+    )
+    worker._initial_task_descriptions = [main_task]
+    worker._top_reward_enabled = False
+    worker.slot_count = 1
+    worker.train_num_envs_per_stage = 1
+    worker.last_obs_list = []
+    worker.last_intervened_info_list = []
+    worker._steps_since_subtask_update = 4
+    worker.env_list = [_Env()]
+
+    env_outputs = worker.bootstrap_step()
+
+    assert inner_env.task_description == main_task
+    assert env_outputs[0].obs["task_descriptions"] == [main_task]
+
+
+def test_env_interact_step_auto_reset_restores_main_task_for_next_episode(monkeypatch):
+    monkeypatch.setattr(
+        "rlinf.workers.env.env_worker.prepare_actions",
+        lambda **kwargs: kwargs["raw_chunk_actions"],
+    )
+
+    main_task = "Pick up the stuffed animals."
+    inner_env = SimpleNamespace(task_description="pick up the blue one")
+
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.cfg = _cfg_node(
+        {
+            "env": {
+                "train": {
+                    "env_type": "yam",
+                    "auto_reset": True,
+                    "ignore_terminations": False,
+                    "wm_env_type": None,
+                }
+            },
+            "actor": {
+                "model": {
+                    "model_type": "openpi",
+                    "num_action_chunks": 1,
+                    "action_dim": 1,
+                }
+            },
+        }
+    )
+    worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
+    worker._top_reward_enabled = False
+    worker._vlm_planner = None
+    worker._initial_task_descriptions = [main_task]
+    worker._steps_since_subtask_update = 5
+    worker.env_list = [
+        SimpleNamespace(
+            unwrapped=inner_env,
+            chunk_step=lambda _chunk_actions: (
+                [{"states": "next", "task_descriptions": ["stale subtask"]}],
+                torch.zeros((1, 1), dtype=torch.float32),
+                torch.zeros((1, 1), dtype=torch.bool),
+                torch.ones((1, 1), dtype=torch.bool),
+                [
+                    {
+                        "final_observation": {
+                            "states": "final",
+                            "task_descriptions": ["pick up the blue one"],
+                        },
+                        "final_info": {"episode": {}},
+                    }
+                ],
+            ),
+        )
+    ]
+
+    env_output, _ = worker.env_interact_step(torch.zeros((1, 1)), 0)
+
+    assert inner_env.task_description == main_task
+    assert env_output.obs["task_descriptions"] == [main_task]
+    assert env_output.final_obs["task_descriptions"] == ["pick up the blue one"]

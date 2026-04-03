@@ -23,6 +23,8 @@ The class receives the model and processor as constructor args — the
 VLMPlannerWorker owns the model lifecycle.
 """
 
+from typing import Any, Optional
+
 import numpy as np
 from omegaconf import DictConfig
 from PIL import Image
@@ -43,11 +45,18 @@ class TOPReward:
         processor: Matching HuggingFace processor / tokenizer.
     """
 
-    def __init__(self, config: DictConfig, model=None, processor=None):
+    def __init__(
+        self,
+        config: DictConfig,
+        model=None,
+        processor=None,
+        logger: Optional[Any] = None,
+    ):
         self.reward_scale = float(config.get("reward_scale", 1.0))
         self.max_frames = int(config.get("top_reward_max_frames", 16))
         self._model = model
         self._processor = processor
+        self._logger = logger
 
     def compute_score(
         self,
@@ -117,6 +126,8 @@ class TOPReward:
         if eos_token is not None:
             prompt_chat = prompt_chat.split(eos_token)[0]
         full_text = f"{prompt_chat}{instruction_suffix}"
+        if self._logger is not None:
+            self._logger.debug("[TOPReward] Full prompt: %s", full_text)
         image_inputs, video_inputs = process_vision_info(user_messages)
 
         return self._processor(

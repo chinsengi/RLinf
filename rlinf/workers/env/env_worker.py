@@ -169,6 +169,19 @@ class EnvWorker(Worker):
                 "env.train.task_description. Set it to a concrete episode goal "
                 "(e.g. 'fold the towel')."
             )
+        print(
+            "[Subtask]"
+            f" enabled={self._subtask_interval > 0}"
+            f" interval={self._subtask_interval}"
+            f" adaptive={self._subtask_adaptive}"
+            f" min_interval={self._subtask_min_interval}"
+            f" plateau_window={self._subtask_plateau_window}"
+            f" plateau_threshold={self._subtask_plateau_threshold}"
+            f" score_threshold={self._subtask_score_threshold}"
+            f" top_reward_enabled={self._top_reward_enabled}"
+            f" initial_tasks={self._initial_task_descriptions!r}",
+            flush=True,
+        )
         self.only_eval = getattr(self.cfg.runner, "only_eval", False)
         self.enable_eval = self.cfg.runner.val_check_interval > 0 or self.only_eval
         if not self.only_eval:
@@ -287,6 +300,13 @@ class EnvWorker(Worker):
                 disable VLM-driven features.
         """
         self._vlm_planner = planner_handle
+        print(
+            "[Subtask]"
+            f" planner_attached={planner_handle is not None}"
+            f" interval={self._subtask_interval}"
+            f" adaptive={self._subtask_adaptive}",
+            flush=True,
+        )
         self.log_info(
             f"[EnvWorker] VLM planner handle set (subtask_interval="
             f"{self._subtask_interval})."
@@ -299,6 +319,11 @@ class EnvWorker(Worker):
 
     def _reset_subtask_update_state(self) -> None:
         """Reset per-episode subtask planner cadence state."""
+        print(
+            "!!!!![Subtask]"
+            f" counter_reset previous_steps_since_update={self._steps_since_subtask_update}",
+            flush=True,
+        )
         self._steps_since_subtask_update = 0
 
     def _get_top_reward_instruction(self, slot_id: int) -> str:
@@ -310,15 +335,203 @@ class EnvWorker(Worker):
         env = self.env_list[slot_id]
         inner_env = getattr(env, "unwrapped", env)
         if not new_subtask or not hasattr(inner_env, "task_description"):
+            print(
+                "[Subtask]"
+                f" apply_skipped slot={slot_id}"
+                f" new_subtask={new_subtask!r}"
+                f" has_task_description={hasattr(inner_env, 'task_description')}",
+                flush=True,
+            )
             return False
 
         inner_env.task_description = new_subtask
         if self._top_reward_enabled:
             self._reset_top_reward_state()
+        print(
+            f"[Subtask] apply_success slot={slot_id} subtask={new_subtask!r}",
+            flush=True,
+        )
         self.log_info(
             f"[EnvWorker] Subtask updated for slot {slot_id}: '{new_subtask}'"
         )
         return True
+
+    @staticmethod
+    async def _await_ray_ref(object_ref: Any) -> Any:
+        """Resolve a Ray ref without blocking the async event loop."""
+        return await asyncio.to_thread(ray.get, object_ref)
+
+    @staticmethod
+    def _extract_planner_images(obs: Any) -> list[np.ndarray]:
+        images = []
+        if not isinstance(obs, dict):
+            return images
+
+        main_images = obs.get("main_images", None)
+        if main_images is None:
+            return images
+
+        if isinstance(main_images, torch.Tensor):
+            main_images = main_images.numpy()
+
+        if main_images.ndim == 4:
+            images.append(main_images[0])
+        else:
+            images.append(main_images)
+        return images
+
+    @staticmethod
+    def _inject_task_description_into_obs(
+        obs: dict[str, Any] | None, task_description: str
+    ) -> None:
+        if isinstance(obs, dict):
+            obs["task_descriptions"] = [str(task_description)]
+
+    def _sync_subtask_into_env_output(
+        self, slot_id: int, env_output: EnvOutput, task_description: str
+    ) -> None:
+        self._inject_task_description_into_obs(env_output.obs, task_description)
+        self._inject_task_description_into_obs(env_output.final_obs, task_description)
+        env = self.env_list[slot_id]
+        self._inject_task_description_into_obs(
+            getattr(env, "last_obs", None), task_description
+        )
+
+    def _restore_main_task_description(
+        self, slot_id: int, obs: dict[str, Any] | None = None
+    ) -> None:
+        """Restore the environment-visible task text to the main episode goal."""
+        main_task = self._initial_task_descriptions[slot_id]
+        env = self.env_list[slot_id]
+        inner_env = getattr(env, "unwrapped", env)
+        if hasattr(inner_env, "task_description"):
+            inner_env.task_description = main_task
+        self._inject_task_description_into_obs(obs, main_task)
+        self._inject_task_description_into_obs(
+            getattr(env, "last_obs", None), main_task
+        )
+
+    def _request_subtask(self, slot_id: int, obs: Any, *, reason: str) -> str:
+        images = self._extract_planner_images(obs)
+        main_task = self._initial_task_descriptions[slot_id]
+        print(
+            "[Subtask]"
+            f" requesting slot={slot_id}"
+            f" reason={reason}"
+            f" main_task={main_task!r}"
+            f" current_task={self._get_current_task_description(slot_id)!r}"
+            f" num_images={len(images)}",
+            flush=True,
+        )
+        subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
+        new_subtask: str = ray.get(subtask_ref)
+        print(
+            "[Subtask]"
+            f" generated slot={slot_id}"
+            f" reason={reason}"
+            f" subtask={new_subtask!r}",
+            flush=True,
+        )
+        return new_subtask
+
+    async def _request_subtask_async(
+        self, slot_id: int, obs: Any, *, reason: str
+    ) -> str:
+        images = self._extract_planner_images(obs)
+        main_task = self._initial_task_descriptions[slot_id]
+        print(
+            "[Subtask]"
+            f" requesting slot={slot_id}"
+            f" reason={reason}"
+            f" main_task={main_task!r}"
+            f" current_task={self._get_current_task_description(slot_id)!r}"
+            f" num_images={len(images)}",
+            flush=True,
+        )
+        subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
+        new_subtask: str = await self._await_ray_ref(subtask_ref)
+        print(
+            "[Subtask]"
+            f" generated slot={slot_id}"
+            f" reason={reason}"
+            f" subtask={new_subtask!r}",
+            flush=True,
+        )
+        return new_subtask
+
+    def _maybe_plan_initial_subtask(
+        self, slot_id: int, env_output: EnvOutput
+    ) -> EnvOutput:
+        if self._subtask_interval <= 0 or self._vlm_planner is None:
+            print(
+                "[Subtask]"
+                f" initial_skip slot={slot_id}"
+                f" enabled={self._subtask_interval > 0}"
+                f" planner_attached={self._vlm_planner is not None}",
+                flush=True,
+            )
+            return env_output
+
+        main_task = self._initial_task_descriptions[slot_id]
+        current_task = self._get_current_task_description(slot_id)
+        should_prime = (
+            self._steps_since_subtask_update == 0 and current_task == main_task
+        )
+        print(
+            "[Subtask]"
+            f" initial_check slot={slot_id}"
+            f" should_prime={should_prime}"
+            f" steps_since_update={self._steps_since_subtask_update}"
+            f" main_task={main_task!r}"
+            f" current_task={current_task!r}",
+            flush=True,
+        )
+        if not should_prime:
+            return env_output
+
+        new_subtask = self._request_subtask(slot_id, env_output.obs, reason="initial")
+        if self._apply_subtask_update(slot_id, new_subtask):
+            self._sync_subtask_into_env_output(slot_id, env_output, new_subtask)
+            self._reset_subtask_update_state()
+        return env_output
+
+    async def _maybe_plan_initial_subtask_async(
+        self, slot_id: int, env_output: EnvOutput
+    ) -> EnvOutput:
+        if self._subtask_interval <= 0 or self._vlm_planner is None:
+            print(
+                "[Subtask]"
+                f" initial_skip slot={slot_id}"
+                f" enabled={self._subtask_interval > 0}"
+                f" planner_attached={self._vlm_planner is not None}",
+                flush=True,
+            )
+            return env_output
+
+        main_task = self._initial_task_descriptions[slot_id]
+        current_task = self._get_current_task_description(slot_id)
+        should_prime = (
+            self._steps_since_subtask_update == 0 and current_task == main_task
+        )
+        print(
+            "[Subtask]"
+            f" initial_check slot={slot_id}"
+            f" should_prime={should_prime}"
+            f" steps_since_update={self._steps_since_subtask_update}"
+            f" main_task={main_task!r}"
+            f" current_task={current_task!r}",
+            flush=True,
+        )
+        if not should_prime:
+            return env_output
+
+        new_subtask = await self._request_subtask_async(
+            slot_id, env_output.obs, reason="initial"
+        )
+        if self._apply_subtask_update(slot_id, new_subtask):
+            self._sync_subtask_into_env_output(slot_id, env_output, new_subtask)
+            self._reset_subtask_update_state()
+        return env_output
 
     def _maybe_update_subtask(self, slot_id: int) -> None:
         """Optionally call the VLM planner to refresh the current subtask.
@@ -333,14 +546,39 @@ class EnvWorker(Worker):
                 from ``self.env_list``).
         """
         if self._subtask_interval <= 0 or self._vlm_planner is None:
+            print(
+                "[Subtask]"
+                f" skip slot={slot_id}"
+                f" enabled={self._subtask_interval > 0}"
+                f" planner_attached={self._vlm_planner is not None}",
+                flush=True,
+            )
             return
 
         self._steps_since_subtask_update += 1
+        print(
+            "[Subtask]"
+            f" tick slot={slot_id}"
+            f" steps_since_update={self._steps_since_subtask_update}"
+            f" interval={self._subtask_interval}"
+            f" adaptive={self._subtask_adaptive}",
+            flush=True,
+        )
         if self._subtask_adaptive and (
             self._steps_since_subtask_update < self._subtask_min_interval
         ):
+            print(
+                "[Subtask]"
+                f" waiting_min_interval slot={slot_id}"
+                f" steps_since_update={self._steps_since_subtask_update}"
+                f" min_interval={self._subtask_min_interval}",
+                flush=True,
+            )
             return
 
+        interval_triggered = self._steps_since_subtask_update >= self._subtask_interval
+        plateau_triggered = False
+        score_triggered = False
         should_trigger = self._steps_since_subtask_update >= self._subtask_interval
         if self._subtask_adaptive and self._top_reward_enabled:
             recent_deltas = list(self._recent_top_deltas)
@@ -355,30 +593,110 @@ class EnvWorker(Worker):
                 and self._prev_top_score > self._subtask_score_threshold
             )
             should_trigger = should_trigger or plateau_triggered or score_triggered
+        print(
+            "[Subtask]"
+            f" trigger_check slot={slot_id}"
+            f" should_trigger={should_trigger}"
+            f" interval_triggered={interval_triggered}"
+            f" plateau_triggered={plateau_triggered}"
+            f" score_triggered={score_triggered}"
+            f" has_prev_top_score={self._top_reward_has_prev_score}"
+            f" prev_top_score={self._prev_top_score}"
+            f" recent_top_deltas={list(self._recent_top_deltas)!r}",
+            flush=True,
+        )
 
         if not should_trigger:
+            print(
+                "[Subtask]"
+                f" not_triggered slot={slot_id}"
+                f" steps_since_update={self._steps_since_subtask_update}",
+                flush=True,
+            )
             return
 
         env = self.env_list[slot_id]
-
-        # Collect the most recent observation image for the planner.
-        import ray
-
         obs = getattr(env, "last_obs", None) or {}
-        images = []
-        main_images = obs.get("main_images", None)
-        if main_images is not None:
-            if isinstance(main_images, torch.Tensor):
-                main_images = main_images.numpy()
-            # main_images shape: (B, H, W, 3) or (1, H, W, 3); take first frame.
-            if main_images.ndim == 4:
-                images.append(main_images[0])
-            else:
-                images.append(main_images)
+        new_subtask = self._request_subtask(slot_id, obs, reason="interval")
 
-        main_task = self._initial_task_descriptions[slot_id]
-        subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
-        new_subtask: str = ray.get(subtask_ref)
+        if self._apply_subtask_update(slot_id, new_subtask):
+            self._reset_subtask_update_state()
+
+    async def _maybe_update_subtask_async(self, slot_id: int) -> None:
+        """Async variant of subtask refresh for the interact event loop."""
+        if self._subtask_interval <= 0 or self._vlm_planner is None:
+            print(
+                "[Subtask]"
+                f" skip slot={slot_id}"
+                f" enabled={self._subtask_interval > 0}"
+                f" planner_attached={self._vlm_planner is not None}",
+                flush=True,
+            )
+            return
+
+        self._steps_since_subtask_update += 1
+        print(
+            "[Subtask]"
+            f" tick slot={slot_id}"
+            f" steps_since_update={self._steps_since_subtask_update}"
+            f" interval={self._subtask_interval}"
+            f" adaptive={self._subtask_adaptive}",
+            flush=True,
+        )
+        if self._subtask_adaptive and (
+            self._steps_since_subtask_update < self._subtask_min_interval
+        ):
+            print(
+                "[Subtask]"
+                f" waiting_min_interval slot={slot_id}"
+                f" steps_since_update={self._steps_since_subtask_update}"
+                f" min_interval={self._subtask_min_interval}",
+                flush=True,
+            )
+            return
+
+        interval_triggered = self._steps_since_subtask_update >= self._subtask_interval
+        plateau_triggered = False
+        score_triggered = False
+        should_trigger = self._steps_since_subtask_update >= self._subtask_interval
+        if self._subtask_adaptive and self._top_reward_enabled:
+            recent_deltas = list(self._recent_top_deltas)
+            plateau_triggered = len(recent_deltas) >= self._subtask_plateau_window and (
+                all(
+                    abs(delta) < self._subtask_plateau_threshold
+                    for delta in recent_deltas[-self._subtask_plateau_window :]
+                )
+            )
+            score_triggered = bool(
+                self._top_reward_has_prev_score
+                and self._prev_top_score > self._subtask_score_threshold
+            )
+            should_trigger = should_trigger or plateau_triggered or score_triggered
+        print(
+            "[Subtask]"
+            f" trigger_check slot={slot_id}"
+            f" should_trigger={should_trigger}"
+            f" interval_triggered={interval_triggered}"
+            f" plateau_triggered={plateau_triggered}"
+            f" score_triggered={score_triggered}"
+            f" has_prev_top_score={self._top_reward_has_prev_score}"
+            f" prev_top_score={self._prev_top_score}"
+            f" recent_top_deltas={list(self._recent_top_deltas)!r}",
+            flush=True,
+        )
+
+        if not should_trigger:
+            print(
+                "[Subtask]"
+                f" not_triggered slot={slot_id}"
+                f" steps_since_update={self._steps_since_subtask_update}",
+                flush=True,
+            )
+            return
+
+        env = self.env_list[slot_id]
+        obs = getattr(env, "last_obs", None) or {}
+        new_subtask = await self._request_subtask_async(slot_id, obs, reason="interval")
 
         if self._apply_subtask_update(slot_id, new_subtask):
             self._reset_subtask_update_state()
@@ -441,12 +759,64 @@ class EnvWorker(Worker):
 
         return env_output
 
+    async def _compute_top_reward_async(
+        self, env_output: EnvOutput, slot_id: int
+    ) -> EnvOutput:
+        """Async variant of TOPReward scoring for the interact event loop."""
+        if not self._top_reward_enabled or self._vlm_planner is None:
+            return env_output
+
+        with self.worker_timer("top_reward"):
+            main_images = env_output.obs.get("main_images", None)
+            if main_images is not None:
+                if isinstance(main_images, torch.Tensor):
+                    frame = main_images[0].cpu().numpy()
+                else:
+                    frame = np.asarray(main_images[0])
+                self._episode_frames.append(frame)
+
+            if len(self._episode_frames) > self._top_reward_max_frames:
+                self._episode_frames = self._episode_frames[
+                    -self._top_reward_max_frames :
+                ]
+
+            instruction = self._get_top_reward_instruction(slot_id)
+            score_ref = self._vlm_planner.compute_top_reward.remote(
+                self._episode_frames, instruction
+            )
+            score_t = await self._await_ray_ref(score_ref)
+
+        if self._top_reward_has_prev_score:
+            reward = float(score_t) - self._prev_top_score
+        else:
+            reward = 0.0
+        self._prev_top_score = float(score_t)
+        self._top_reward_has_prev_score = True
+        self._recent_top_deltas.append(reward)
+
+        if env_output.rewards is not None:
+            env_output.rewards[:, -1] = reward
+        self.log_info(f"[EnvWorker] TOPReward: score={score_t:.4f}, delta={reward:.4f}")
+
+        return env_output
+
     def _reset_top_reward_state(self) -> None:
         """Reset TOPReward episode state for a new episode."""
         self._episode_frames = []
         self._prev_top_score = 0.0
         self._top_reward_has_prev_score = False
         self._recent_top_deltas.clear()
+
+    def _handle_episode_boundary(self, slot_id: int, env_output: EnvOutput) -> None:
+        """Reset per-episode planner state after an episode-ending step."""
+        if env_output.dones is None or not env_output.dones[:, -1].any():
+            return
+
+        if self._top_reward_enabled:
+            self._reset_top_reward_state()
+        self._reset_subtask_update_state()
+        if self.cfg.env.train.auto_reset:
+            self._restore_main_task_description(slot_id, env_output.obs)
 
     def _setup_env_and_wrappers(self, env_cls, env_cfg, num_envs_per_stage: int):
         env_list = []
@@ -527,6 +897,7 @@ class EnvWorker(Worker):
         if self.cfg.env.train.auto_reset:
             for i in range(self.slot_count):
                 extracted_obs, _ = self.env_list[i].reset()
+                self._restore_main_task_description(i, extracted_obs)
                 self.last_obs_list.append(extracted_obs)
                 self.last_intervened_info_list.append((None, None))
 
@@ -548,6 +919,7 @@ class EnvWorker(Worker):
         for slot_id in range(self.slot_count):
             self.env_list[slot_id].is_start = True
             extracted_obs, infos = self.env_list[slot_id].reset()
+            self._restore_main_task_description(slot_id, extracted_obs)
             env_outputs.append(
                 EnvOutput(
                     obs=extracted_obs,
@@ -565,7 +937,11 @@ class EnvWorker(Worker):
 
     @Worker.timer("env_interact_step")
     def env_interact_step(
-        self, chunk_actions: torch.Tensor, slot_id: int
+        self,
+        chunk_actions: torch.Tensor,
+        slot_id: int,
+        *,
+        compute_top_reward: bool = True,
     ) -> tuple[EnvOutput, dict[str, Any]]:
         """
         This function is used to interact with the environment.
@@ -641,14 +1017,9 @@ class EnvWorker(Worker):
             intervene_flags=intervene_flags,
         )
 
-        # Inject TOPReward dense reward if enabled.
-        env_output = self._compute_top_reward(env_output, slot_id)
-
-        # Reset TOPReward state on episode done.
-        if self._top_reward_enabled and chunk_dones[:, -1].any():
-            self._reset_top_reward_state()
-        if chunk_dones[:, -1].any():
-            self._reset_subtask_update_state()
+        if compute_top_reward:
+            env_output = self._compute_top_reward(env_output, slot_id)
+            self._handle_episode_boundary(slot_id, env_output)
 
         return env_output, env_info
 
@@ -939,6 +1310,7 @@ class EnvWorker(Worker):
                         self._reset_top_reward_state()
                     self.env_list[slot_id].is_start = True
                     extracted_obs, infos = self.env_list[slot_id].reset()
+                    self._restore_main_task_description(slot_id, extracted_obs)
                     intervene_actions = None
                     intervene_flags = None
                 else:
@@ -1064,7 +1436,10 @@ class EnvWorker(Worker):
         for epoch in range(self.rollout_epoch):
             env_outputs = self.bootstrap_step()
             for slot_id in range(self.slot_count):
-                env_output: EnvOutput = env_outputs[slot_id]
+                env_output: EnvOutput = await self._maybe_plan_initial_subtask_async(
+                    slot_id, env_outputs[slot_id]
+                )
+                env_outputs[slot_id] = env_output
                 env_batch = env_output.to_dict()
                 self.send_env_batch(
                     output_channel,
@@ -1111,9 +1486,15 @@ class EnvWorker(Worker):
                     self.rollout_results[slot_id].append_step_result(chunk_step_result)
 
                     env_output, env_info = self.env_interact_step(
-                        rollout_result.actions, slot_id
+                        rollout_result.actions,
+                        slot_id,
+                        compute_top_reward=False,
                     )
-                    self._maybe_update_subtask(slot_id)
+                    env_output = await self._compute_top_reward_async(
+                        env_output, slot_id
+                    )
+                    self._handle_episode_boundary(slot_id, env_output)
+                    await self._maybe_update_subtask_async(slot_id)
                     env_batch = env_output.to_dict()
                     self.send_env_batch(
                         output_channel,
