@@ -311,6 +311,8 @@ interference, eliminating the need for offload functionality.
   `flow_sde <https://arxiv.org/abs/2505.05470>`__ and
   `flow_noise <https://arxiv.org/abs/2505.22094>`__.
   ``noise_level`` controls the noise intensity for ``flow_sde``, and ``noise_logvar_range`` controls the learnable noise range for ``flow_noise``.
+  If you enable ``noise_anneal: True``, then ``noise_params`` are interpreted as
+  ``[noise_start, noise_end, noise_anneal_steps]`` for ``flow_sde`` and ``flow_cps``.
 
 - Enable π\ :sub:`0.5`\  model by setting ``pi05: True``.
 
@@ -327,6 +329,8 @@ In the paper, we provide two technical approaches, flow-noise and flow-sde, to f
    openpi:
      noise_method: "flow_sde" # [flow_sde,flow_noise] noise injection method, flow-sde introduces noise through ode-sde transformation, flow-noise introduces noise through noise network
      noise_level: 0.5 # noise intensity for flow-sde
+     noise_anneal: False # if True, anneal flow-sde / flow-cps noise according to noise_params
+     noise_params: [0.7, 0.3, 400] # [noise_start, noise_end, noise_anneal_steps] for flow-sde / flow-cps
      noise_logvar_range: [0.08, 0.16] # learnable noise range for flow-noise
      joint_logprob: False # whether to optimize joint probability density function. For flow-sde, please set to False. For flow-noise, please set to True.
 
