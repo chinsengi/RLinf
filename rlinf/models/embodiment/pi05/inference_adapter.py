@@ -158,6 +158,24 @@ def _compute_flow_cps_schedule(
     return x0_weight, x1_weight, x_t_std
 
 
+def _get_scheduled_noise_level(
+    *,
+    noise_level: float,
+    noise_anneal: bool,
+    noise_params: tuple[float, ...] | list[float],
+    global_step: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """fixed vs annealed scalar noise scheduling."""
+    if noise_anneal:
+        noise_start, noise_end, anneal_steps = noise_params
+        noise_level = (
+            noise_start
+            + (noise_end - noise_start) * min(global_step, anneal_steps) / anneal_steps
+        )
+    return torch.tensor(noise_level, device=device, dtype=torch.float32)
+
+
 def _get_num_scored_denoise_steps(num_steps: int, noise_method: str) -> int:
     """Return how many denoising transitions should contribute PPO log-probs."""
     if noise_method == "flow_cps":
@@ -214,6 +232,7 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         num_steps: int | None = None,
         noise_method: str = "flow_sde",
         noise_level: float = 0.5,
+        noise_anneal: bool = False,
         noise_params: list[float] | tuple[float, ...] = (0.16, 0.12, 200.0),
         noise_logvar_range: list[float] | tuple[float, ...] = (0.1, 1.0),
         joint_logprob: bool = False,
@@ -238,6 +257,7 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         self.runtime_num_steps = num_steps or self.config.num_inference_steps
         self.noise_method = noise_method
         self.noise_level = noise_level
+        self.noise_anneal = noise_anneal
         self.noise_params = tuple(noise_params)
         self.noise_logvar_range = list(noise_logvar_range)
         self.joint_logprob = joint_logprob
@@ -245,6 +265,7 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         self.add_value_head = add_value_head
         self.value_after_vlm = value_after_vlm and add_value_head
         self.value_vlm_mode = value_vlm_mode
+        self.global_step = 0
         self.preprocessor_stats = _load_stats(
             Path(checkpoint_dir)
             / "policy_preprocessor_step_2_normalizer_processor.safetensors"
@@ -498,6 +519,9 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
     ) -> torch.Tensor:
         return self.model.sample_noise(shape, device)
 
+    def set_global_step(self, global_step: int) -> None:
+        self.global_step = global_step
+
     def _sample_mean_var_val(
         self,
         x_t: torch.Tensor,
@@ -544,15 +568,16 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
             x1_weight = t_input - delta
             x_t_std = torch.zeros_like(t_input)
         elif mode == "train":
+            scheduled_noise_level = _get_scheduled_noise_level(
+                noise_level=self.noise_level,
+                noise_anneal=self.noise_anneal,
+                noise_params=self.noise_params,
+                global_step=self.global_step,
+                device=device,
+            )
             if self.noise_method == "flow_sde":
-                noise_start, noise_end, anneal_steps = self.noise_params
-                del noise_end, anneal_steps
-                noise_level = noise_start
-                noise_level = torch.tensor(
-                    noise_level, device=device, dtype=torch.float32
-                )
                 sigmas = (
-                    noise_level
+                    scheduled_noise_level
                     * torch.sqrt(
                         timesteps
                         / (1 - torch.where(timesteps == 1, timesteps[1], timesteps))
@@ -570,7 +595,7 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
                 x0_weight, x1_weight, x_t_std = _compute_flow_cps_schedule(
                     t_input=t_input,
                     delta=delta,
-                    noise_level=self.noise_level,
+                    noise_level=scheduled_noise_level,
                 )
             else:
                 raise ValueError(
@@ -796,6 +821,7 @@ def get_model(cfg, torch_dtype=None):
     num_steps = getattr(openpi_cfg, "num_steps", None)
     noise_method = getattr(openpi_cfg, "noise_method", "flow_sde")
     noise_level = getattr(openpi_cfg, "noise_level", 0.5)
+    noise_anneal = getattr(openpi_cfg, "noise_anneal", False)
     noise_params = getattr(openpi_cfg, "noise_params", (0.16, 0.12, 200.0))
     noise_logvar_range = getattr(cfg, "noise_logvar_range", (0.1, 1.0))
     joint_logprob = getattr(openpi_cfg, "joint_logprob", False)
@@ -814,6 +840,7 @@ def get_model(cfg, torch_dtype=None):
         num_steps=num_steps,
         noise_method=noise_method,
         noise_level=noise_level,
+        noise_anneal=noise_anneal,
         noise_params=noise_params,
         noise_logvar_range=noise_logvar_range,
         joint_logprob=joint_logprob,
