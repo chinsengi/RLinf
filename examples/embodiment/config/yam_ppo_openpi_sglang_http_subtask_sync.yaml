@@ -1,0 +1,310 @@
+# YAM bimanual robot - sync PPO training with pi0.5 (OpenPI), RemoteEnv,
+# TOPReward, subtask planning, and an external SGLang HTTP VLM planner.
+#
+# Algorithm: sync PPO with actor-critic, GAE advantage, and value head.
+# Reward:    TOPReward dense progress signal (Qwen3-VL-8B via SGLang HTTP).
+#            No custom reward code required.
+#
+# Difference from yam_ppo_openpi_sglang_http_sync.yaml:
+#   Subtask planning is enabled with the same cadence / adaptive triggers as
+#   yam_ppo_openpi_subtask_sync.yaml.
+#
+# Hardware topology (single Beaker node, 3 GPUs):
+#   GPU 0 - actor (pi0.5 FSDP training with value head)
+#   GPU 1 - rollout (pi0.5 inference)
+#   GPU 2 - external SGLang server + VLMPlannerWorker HTTP client path
+#   CPU   - EnvWorker (RemoteEnv gRPC client -> desktop RobotServer)
+#
+# Desktop:
+#   RobotServer wrapping YAMEnv, exposed via reverse SSH tunnel on :50051.
+#   Start with: bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml \
+#                   --train-config .../yam_ppo_openpi_sglang_http_subtask_sync.yaml \
+#                   --use-follower-servers --remote-host <beaker-tailscale-ip>
+#
+# Submit with:
+#   bash scripts/submit_yam_training.sh --config yam_ppo_openpi_sglang_http_subtask_sync \
+#       --model-path thomas0829/folding_towel_pi05
+#
+# Prerequisites:
+#   pip install "transformers @ git+https://github.com/huggingface/transformers.git@main"
+#   pip install qwen-vl-utils accelerate torchvision pillow  (on Beaker)
+#   huggingface-cli download Qwen/Qwen3-VL-8B
+#   Start SGLang separately, for example:
+#     uv run --project /weka/oe-training-default/shiruic/sglang/python \
+#       python -m sglang.launch_server \
+#       --model-path Qwen/Qwen3-VL-8B-Instruct \
+#       --host 0.0.0.0 --port 30000 --tp 1 --weight-loader-disable-mmap
+
+defaults:
+  - env/remote_yam@env.train
+  - model/pi0_5@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor:
+      node_group: "gpu"
+      placement: 0
+    rollout:
+      node_group: "gpu"
+      placement: 1   # pi0.5 requires a dedicated GPU; cannot share GPU 0 with actor
+    env:
+      node_group: "gpu"
+      placement: 0   # RemoteEnv runs CPU-only; placement on same node
+  node_groups:
+    - label: "gpu"
+      node_ranks: 0
+    - label: "beaker_vlm"
+      node_ranks: 0  # VLMPlannerWorker placement group on the Beaker node
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "yam_ppo_openpi_sglang_http_subtask_sync"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 2000
+  max_steps: -1
+
+  # Validation is disabled for this YAM training config.
+  val_check_interval: -1
+  save_interval: -1
+
+  resume_dir: null
+  ckpt_path: null
+
+  weight_sync_interval: 1
+
+algorithm:
+  normalize_advantages: False
+  kl_penalty: kl
+  group_size: 1
+  reward_coef: 1.0
+
+  rollout_epoch: 1
+  reward_type: chunk_level
+  logprob_type: chunk_level
+  entropy_type: chunk_level
+
+  update_epoch: 2
+  adv_type: gae
+  loss_type: actor_critic
+  loss_agg_func: "token-mean"
+
+  bootstrap_type: always
+  kl_beta: 0.0    # NOTE: not used by EmbodiedFSDPActor (KL penalty only applies to reasoning tasks)
+  entropy_bonus: 0.005
+  clip_ratio_high: 0.2
+  clip_ratio_low: 0.2
+  clip_ratio_c: 3.0
+  value_clip: 0.2
+  huber_delta: 10.0
+
+  gamma: 0.99
+  gae_lambda: 0.95
+
+  filter_rewards: False
+  rewards_lower_bound: 0.0
+  rewards_upper_bound: 1.0
+
+  sampling_params:
+    do_sample: True
+    temperature_train: 1.0
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: False
+
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
+
+env:
+  # Desktop-side hardware timer: how often the robot should return to startup
+  # home and rest. This does NOT define the training rollout horizon.
+  return_home_minutes: 20
+  # Training-side rollout horizon in action chunks. With
+  # actor.model.num_action_chunks=30, two chunks means 60 low-level steps.
+  rollout_horizon_chunks: 2
+  # Desktop RobotServer cooldown after the timer expires and the arms have
+  # already returned home. Keep this at the top level so Beaker and desktop
+  # can share one timing source.
+  server_cooldown_minutes: 1
+  group_name: "EnvGroup"
+  # Optional local simulation of the robot desktop input path.
+  # When enabled, train_embodied_agent_staged.py starts a local dummy
+  # RobotServer automatically, so RemoteEnv still talks over gRPC but no
+  # separate desktop machine or reverse SSH tunnel is required.
+  #
+  # Keep env.train.remote_server_url pointed at localhost:<port> when using
+  # this mode.
+  remote_desktop_simulation:
+    enabled: False
+    dummy: True
+    env_config_path: null
+    startup_timeout: 30.0
+
+  train:
+    total_num_envs: 1
+    # Derived automatically from env.rollout_horizon_chunks.
+    # For YAM this is the training-side rollout horizon, not the true robot
+    # episode timeout. The actual episode length comes from
+    # env/yam_pi05_follower.yaml: episode_duration_s (default: 120s).
+    rollout_horizon_steps: 60
+    max_steps_per_rollout_epoch: 60
+    control_rate_hz: 10.0
+    # Optional chunk post-processing for debugging shaky motions. This smooths
+    # each predicted action chunk before it is executed by the env worker.
+    action_chunk_smoothing:
+      enabled: False
+      method: ema
+      alpha: 0.35
+    # Do not return home when a new rollout epoch starts.
+    reset_on_rollout_epoch: False
+    # Keep training epoch boundaries purely for bookkeeping. Real robot
+    # cadence is controlled only by the desktop server timer / manual stop.
+    reset_on_rollout_epoch_end: False
+
+    task_description: "Fold the towel."
+
+    # Enable TOPReward dense progress signal.
+    top_reward_enabled: True
+    top_reward_max_frames: 1000
+    # With subtask planning enabled, TOPReward follows the current subtask
+    # description written back into the env.
+
+    # Subtask update interval in CHUNK STEPS (0 to disable VLM planning).
+    # With num_action_chunks=30 and max_steps_per_rollout_epoch=60,
+    # n_train_chunk_steps=2. Rollout epochs can continue the same episode, so
+    # subtask_interval is not limited to one rollout epoch.
+    # 1 chunk step = 30 env steps = subtask update at ~50% and ~100% of episode.
+    subtask_interval: 10
+    # Adaptive triggering on TOPReward signals. When enabled, the VLM
+    # planner can refresh early on plateau / score-threshold triggers while
+    # subtask_interval remains a max-interval fallback.
+    subtask_adaptive: True
+    subtask_min_interval: 2
+    subtask_plateau_window: 3
+    subtask_plateau_threshold: 0.01
+    subtask_score_threshold: -0.5
+
+    # Dummy mode: controlled at the ROBOT SERVER, not here.
+    # RemoteEnv does not read is_dummy - it proxies calls over gRPC to the server.
+    # To test without real hardware, start the robot server with --dummy:
+    #   bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml --dummy
+# VLM planner: Qwen3-VL-8B for both subtask planning and TOPReward scoring.
+# reward_scale is read from THIS section by TOPReward (not from reward.reward_scale).
+vlm_planner:
+  model_path: "Qwen/Qwen3-VL-8B-Instruct"
+  backend: "sglang_http"
+  # If the external SGLang server is on another host, replace 127.0.0.1 with
+  # the address reachable from the Beaker node running VLMPlannerWorker.
+  server_url: "http://127.0.0.1:30000"
+  request_timeout: 120.0
+  dtype: "bfloat16"
+  # The worker still performs local Qwen-VL preprocessing before calling
+  # SGLang /generate. Use transformers_runtime_path if that preprocessing
+  # should come from an isolated wheel/runtime.
+  # Optional explicit placement override. By default RLinf chooses GPU 2 here
+  # because actor and rollout occupy GPUs 0 and 1 on the same node.
+  # placement: 2
+  # Optional node-group override for the planner. Defaults to "beaker_vlm".
+  # node_group: "beaker_vlm"
+  max_new_tokens_subtask: 64
+  max_new_tokens_reward: 16
+  success_threshold: 0.5
+  top_reward_enabled: True
+  top_reward_max_frames: 1000
+  reward_scale: 1.0  # multiplied onto each log-prob score before delta computation
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: False
+  unnorm_key: libero_10
+  enable_offload: False
+  pipeline_slot_count: 1
+
+  collect_transitions: True
+  collect_prev_infos: True  # required for adv_type: gae - prev_values must be collected for GAE bootstrap
+
+  model:
+    model_path: "thomas0829/folding_towel_pi05"
+    precision: ${actor.model.precision}
+
+  enable_torch_compile: False
+  enable_cuda_graph: False
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+
+  # rollout_size = n_chunk_steps * total_num_envs * rollout_epoch = 2 * 1 * 1 = 2
+  # global_batch_size must divide rollout_size; micro_batch_size must divide global_batch_size.
+  micro_batch_size: 2
+  global_batch_size: 2
+  seed: 42
+  enable_offload: False
+
+  model:
+    model_path: "thomas0829/folding_towel_pi05"
+    model_type: "openpi"
+    precision: "bf16"
+    add_value_head: True
+    num_action_chunks: 30
+    action_dim: 14   # YAM bimanual: 2 x 7 DOF; sets openpi.action_env_dim via interpolation
+    num_steps: 10
+    openpi:
+      value_after_vlm: True
+      value_vlm_mode: mean_token
+      config_name: "pi05_yam_follower"
+      num_images_in_input: 3
+      discrete_state_input: True
+      noise_method: "flow_sde"
+      action_horizon: 30
+      action_env_dim: 14
+      noise_params: [0.16, 0.12, 200]
+      joint_logprob: True
+
+  optim:
+    lr: 0
+    value_lr: 0
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    clip_grad: 1.0
+    weight_decay: 0.01
+    lr_scheduler: torch_constant
+    critic_warmup_steps: 0
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: True
+    gradient_checkpointing: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+# reward section is metadata only when use_reward_model: False.
+# TOPReward is computed inline by VLMPlannerWorker (see vlm_planner.reward_scale above).
+# reward_scale here is NOT read by TOPReward - configure it under vlm_planner instead.
+reward:
+  use_reward_model: False
+  reward_type: top_reward
+
+critic:
+  use_critic_model: False
