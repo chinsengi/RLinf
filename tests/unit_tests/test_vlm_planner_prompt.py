@@ -59,11 +59,12 @@ def test_get_next_subtask_prompt_includes_main_task():
     prompt = captured["user_text"]
     assert "The overall episode goal is: fold the towel" in prompt
     assert "single best next subtask" in prompt
-    assert "If a grasp is still missing" in prompt
-    assert "align or center the object with the target" in prompt
-    assert "put down or release the object" in prompt
+    assert "actual task family and visible scene" in prompt
+    assert "grasp, secure, lift, carry, align, insert" in prompt
+    assert "If a prerequisite is still missing" in prompt
     assert "left or right side" in prompt
     assert "left gripper" in prompt
+    assert "Avoid generic verbs like 'move'" in prompt
     assert "do not invent a left/right assignment" in prompt
 
 
@@ -126,3 +127,35 @@ def test_get_next_subtask_requires_main_task():
         assert "non-empty main_task" in str(exc)
     else:
         raise AssertionError("Expected get_next_subtask() to require main_task.")
+
+
+def test_evaluate_subtask_uses_strict_completion_criteria():
+    worker = VLMPlannerWorker.__new__(VLMPlannerWorker)
+    worker._logger = _FakeLogger()
+    worker._max_new_tokens_reward = 16
+    captured = {}
+
+    def fake_build_qwen_messages(system_text, _images, user_text):
+        captured["system_text"] = system_text
+        captured["user_text"] = user_text
+        return user_text
+
+    worker._build_qwen_messages = fake_build_qwen_messages
+    worker._generate = lambda _messages, _tokens: "success"
+
+    reward = worker.evaluate_subtask(
+        images=[np.zeros((8, 8, 3), dtype=np.uint8)],
+        subtask="lift the orange can with the left gripper",
+    )
+
+    assert reward == 1.0
+    assert "fully completed the subtask" in captured["system_text"]
+    assert "exact subtask verb and intended visible effect" in captured["system_text"]
+    assert (
+        "interaction subtasks such as push, slide, rotate, fold"
+        in captured["system_text"]
+    )
+    assert (
+        'Subtask attempted: "lift the orange can with the left gripper"'
+        in captured["user_text"]
+    )

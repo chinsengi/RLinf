@@ -197,6 +197,9 @@ env:
     # subtask_interval remains a max-interval fallback.
     subtask_adaptive: True
     subtask_min_interval: 2
+    # Require the planner to confirm the current subtask succeeded before
+    # advancing to a new subtask stage.
+    subtask_require_success: True
     subtask_plateau_window: 3
     subtask_plateau_threshold: 0.01
     subtask_score_threshold: -0.5

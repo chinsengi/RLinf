@@ -65,14 +65,21 @@ def _cfg_node(data):
 
 
 class _PlannerStub:
-    def __init__(self, result="pick up the corner"):
+    def __init__(self, result="pick up the corner", eval_result=1.0):
         self.calls = []
+        self.eval_calls = []
         self.result = result
+        self.eval_result = eval_result
         self.get_next_subtask = SimpleNamespace(remote=self._get_next_subtask)
+        self.evaluate_subtask = SimpleNamespace(remote=self._evaluate_subtask)
 
     def _get_next_subtask(self, images, main_task, current_subtask=""):
         self.calls.append((images, main_task, current_subtask))
         return self.result
+
+    def _evaluate_subtask(self, images, subtask):
+        self.eval_calls.append((images, subtask))
+        return self.eval_result
 
 
 class _TopRewardPlannerStub:
@@ -112,6 +119,8 @@ def _make_adaptive_worker(
     worker._subtask_plateau_window = plateau_window
     worker._subtask_plateau_threshold = plateau_threshold
     worker._subtask_score_threshold = score_threshold
+    worker._subtask_require_success = False
+    worker._subtask_success_threshold = 0.5
     worker._top_reward_enabled = True
     worker._prev_top_score = prev_top_score
     worker._top_reward_has_prev_score = True
@@ -648,6 +657,70 @@ def test_maybe_update_subtask_fixed_mode_preserves_old_interval_behavior(monkeyp
     worker._maybe_update_subtask(0)
 
     assert len(worker._vlm_planner.calls) == 1
+    assert worker._steps_since_subtask_update == 0
+
+
+def test_maybe_update_subtask_holds_current_task_until_completion(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_adaptive_worker(
+        subtask_interval=2,
+        subtask_min_interval=2,
+        prev_top_score=-2.0,
+        recent_deltas=[0.1, 0.2],
+        steps_since_update=1,
+    )
+    current_task = "grasp the orange can with the left gripper"
+    worker.env_list[0].unwrapped.task_description = current_task
+    worker._initial_task_descriptions = [
+        "Insert the orange can into the middle of the black tape."
+    ]
+    worker._subtask_require_success = True
+    worker._vlm_planner = _PlannerStub(
+        result="move the orange can with the left gripper toward the black tape",
+        eval_result=0.0,
+    )
+
+    worker._maybe_update_subtask(0)
+
+    assert worker.env_list[0].unwrapped.task_description == current_task
+    assert len(worker._vlm_planner.eval_calls) == 1
+    assert worker._vlm_planner.eval_calls[0][1] == current_task
+    assert len(worker._vlm_planner.calls) == 0
+    assert worker._steps_since_subtask_update == 2
+
+
+def test_maybe_update_subtask_advances_after_completion_check_passes(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_adaptive_worker(
+        subtask_interval=2,
+        subtask_min_interval=2,
+        prev_top_score=-2.0,
+        recent_deltas=[0.1, 0.2],
+        steps_since_update=1,
+    )
+    current_task = "grasp the orange can with the left gripper"
+    worker.env_list[0].unwrapped.task_description = current_task
+    worker._initial_task_descriptions = [
+        "Insert the orange can into the middle of the black tape."
+    ]
+    worker._subtask_require_success = True
+    worker._vlm_planner = _PlannerStub(
+        result="move the orange can with the left gripper toward the black tape",
+        eval_result=1.0,
+    )
+
+    worker._maybe_update_subtask(0)
+
+    assert len(worker._vlm_planner.eval_calls) == 1
+    assert len(worker._vlm_planner.calls) == 1
+    assert (
+        worker.env_list[0].unwrapped.task_description
+        == "move the orange can with the left gripper toward the black tape"
+    )
     assert worker._steps_since_subtask_update == 0
 
 

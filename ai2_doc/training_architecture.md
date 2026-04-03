@@ -250,6 +250,12 @@ The episode-done and subtask-change resets also clear `_episode_frames`, giving 
 
 `_maybe_update_subtask()` reads `env.last_obs` to supply the VLM subtask planner with the most recent camera frame, passes the episode-level main task (`_initial_task_descriptions[slot_id]`), and also includes the currently active task/subtask text from the env. The planner prompt therefore includes the main goal, current visible subtask, and current image — there is still no planner memory buffer.
 
+When `env.train.subtask_require_success: true`, `_maybe_update_subtask()` first
+calls `VLMPlannerWorker.evaluate_subtask()` on the current task text and latest
+frame. The env worker advances to a newly planned subtask only after that
+completion check passes, which helps keep stage-wise subtasks like `grasp ->
+move -> align -> release` from advancing too early.
+
 `RemoteEnv` maintains `self.last_obs` and updates it on every `reset()` and `chunk_step()` call. If `last_obs` is `None` (before the first step) or the env wrapper doesn't expose the attribute, `_maybe_update_subtask()` sends an empty image list — the planner still produces a subtask but without visual context.
 
 Subtask planning requires a non-empty `env.train.task_description`. The `EnvWorker` fails fast at construction if `subtask_interval > 0` and no task description is set.

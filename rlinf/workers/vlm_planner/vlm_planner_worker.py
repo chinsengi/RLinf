@@ -118,18 +118,24 @@ and sometimes the currently active subtask. \
 Your job is to identify the single most appropriate next subtask for the robot to execute. \
 Reply with ONLY the subtask instruction as a short imperative sentence (5-15 words). \
 Output exactly one atomic manipulation step. \
-Respect physical prerequisites: grasp before move, align before release. \
-For placement tasks, prefer stage-wise subtasks such as grasp, move/carry, align/center, and put down/release. \
-If the object is not securely held yet, choose a grasping subtask instead of a placement subtask. \
+Choose a task-appropriate manipulation verb that matches the goal and visible scene. \
+Respect physical prerequisites and do not skip unfinished preconditions. \
+If the current stage is not complete yet, keep or refine that stage instead of jumping ahead. \
 When one gripper is clearly a better match from the image, explicitly say left or right gripper. \
-Keep the same gripper across follow-up carry, align, and release subtasks unless a handoff or two-arm action is clearly needed. \
+Keep the same gripper across follow-up subtasks unless a handoff or two-arm action is clearly needed. \
 If the correct arm is ambiguous, do not guess. \
+Avoid vague subtasks like "move the object" with no target relation or contact-state change. \
 Do not combine multiple stages in one sentence, and do not add any explanation or formatting."""
 
 _REWARD_SYSTEM_PROMPT = """\
 You are an AI evaluator for a bimanual robot arm. \
 You will be shown images from the robot's cameras and a description of the subtask that was attempted. \
-Decide whether the robot successfully completed the subtask. \
+Decide whether the robot fully completed the subtask, not whether it merely started making progress. \
+Judge success relative to the exact subtask verb and intended visible effect. \
+Only answer success when the requested state change is already achieved, not when the robot is merely moving toward it. \
+For contact-changing subtasks such as grasp, secure, or release, success requires the requested contact state. \
+For spatial subtasks such as lift, carry, align, insert, place, or center, success requires the requested spatial relation. \
+For interaction subtasks such as push, slide, rotate, fold, open, close, press, or wipe, success requires a visible task-specific state change. \
 Reply with ONLY "success" or "failure" — no other text."""
 _TOPREWARD_PROMPT_PREFIX = (
     "The above video shows a robot manipulation trajectory that completes "
@@ -191,16 +197,22 @@ def _build_subtask_user_text(main_task: str, current_subtask: str = "") -> str:
         task_header + "Given the current observation, what is the single best next "
         "subtask for the robot to execute?\n"
         "Return one atomic manipulation step only.\n"
-        "If a grasp is still missing, choose a grasping subtask first.\n"
-        "For placement or transport tasks, prefer the earliest unfinished "
-        "stage among: grasp the object; move/carry the object toward the "
-        "target; align or center the object with the target; put down or "
-        "release the object.\n"
+        "Choose the next subtask based on the actual task family and visible "
+        "scene, not a fixed template.\n"
+        "Use a concrete verb that matches the goal and the currently needed "
+        "state change, such as grasp, secure, lift, carry, align, insert, "
+        "push, slide, rotate, fold, open, close, press, wipe, place, or "
+        "release when appropriate.\n"
+        "If a prerequisite is still missing, keep or refine the earlier stage "
+        "instead of jumping ahead.\n"
         "When the object is clearly on the robot's left or right side, prefer "
         "an arm-specific subtask such as 'grasp the object with the left "
-        "gripper' or 'move the object with the right gripper'.\n"
+        "gripper' or 'push the object with the right gripper toward the "
+        "target'.\n"
         "If the current subtask already names a gripper and the image does not "
         "show a handoff, keep using the same gripper in the next subtask.\n"
+        "Avoid generic verbs like 'move' unless the subtask also names the "
+        "direction, target region, or contact-state change.\n"
         "If the correct arm is ambiguous or the task appears bimanual, do not "
         "invent a left/right assignment.\n"
         "Do not skip prerequisite stages, and do not combine multiple stages "

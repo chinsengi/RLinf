@@ -133,6 +133,13 @@ class EnvWorker(Worker):
         self._subtask_score_threshold: float = float(
             self.cfg.env.train.get("subtask_score_threshold", -0.5)
         )
+        self._subtask_require_success: bool = bool(
+            self.cfg.env.train.get("subtask_require_success", False)
+        )
+        planner_cfg = self.cfg.get("vlm_planner", {})
+        self._subtask_success_threshold: float = float(
+            planner_cfg.get("success_threshold", 0.5)
+        )
         self._steps_since_subtask_update: int = 0
         self._recent_top_deltas: deque[float] = deque(
             maxlen=self._subtask_plateau_window
@@ -178,6 +185,8 @@ class EnvWorker(Worker):
             f" plateau_window={self._subtask_plateau_window}"
             f" plateau_threshold={self._subtask_plateau_threshold}"
             f" score_threshold={self._subtask_score_threshold}"
+            f" require_success={self._subtask_require_success}"
+            f" success_threshold={self._subtask_success_threshold}"
             f" top_reward_enabled={self._top_reward_enabled}"
             f" initial_tasks={self._initial_task_descriptions!r}",
             flush=True,
@@ -469,6 +478,88 @@ class EnvWorker(Worker):
         )
         return new_subtask
 
+    def _is_current_subtask_complete(
+        self, slot_id: int, obs: Any, *, reason: str
+    ) -> bool:
+        """Return whether the current subtask is complete enough to advance."""
+        if not getattr(self, "_subtask_require_success", False):
+            return True
+
+        evaluator = getattr(self._vlm_planner, "evaluate_subtask", None)
+        if evaluator is None or not hasattr(evaluator, "remote"):
+            return True
+
+        current_task = self._get_current_task_description(slot_id).strip()
+        main_task = str(self._initial_task_descriptions[slot_id]).strip()
+        if not current_task or current_task == main_task:
+            return True
+
+        images = self._extract_planner_images(obs)
+        print(
+            "[Subtask]"
+            f" evaluating slot={slot_id}"
+            f" reason={reason}"
+            f" current_task={current_task!r}"
+            f" num_images={len(images)}",
+            flush=True,
+        )
+        score_ref = evaluator.remote(images, current_task)
+        success_score = float(ray.get(score_ref))
+        success_threshold = float(getattr(self, "_subtask_success_threshold", 0.5))
+        completed = success_score >= success_threshold
+        print(
+            "[Subtask]"
+            f" completion_check slot={slot_id}"
+            f" reason={reason}"
+            f" current_task={current_task!r}"
+            f" success_score={success_score:.4f}"
+            f" success_threshold={success_threshold:.4f}"
+            f" completed={completed}",
+            flush=True,
+        )
+        return completed
+
+    async def _is_current_subtask_complete_async(
+        self, slot_id: int, obs: Any, *, reason: str
+    ) -> bool:
+        """Async variant of `_is_current_subtask_complete`."""
+        if not getattr(self, "_subtask_require_success", False):
+            return True
+
+        evaluator = getattr(self._vlm_planner, "evaluate_subtask", None)
+        if evaluator is None or not hasattr(evaluator, "remote"):
+            return True
+
+        current_task = self._get_current_task_description(slot_id).strip()
+        main_task = str(self._initial_task_descriptions[slot_id]).strip()
+        if not current_task or current_task == main_task:
+            return True
+
+        images = self._extract_planner_images(obs)
+        print(
+            "[Subtask]"
+            f" evaluating slot={slot_id}"
+            f" reason={reason}"
+            f" current_task={current_task!r}"
+            f" num_images={len(images)}",
+            flush=True,
+        )
+        score_ref = evaluator.remote(images, current_task)
+        success_score = float(await self._await_ray_ref(score_ref))
+        success_threshold = float(getattr(self, "_subtask_success_threshold", 0.5))
+        completed = success_score >= success_threshold
+        print(
+            "[Subtask]"
+            f" completion_check slot={slot_id}"
+            f" reason={reason}"
+            f" current_task={current_task!r}"
+            f" success_score={success_score:.4f}"
+            f" success_threshold={success_threshold:.4f}"
+            f" completed={completed}",
+            flush=True,
+        )
+        return completed
+
     def _maybe_plan_initial_subtask(
         self, slot_id: int, env_output: EnvOutput
     ) -> EnvOutput:
@@ -627,6 +718,15 @@ class EnvWorker(Worker):
 
         env = self.env_list[slot_id]
         obs = getattr(env, "last_obs", None) or {}
+        if not self._is_current_subtask_complete(slot_id, obs, reason="interval"):
+            print(
+                "[Subtask]"
+                f" hold_current slot={slot_id}"
+                f" reason=interval"
+                f" current_task={self._get_current_task_description(slot_id)!r}",
+                flush=True,
+            )
+            return
         new_subtask = self._request_subtask(slot_id, obs, reason="interval")
 
         if self._apply_subtask_update(slot_id, new_subtask):
@@ -706,6 +806,17 @@ class EnvWorker(Worker):
 
         env = self.env_list[slot_id]
         obs = getattr(env, "last_obs", None) or {}
+        if not await self._is_current_subtask_complete_async(
+            slot_id, obs, reason="interval"
+        ):
+            print(
+                "[Subtask]"
+                f" hold_current slot={slot_id}"
+                f" reason=interval"
+                f" current_task={self._get_current_task_description(slot_id)!r}",
+                flush=True,
+            )
+            return
         new_subtask = await self._request_subtask_async(slot_id, obs, reason="interval")
 
         if self._apply_subtask_update(slot_id, new_subtask):

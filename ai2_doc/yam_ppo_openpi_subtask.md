@@ -178,6 +178,7 @@ env:
     # Use "current_task" only if stage-conditioned dense reward is needed.
     # With subtask planning enabled, TOPReward follows the current subtask.
     subtask_interval: 2
+    subtask_require_success: True
 
 vlm_planner:
   max_new_tokens_subtask: 64
@@ -192,7 +193,9 @@ Subtask planning requires a non-empty `task_description`. The planner receives
 the main task, the currently active task/subtask text, and the current
 observation image — there is no planner memory buffer. The prompt asks the VLM
 for the next subtask given the episode goal, current stage text, and current
-visual context.
+visual context. When `subtask_require_success: True`, the env worker first asks
+the VLM whether the current subtask succeeded before advancing to the next
+subtask stage.
 
 ## Local Simulated Desktop Mode
 
