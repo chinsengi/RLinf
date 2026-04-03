@@ -268,8 +268,8 @@ timestep (i.e. $t_{i+1}$).
 
 ### 5.1 `noise_method: flow_sde`
 
-This corresponds to an SDE discretization of the probability flow. The
-diffusion coefficient is derived from the schedule:
+The `flow_sde` transition uses the probability flow ODE for its mean, then
+adds Gaussian noise whose scale is derived from the schedule:
 
 ```math
 \sigma(t) = \text{noise\_level} \cdot
@@ -287,18 +287,85 @@ The transition weights and std at step $i$ are:
 \sigma_i^{\text{std}} = \sqrt{\delta_i}\;\sigma(t_i)
 ```
 
-The $\alpha_1$ correction term $-\sigma_i^2 \delta_i / (2t_i)$ arises from
-the score-based SDE reverse drift. To see why: the reverse-time SDE for
-a variance-exploding diffusion is
+The $\alpha_1$ correction term $-\sigma_i^2 \delta_i / (2t_i)$ is easiest to
+see from the probability flow ODE. For a diffusion with drift $f(x,t)$ and
+diffusion coefficient $g(t)$, the probability flow ODE is
 
 ```math
-dx = \bigl[f(x,t) - g(t)^2 \nabla_x \log p_t(x)\bigr] dt + g(t)\, d\bar{W}
+\frac{dx}{dt}
+= f(x,t) - \frac{1}{2} g(t)^2 \nabla_x \log p_t(x).
 ```
 
-With the flow matching parameterisation $f(x,t) = v_\theta$ and
-$g(t)^2 = \sigma(t)^2$, the Euler–Maruyama discretization over step
-$\delta_i$ gives the drift correction
-$-\sigma_i^2 \delta_i / (2 t_i)$ on the $\hat{x}_1$ coefficient.
+With the flow-matching parameterization $f(x,t) = v_\theta$ and
+$g(t)^2 = \sigma(t)^2$, a backward Euler step from $t_i$ to
+$t' = t_i - \delta_i$ gives
+
+```math
+x_{t'} \approx x_{t_i} - \delta_i
+\left[v_\theta(x_{t_i}, o, t_i)
+- \frac{1}{2}\sigma_i^2 \nabla_x \log p_{t_i}(x_{t_i})\right].
+```
+
+The score term here corresponds to the predicted terminal noise. Under the
+linear interpolation path
+
+```math
+x_t = (1 - t)\,x_0 + t\,x_1,
+\qquad x_1 \sim \mathcal{N}(0, I),
+```
+
+the conditional distribution at time $t$ is
+
+```math
+x_t \mid x_0 \sim \mathcal{N}((1 - t)\,x_0,\; t^2 I),
+```
+
+so its score is
+
+```math
+\nabla_{x_t} \log p_t(x_t \mid x_0)
+= -\frac{x_t - (1 - t)\,x_0}{t^2}
+= -\frac{x_1}{t}.
+```
+
+RLinf does not learn a separate score network for `flow_sde`. Instead it
+reconstructs
+
+```math
+\hat{x}_1 = x_t + v_\theta(x_t, o, t)\,(1 - t),
+```
+
+so the score used in the probability-flow correction is implicitly
+
+```math
+\nabla_{x_t} \log p_t(x_t) \approx -\frac{\hat{x}_1}{t}.
+```
+
+Substituting this into the Euler step gives
+
+```math
+x_{t'} \approx x_t - \delta_i v_\theta
+- \frac{\sigma_i^2 \delta_i}{2 t_i}\,\hat{x}_1.
+```
+
+Using
+
+```math
+x_t - \delta_i v_\theta = (1 - t')\,\hat{x}_0 + t'\,\hat{x}_1,
+```
+
+the mean becomes
+
+```math
+\mu_i
+= (1 - t')\,\hat{x}_0
++ \left(t' - \frac{\sigma_i^2 \delta_i}{2 t_i}\right)\hat{x}_1,
+```
+
+which is exactly the `flow_sde` coefficient used in RLinf.
+
+The stochastic part is then added separately as Gaussian noise with standard
+deviation $\sqrt{\delta_i}\,\sigma(t_i)$.
 
 So `sigma` is not learned by a network here; it comes entirely from the
 schedule and `noise_level`.
