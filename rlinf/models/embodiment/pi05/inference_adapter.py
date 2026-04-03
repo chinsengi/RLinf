@@ -169,9 +169,10 @@ def _get_scheduled_noise_level(
     """fixed vs annealed scalar noise scheduling."""
     if noise_anneal:
         noise_start, noise_end, anneal_steps = noise_params
-        noise_level = noise_start + (noise_end - noise_start) * min(
-            global_step, anneal_steps
-        ) / anneal_steps
+        noise_level = (
+            noise_start
+            + (noise_end - noise_start) * min(global_step, anneal_steps) / anneal_steps
+        )
     return torch.tensor(noise_level, device=device, dtype=torch.float32)
 
 
