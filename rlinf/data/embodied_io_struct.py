@@ -640,20 +640,20 @@ class EmbodiedRolloutResult:
     def to_splited_trajectories(self, split_size: int) -> list[Trajectory]:
         """
         Splits the current embodied data into a list of smaller trajectories.
-        This method converts the current instance to a primary `Trajectory` and then 
-        splits its batched data (observations, inputs, and tensor fields) along the 
-        batch dimension (dim=1) into the specified number of chunks. Primitive types 
+        This method converts the current instance to a primary `Trajectory` and then
+        splits its batched data (observations, inputs, and tensor fields) along the
+        batch dimension (dim=1) into the specified number of chunks. Primitive types
         (int, str) are duplicated across all split trajectories.
         Args:
             split_size (int): The number of chunks to split the trajectory into.
         Returns:
-            list[Trajectory]: A list of `split_size` Trajectory objects containing 
+            list[Trajectory]: A list of `split_size` Trajectory objects containing
             the chunked data.
         Raises:
-            ValueError: If a field in the trajectory contains a value type that is 
+            ValueError: If a field in the trajectory contains a value type that is
             not supported for splitting (i.e., not a dict, int, str, or torch.Tensor).
         """
-        
+
         all_trajectory: Trajectory = self.to_trajectory()
         splited_trajectories: list[Trajectory] = [
             Trajectory() for _ in range(split_size)
