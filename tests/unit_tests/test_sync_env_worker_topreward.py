@@ -70,8 +70,8 @@ class _PlannerStub:
         self.result = result
         self.get_next_subtask = SimpleNamespace(remote=self._get_next_subtask)
 
-    def _get_next_subtask(self, images, main_task):
-        self.calls.append((images, main_task))
+    def _get_next_subtask(self, images, main_task, current_subtask=""):
+        self.calls.append((images, main_task, current_subtask))
         return self.result
 
 
@@ -688,6 +688,7 @@ def test_initial_subtask_planning_replaces_parent_task_before_first_send(monkeyp
 
     assert len(worker._vlm_planner.calls) == 1
     assert worker._vlm_planner.calls[0][1] == "Pick up the stuffed animals."
+    assert worker._vlm_planner.calls[0][2] == "Pick up the stuffed animals."
     assert inner_env.task_description == "pick up the blue one"
     assert updated.obs["task_descriptions"] == ["pick up the blue one"]
 
@@ -756,6 +757,37 @@ def test_request_subtask_async_offloads_ray_get(monkeypatch):
     assert len(captured) == 1
     assert captured[0][0] is ray.get
     assert captured[0][1] is ref
+
+
+def test_request_subtask_passes_current_task_context(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = EnvWorker.__new__(EnvWorker)
+    current_task = "move the can toward the middle of the black tape"
+    worker.env_list = [
+        SimpleNamespace(
+            unwrapped=SimpleNamespace(task_description=current_task),
+            last_obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+        )
+    ]
+    worker._initial_task_descriptions = ["Put the can in the middle of the black tape."]
+    worker._vlm_planner = _PlannerStub(
+        result="align the can to the middle of the black tape"
+    )
+
+    new_subtask = worker._request_subtask(
+        0,
+        {"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+        reason="interval",
+    )
+
+    assert new_subtask == "align the can to the middle of the black tape"
+    assert (
+        worker._vlm_planner.calls[0][1]
+        == "Put the can in the middle of the black tape."
+    )
+    assert worker._vlm_planner.calls[0][2] == current_task
 
 
 def test_compute_top_reward_async_offloads_ray_get(monkeypatch):

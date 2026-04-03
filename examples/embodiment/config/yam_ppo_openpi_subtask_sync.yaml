@@ -177,8 +177,9 @@ env:
     # With num_action_chunks=30 and max_steps_per_rollout_epoch=60,
     # n_train_chunk_steps=2. Rollout epochs can continue the same episode, so
     # subtask_interval is not limited to one rollout epoch.
-    # 1 chunk step = 30 env steps = subtask update at ~50% and ~100% of episode.
-    subtask_interval: 10
+    # 1 chunk step = 30 env steps; subtask_interval=2 refreshes every
+    # ~60 env steps (about once per rollout horizon in this config).
+    subtask_interval: 2
     # Adaptive triggering on TOPReward signals. When enabled, the VLM
     # planner can refresh early on plateau / score-threshold triggers while
     # subtask_interval remains a max-interval fallback.

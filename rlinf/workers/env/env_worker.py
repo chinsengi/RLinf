@@ -320,7 +320,7 @@ class EnvWorker(Worker):
     def _reset_subtask_update_state(self) -> None:
         """Reset per-episode subtask planner cadence state."""
         print(
-            "!!!!![Subtask]"
+            "[Subtask]"
             f" counter_reset previous_steps_since_update={self._steps_since_subtask_update}",
             flush=True,
         )
@@ -414,16 +414,21 @@ class EnvWorker(Worker):
     def _request_subtask(self, slot_id: int, obs: Any, *, reason: str) -> str:
         images = self._extract_planner_images(obs)
         main_task = self._initial_task_descriptions[slot_id]
+        current_task = self._get_current_task_description(slot_id)
         print(
             "[Subtask]"
             f" requesting slot={slot_id}"
             f" reason={reason}"
             f" main_task={main_task!r}"
-            f" current_task={self._get_current_task_description(slot_id)!r}"
+            f" current_task={current_task!r}"
             f" num_images={len(images)}",
             flush=True,
         )
-        subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
+        subtask_ref = self._vlm_planner.get_next_subtask.remote(
+            images,
+            main_task,
+            current_task,
+        )
         new_subtask: str = ray.get(subtask_ref)
         print(
             "[Subtask]"
@@ -439,16 +444,21 @@ class EnvWorker(Worker):
     ) -> str:
         images = self._extract_planner_images(obs)
         main_task = self._initial_task_descriptions[slot_id]
+        current_task = self._get_current_task_description(slot_id)
         print(
             "[Subtask]"
             f" requesting slot={slot_id}"
             f" reason={reason}"
             f" main_task={main_task!r}"
-            f" current_task={self._get_current_task_description(slot_id)!r}"
+            f" current_task={current_task!r}"
             f" num_images={len(images)}",
             flush=True,
         )
-        subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
+        subtask_ref = self._vlm_planner.get_next_subtask.remote(
+            images,
+            main_task,
+            current_task,
+        )
         new_subtask: str = await self._await_ray_ref(subtask_ref)
         print(
             "[Subtask]"

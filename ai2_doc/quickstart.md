@@ -123,52 +123,42 @@ Behavior to expect:
 > **Note:** `autossh` must be installed on the desktop. The script prints
 > install instructions if it is missing.
 
-### Step 4: Attach and start training manually
+### Step 4: Attach, start SGLang, and launch training manually
 
 Once the interactive session is up and the robot server tunnel is running,
-attach to the Beaker session and launch training manually:
+attach to the Beaker session and prepare the RLinf environment:
 
 ```bash
 beaker session attach <session-id>
 cd /weka/oe-training-default/shiruic/RLinf
 source .venv/bin/activate
+```
 
-# Async staged runtime
-python examples/embodiment/train_embodied_agent_staged_async.py \
-    --config-name yam_ppo_openpi_async \
-    actor.model.model_path=thomas0829/folding_towel_pi05 \
-    rollout.model.model_path=thomas0829/folding_towel_pi05 \
-    'env.train.task_description=Fold the towel.' \
-    'env.eval.task_description=Fold the towel.'
+In a second terminal, switch to `/weka/oe-training-default/shiruic/sglang` and
+start the external SGLang server used by the HTTP VLM planner:
 
-# Sync staged runtime
+```bash
+cd python/
+uv sync
+PYTHONUNBUFFERED=1 TRANSFORMERS_VERBOSITY=info HF_HUB_VERBOSITY=debug CUDA_VISIBLE_DEVICES=2 uv run --project /weka/oe-training-default/shiruic/sglang/python python -m sglang.launch_server \
+    --model-path Qwen/Qwen3-VL-8B-Instruct \
+    --host 0.0.0.0 \
+    --port 30000 \
+    --tp 1 \
+    --log-level debug \
+    --log-level-http debug \
+    --show-time-cost \
+    --weight-loader-disable-mmap
+```
+
+Back in the RLinf terminal, launch training manually:
+
+```bash
 python examples/embodiment/train_embodied_agent_staged.py \
-    --config-name yam_ppo_openpi_sync \
+    --config-name yam_ppo_openpi_sglang_http_subtask_sync \
     actor.model.model_path=thomas0829/folding_towel_pi05 \
     rollout.model.model_path=thomas0829/folding_towel_pi05 \
-    'env.train.task_description=Fold the towel.' \
-    'env.eval.task_description=Fold the towel.'
-```
-
-To run without gradient updating the model from the same interactive session, add `algorithm.lr=0`
-to the manual training command:
-
-```bash
-python examples/embodiment/train_embodied_agent_staged_async.py \
-    --config-name yam_ppo_openpi_async \
-    actor.model.model_path=thomas0829/folding_towel_pi05 \
-    rollout.model.model_path=thomas0829/folding_towel_pi05 \
-    'env.train.task_description=Fold the towel.' \
-    'env.eval.task_description=Fold the towel.' \
-    algorithm.lr=0
-```
-
-Apply any other Hydra overrides here as well, for example:
-
-```bash
-python examples/embodiment/train_embodied_agent_staged_async.py \
-    --config-name yam_ppo_openpi_async \
-    algorithm.update_epoch=2
+    'env.train.task_description=Fold the towel.'
 ```
 
 If the run fails or you want to tweak Hydra overrides, re-run the training
@@ -176,33 +166,26 @@ command from the same Beaker session. You do not need to create a new session
 unless the session itself exits.
 
 If you started the idle cluster with `submit_yam_beaker_cluster.sh` instead,
-SSH into the container and run the same command there:
+SSH into the container, start the same SGLang server in a second terminal from
+`/weka/oe-training-default/shiruic/sglang`, and run the same training command
+there:
 
 ```bash
 ssh shiruic@beaker-0  # or ssh shiruic@<tailscale-ip>
 cd /weka/oe-training-default/shiruic/RLinf
 source .venv/bin/activate
 
-# Async staged runtime
-python examples/embodiment/train_embodied_agent_staged_async.py \
-    --config-name yam_ppo_openpi_async \
-    actor.model.model_path=thomas0829/folding_towel_pi05 \
-    rollout.model.model_path=thomas0829/folding_towel_pi05 \
-    'env.train.task_description=Fold the towel.' \
-    'env.eval.task_description=Fold the towel.'
-
-# Sync staged runtime
 python examples/embodiment/train_embodied_agent_staged.py \
-    --config-name yam_ppo_openpi_sync \
+    --config-name yam_ppo_openpi_sglang_http_subtask_sync \
     actor.model.model_path=thomas0829/folding_towel_pi05 \
     rollout.model.model_path=thomas0829/folding_towel_pi05 \
-    'env.train.task_description=Fold the towel.' \
-    'env.eval.task_description=Fold the towel.'
+    'env.train.task_description=Fold the towel.'
 ```
 
 The `RemoteEnv` inside the container connects to `localhost:50051` (routed
 through the SSH tunnel to the desktop's `RobotServer`). Actor runs on GPU 0,
-Rollout on GPU 1, VLMPlannerWorker on GPU 2. The training loop proceeds:
+Rollout on GPU 1, and the external SGLang server backs the VLM planner path on
+GPU 2. The training loop proceeds:
 
 ```
 Rollout (GPU 1) ─── generates actions ──────► RemoteEnv ─── gRPC ───► RobotServer
@@ -217,26 +200,26 @@ VLMPlanner (GPU 2) ◄── frames + instruction ── EnvWorker ────�
      └──────────────────────────────────────────────────────────────────────────►
 ```
 
-> **Reward note:** Both YAM configs use TOPReward (Qwen3-VL-8B on GPU 2) —
-> no custom reward code required. The only difference is `subtask_interval`:
-> `yam_ppo_openpi_async` scores reward only; `yam_ppo_openpi_subtask_async` also
-> generates VLM subtask descriptions injected into the policy's language conditioning.
-> The matching `_sync` variants keep the same reward/subtask split and switch
-> only the staged runtime (`train_embodied_agent_staged.py`,
-> `algorithm.loss_type: actor_critic`).
+> **Reward note:** The quickstart command above uses
+> `yam_ppo_openpi_sglang_http_subtask_sync`: TOPReward (Qwen3-VL-8B served by
+> external SGLang on GPU 2) plus VLM subtask planning over HTTP. No custom
+> reward code is required.
 
 ## Supported Configs
 
 | Config | Reward | Subtask Planning | Startup Command |
 |---|---|---|---|
 | `yam_ppo_openpi_async` | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
-| `yam_ppo_openpi_subtask_async` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_subtask_async` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 2`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
 | `yam_ppo_openpi_sync` | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
-| `yam_ppo_openpi_subtask_sync` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_subtask_sync` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 2`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_sglang_http_subtask_sync` | TOPReward (dense, VLM-based, external SGLang HTTP) | yes (`subtask_interval: 2`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh`, plus external SGLang |
 
-All four remote configs use the same startup flow. The `_async` pair runs
+The four local-VLM configs use the same startup flow. The `_async` pair runs
 `train_embodied_agent_staged_async.py`; the `_sync` pair runs
-`train_embodied_agent_staged.py`.
+`train_embodied_agent_staged.py`. `yam_ppo_openpi_sglang_http_subtask_sync`
+also uses `train_embodied_agent_staged.py`, but requires the external SGLang
+server shown in Step 4.
 
 ## Next Steps
 

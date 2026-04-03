@@ -96,6 +96,7 @@ Example YAML::
 
 import json
 import os
+import re
 import sys
 import warnings
 from dataclasses import dataclass
@@ -112,10 +113,18 @@ from rlinf.utils.logging import get_logger
 
 _SUBTASK_SYSTEM_PROMPT = """\
 You are an AI assistant controlling a bimanual robot arm. \
-You will be shown images from the robot's cameras and the overall episode goal. \
+You will be shown images from the robot's cameras, the overall episode goal, \
+and sometimes the currently active subtask. \
 Your job is to identify the single most appropriate next subtask for the robot to execute. \
 Reply with ONLY the subtask instruction as a short imperative sentence (5-15 words). \
-Do not add any explanation or formatting."""
+Output exactly one atomic manipulation step. \
+Respect physical prerequisites: grasp before move, align before release. \
+For placement tasks, prefer stage-wise subtasks such as grasp, move/carry, align/center, and put down/release. \
+If the object is not securely held yet, choose a grasping subtask instead of a placement subtask. \
+When one gripper is clearly a better match from the image, explicitly say left or right gripper. \
+Keep the same gripper across follow-up carry, align, and release subtasks unless a handoff or two-arm action is clearly needed. \
+If the correct arm is ambiguous, do not guess. \
+Do not combine multiple stages in one sentence, and do not add any explanation or formatting."""
 
 _REWARD_SYSTEM_PROMPT = """\
 You are an AI evaluator for a bimanual robot arm. \
@@ -145,6 +154,58 @@ def _strip_thinking_output(text: str) -> str:
     if _THINK_CLOSE_TAG in stripped:
         return stripped.split(_THINK_CLOSE_TAG, 1)[1].strip()
     return stripped
+
+
+def _normalize_subtask_output(text: str) -> str:
+    """Normalize planner output into a single short subtask sentence."""
+    normalized = _strip_thinking_output(text).strip()
+    if not normalized:
+        return ""
+
+    first_line = next(
+        (line.strip() for line in normalized.splitlines() if line.strip()), ""
+    )
+    if not first_line:
+        return ""
+
+    first_line = re.sub(r"^\s*(?:[-*]\s*|\d+[\).\s-]+)", "", first_line)
+    first_line = re.sub(
+        r"^(?:next\s+subtask|subtask)\s*:\s*",
+        "",
+        first_line,
+        flags=re.IGNORECASE,
+    )
+    return " ".join(first_line.strip().strip("\"'").split())
+
+
+def _build_subtask_user_text(main_task: str, current_subtask: str = "") -> str:
+    """Build the user-facing planner prompt for one subtask request."""
+    task_header = f"The overall episode goal is: {main_task}\n\n"
+    if current_subtask and current_subtask != main_task.strip():
+        task_header = (
+            f"The overall episode goal is: {main_task}\n"
+            f"Current active subtask: {current_subtask}\n\n"
+        )
+
+    return (
+        task_header + "Given the current observation, what is the single best next "
+        "subtask for the robot to execute?\n"
+        "Return one atomic manipulation step only.\n"
+        "If a grasp is still missing, choose a grasping subtask first.\n"
+        "For placement or transport tasks, prefer the earliest unfinished "
+        "stage among: grasp the object; move/carry the object toward the "
+        "target; align or center the object with the target; put down or "
+        "release the object.\n"
+        "When the object is clearly on the robot's left or right side, prefer "
+        "an arm-specific subtask such as 'grasp the object with the left "
+        "gripper' or 'move the object with the right gripper'.\n"
+        "If the current subtask already names a gripper and the image does not "
+        "show a handoff, keep using the same gripper in the next subtask.\n"
+        "If the correct arm is ambiguous or the task appears bimanual, do not "
+        "invent a left/right assignment.\n"
+        "Do not skip prerequisite stages, and do not combine multiple stages "
+        "in one subtask."
+    )
 
 
 def _process_vision_info_compat(process_vision_info, messages):
@@ -398,6 +459,7 @@ class VLMPlannerWorker:
         self,
         images: list[np.ndarray],
         main_task: str = "",
+        current_subtask: str = "",
     ) -> str:
         """Generate the next subtask instruction from observations.
 
@@ -405,6 +467,11 @@ class VLMPlannerWorker:
             images: List of uint8 RGB images (H, W, 3) from robot cameras.
             main_task: The episode-level goal (e.g. "fold the towel").
                 Required for meaningful subtask planning.
+            current_subtask: The currently active task/subtask text visible to
+                the policy and env. This gives the planner limited stage
+                context, but it should still rely primarily on the current
+                image when deciding whether to keep, refine, or advance the
+                manipulation phase.
 
         Returns:
             Subtask instruction string, e.g. "pick up the red block".
@@ -413,8 +480,9 @@ class VLMPlannerWorker:
             ValueError: If *main_task* is empty.
         """
         print(
-            "!!!!![Subtask]"
+            "[Subtask]"
             f" planner_request main_task={main_task!r}"
+            f" current_subtask={current_subtask!r}"
             f" num_images={len(images)}",
             flush=True,
         )
@@ -424,18 +492,16 @@ class VLMPlannerWorker:
                 "Set env.train.task_description to a concrete episode goal."
             )
 
-        user_text = (
-            f"The overall episode goal is: {main_task}\n\n"
-            "Given the current observation, what is the single best next "
-            "subtask for the robot to execute?"
-        )
+        current_subtask = str(current_subtask or "").strip()
+        user_text = _build_subtask_user_text(main_task, current_subtask)
         messages = self._build_qwen_messages(_SUBTASK_SYSTEM_PROMPT, images, user_text)
 
         try:
             subtask = self._generate(messages, self._max_new_tokens_subtask)
+            subtask = _normalize_subtask_output(subtask)
         except Exception as exc:
             print(
-                f"!!!!![Subtask] planner_error main_task={main_task!r} error={exc!r}",
+                f"[Subtask] planner_error main_task={main_task!r} error={exc!r}",
                 flush=True,
             )
             self._logger.warning(
@@ -445,7 +511,7 @@ class VLMPlannerWorker:
             subtask = ""
 
         print(
-            f"!!!!![Subtask] planner_generated subtask={subtask!r}",
+            f"[Subtask] planner_generated subtask={subtask!r}",
             flush=True,
         )
         self._logger.info(f"[VLMPlannerWorker] Next subtask: '{subtask}'")

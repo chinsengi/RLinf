@@ -12,9 +12,9 @@ For config-specific runbooks, see [yam_ppo_openpi](yam_ppo_openpi.md) and
 | Config | Algorithm | Policy | Reward | Subtask Planning | Entry Point | GPUs | Beaker Script |
 |---|---|---|---|---|---|---|---|
 | `yam_ppo_openpi_async` | Async PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `train_embodied_agent_staged_async.py` | 3 | `submit_yam_training.sh` |
-| `yam_ppo_openpi_subtask_async` | Async PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `train_embodied_agent_staged_async.py` | 3 | `submit_yam_training.sh` |
+| `yam_ppo_openpi_subtask_async` | Async PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | yes (`subtask_interval: 2`) | `train_embodied_agent_staged_async.py` | 3 | `submit_yam_training.sh` |
 | `yam_ppo_openpi_sync` | Sync PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `train_embodied_agent_staged.py` | 3 | `submit_yam_training.sh` |
-| `yam_ppo_openpi_subtask_sync` | Sync PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `train_embodied_agent_staged.py` | 3 | `submit_yam_training.sh` |
+| `yam_ppo_openpi_subtask_sync` | Sync PPO + GAE | π₀.5 (OpenPI, diffusion) | TOPReward (dense, VLM-based) | yes (`subtask_interval: 2`) | `train_embodied_agent_staged.py` | 3 | `submit_yam_training.sh` |
 
 All four remote configs use TOPReward (Qwen3-VL-8B on GPU 2) and `group_size: 1`.
 The `openpi` pair uses reward scoring only; the `subtask` pair also injects
@@ -45,8 +45,10 @@ language subtask descriptions. The runtime split is explicit:
 > episode boundaries or after a successful subtask update. In the shipped
 > `yam_ppo_openpi_subtask_{async,sync}` configs,
 > `max_steps_per_rollout_epoch: 60` and `num_action_chunks: 30`, so
-> `n_train_chunk_steps = 2`. The shipped `subtask_interval: 1` therefore fires on
-> both chunk steps in the rollout (roughly 50% and 100% of the episode).
+> `n_train_chunk_steps = 2`. The shipped `subtask_interval: 2` therefore fires
+> once every two chunk steps in the fixed fallback cadence (roughly every
+> 60 env steps in these configs, while adaptive triggers can still refresh
+> earlier when enabled).
 >
 > **Adaptive subtask triggering:** when `env.train.subtask_adaptive: true` and
 > `top_reward_enabled: true`, `subtask_interval` becomes a max-interval fallback
@@ -246,7 +248,7 @@ The episode-done and subtask-change resets also clear `_episode_frames`, giving 
 
 ### Subtask planner context
 
-`_maybe_update_subtask()` reads `env.last_obs` to supply the VLM subtask planner with the most recent camera frame, and passes the episode-level main task (`_initial_task_descriptions[slot_id]`). The planner prompt includes the main goal and the current image — there is no planner memory buffer.
+`_maybe_update_subtask()` reads `env.last_obs` to supply the VLM subtask planner with the most recent camera frame, passes the episode-level main task (`_initial_task_descriptions[slot_id]`), and also includes the currently active task/subtask text from the env. The planner prompt therefore includes the main goal, current visible subtask, and current image — there is still no planner memory buffer.
 
 `RemoteEnv` maintains `self.last_obs` and updates it on every `reset()` and `chunk_step()` call. If `last_obs` is `None` (before the first step) or the env wrapper doesn't expose the attribute, `_maybe_update_subtask()` sends an empty image list — the planner still produces a subtask but without visual context.
 
@@ -262,7 +264,7 @@ Note: `last_obs` (single latest frame for subtask planning) is distinct from `_e
 
 `_steps_since_subtask_update` is an instance variable reset to `0` only when a new episode starts, when an episode ends, or after a successful subtask update. Rollout-epoch boundaries that continue the same episode do not reset the counter.
 
-For the shipped `yam_ppo_openpi_subtask_{async,sync}` configs (`max_steps_per_rollout_epoch: 60`, `num_action_chunks: 30`): `n_train_chunk_steps = 2`. The shipped `subtask_interval: 1` fires on both chunk steps in the episode. Larger values can span multiple rollout epochs as long as the episode itself continues.
+For the shipped `yam_ppo_openpi_subtask_{async,sync}` configs (`max_steps_per_rollout_epoch: 60`, `num_action_chunks: 30`): `n_train_chunk_steps = 2`. The shipped `subtask_interval: 2` refreshes on the fixed fallback cadence every two chunk steps (about 60 env steps), while larger values can span multiple rollout epochs as long as the episode itself continues.
 
 ### TOPReward VLM latency
 
