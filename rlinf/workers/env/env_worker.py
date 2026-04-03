@@ -176,9 +176,8 @@ class EnvWorker(Worker):
                 "env.train.task_description. Set it to a concrete episode goal "
                 "(e.g. 'fold the towel')."
             )
-        print(
-            "[Subtask]"
-            f" enabled={self._subtask_interval > 0}"
+        self._log_subtask(
+            f"enabled={self._subtask_interval > 0}"
             f" interval={self._subtask_interval}"
             f" adaptive={self._subtask_adaptive}"
             f" min_interval={self._subtask_min_interval}"
@@ -188,8 +187,7 @@ class EnvWorker(Worker):
             f" require_success={self._subtask_require_success}"
             f" success_threshold={self._subtask_success_threshold}"
             f" top_reward_enabled={self._top_reward_enabled}"
-            f" initial_tasks={self._initial_task_descriptions!r}",
-            flush=True,
+            f" initial_tasks={self._initial_task_descriptions!r}"
         )
         self.only_eval = getattr(self.cfg.runner, "only_eval", False)
         self.enable_eval = self.cfg.runner.val_check_interval > 0 or self.only_eval
@@ -288,6 +286,10 @@ class EnvWorker(Worker):
             except Exception:
                 pass
 
+    def _log_subtask(self, message: str) -> None:
+        """Route subtask planner instrumentation through the worker logger."""
+        self.log_info(f"[Subtask] {message}")
+
     def set_vlm_planner(self, planner_handle) -> None:
         """Inject a VLMPlannerWorker Ray handle for VLM-driven features.
 
@@ -309,12 +311,10 @@ class EnvWorker(Worker):
                 disable VLM-driven features.
         """
         self._vlm_planner = planner_handle
-        print(
-            "[Subtask]"
-            f" planner_attached={planner_handle is not None}"
+        self._log_subtask(
+            f"planner_attached={planner_handle is not None}"
             f" interval={self._subtask_interval}"
-            f" adaptive={self._subtask_adaptive}",
-            flush=True,
+            f" adaptive={self._subtask_adaptive}"
         )
         self.log_info(
             f"[EnvWorker] VLM planner handle set (subtask_interval="
@@ -328,10 +328,9 @@ class EnvWorker(Worker):
 
     def _reset_subtask_update_state(self) -> None:
         """Reset per-episode subtask planner cadence state."""
-        print(
-            "[Subtask]"
-            f" counter_reset previous_steps_since_update={self._steps_since_subtask_update}",
-            flush=True,
+        self._log_subtask(
+            "counter_reset "
+            f"previous_steps_since_update={self._steps_since_subtask_update}"
         )
         self._steps_since_subtask_update = 0
 
@@ -344,22 +343,17 @@ class EnvWorker(Worker):
         env = self.env_list[slot_id]
         inner_env = getattr(env, "unwrapped", env)
         if not new_subtask or not hasattr(inner_env, "task_description"):
-            print(
-                "[Subtask]"
-                f" apply_skipped slot={slot_id}"
+            self._log_subtask(
+                f"apply_skipped slot={slot_id}"
                 f" new_subtask={new_subtask!r}"
-                f" has_task_description={hasattr(inner_env, 'task_description')}",
-                flush=True,
+                f" has_task_description={hasattr(inner_env, 'task_description')}"
             )
             return False
 
         inner_env.task_description = new_subtask
         if self._top_reward_enabled:
             self._reset_top_reward_state()
-        print(
-            f"[Subtask] apply_success slot={slot_id} subtask={new_subtask!r}",
-            flush=True,
-        )
+        self._log_subtask(f"apply_success slot={slot_id} subtask={new_subtask!r}")
         self.log_info(
             f"[EnvWorker] Subtask updated for slot {slot_id}: '{new_subtask}'"
         )
@@ -424,14 +418,12 @@ class EnvWorker(Worker):
         images = self._extract_planner_images(obs)
         main_task = self._initial_task_descriptions[slot_id]
         current_task = self._get_current_task_description(slot_id)
-        print(
-            "[Subtask]"
-            f" requesting slot={slot_id}"
+        self._log_subtask(
+            f"requesting slot={slot_id}"
             f" reason={reason}"
             f" main_task={main_task!r}"
             f" current_task={current_task!r}"
-            f" num_images={len(images)}",
-            flush=True,
+            f" num_images={len(images)}"
         )
         subtask_ref = self._vlm_planner.get_next_subtask.remote(
             images,
@@ -439,12 +431,8 @@ class EnvWorker(Worker):
             current_task,
         )
         new_subtask: str = ray.get(subtask_ref)
-        print(
-            "[Subtask]"
-            f" generated slot={slot_id}"
-            f" reason={reason}"
-            f" subtask={new_subtask!r}",
-            flush=True,
+        self._log_subtask(
+            f"generated slot={slot_id} reason={reason} subtask={new_subtask!r}"
         )
         return new_subtask
 
@@ -454,14 +442,12 @@ class EnvWorker(Worker):
         images = self._extract_planner_images(obs)
         main_task = self._initial_task_descriptions[slot_id]
         current_task = self._get_current_task_description(slot_id)
-        print(
-            "[Subtask]"
-            f" requesting slot={slot_id}"
+        self._log_subtask(
+            f"requesting slot={slot_id}"
             f" reason={reason}"
             f" main_task={main_task!r}"
             f" current_task={current_task!r}"
-            f" num_images={len(images)}",
-            flush=True,
+            f" num_images={len(images)}"
         )
         subtask_ref = self._vlm_planner.get_next_subtask.remote(
             images,
@@ -469,12 +455,8 @@ class EnvWorker(Worker):
             current_task,
         )
         new_subtask: str = await self._await_ray_ref(subtask_ref)
-        print(
-            "[Subtask]"
-            f" generated slot={slot_id}"
-            f" reason={reason}"
-            f" subtask={new_subtask!r}",
-            flush=True,
+        self._log_subtask(
+            f"generated slot={slot_id} reason={reason} subtask={new_subtask!r}"
         )
         return new_subtask
 
@@ -495,27 +477,23 @@ class EnvWorker(Worker):
             return True
 
         images = self._extract_planner_images(obs)
-        print(
-            "[Subtask]"
-            f" evaluating slot={slot_id}"
+        self._log_subtask(
+            f"evaluating slot={slot_id}"
             f" reason={reason}"
             f" current_task={current_task!r}"
-            f" num_images={len(images)}",
-            flush=True,
+            f" num_images={len(images)}"
         )
         score_ref = evaluator.remote(images, current_task)
         success_score = float(ray.get(score_ref))
         success_threshold = float(getattr(self, "_subtask_success_threshold", 0.5))
         completed = success_score >= success_threshold
-        print(
-            "[Subtask]"
-            f" completion_check slot={slot_id}"
+        self._log_subtask(
+            f"completion_check slot={slot_id}"
             f" reason={reason}"
             f" current_task={current_task!r}"
             f" success_score={success_score:.4f}"
             f" success_threshold={success_threshold:.4f}"
-            f" completed={completed}",
-            flush=True,
+            f" completed={completed}"
         )
         return completed
 
@@ -536,27 +514,23 @@ class EnvWorker(Worker):
             return True
 
         images = self._extract_planner_images(obs)
-        print(
-            "[Subtask]"
-            f" evaluating slot={slot_id}"
+        self._log_subtask(
+            f"evaluating slot={slot_id}"
             f" reason={reason}"
             f" current_task={current_task!r}"
-            f" num_images={len(images)}",
-            flush=True,
+            f" num_images={len(images)}"
         )
         score_ref = evaluator.remote(images, current_task)
         success_score = float(await self._await_ray_ref(score_ref))
         success_threshold = float(getattr(self, "_subtask_success_threshold", 0.5))
         completed = success_score >= success_threshold
-        print(
-            "[Subtask]"
-            f" completion_check slot={slot_id}"
+        self._log_subtask(
+            f"completion_check slot={slot_id}"
             f" reason={reason}"
             f" current_task={current_task!r}"
             f" success_score={success_score:.4f}"
             f" success_threshold={success_threshold:.4f}"
-            f" completed={completed}",
-            flush=True,
+            f" completed={completed}"
         )
         return completed
 
@@ -564,12 +538,10 @@ class EnvWorker(Worker):
         self, slot_id: int, env_output: EnvOutput
     ) -> EnvOutput:
         if self._subtask_interval <= 0 or self._vlm_planner is None:
-            print(
-                "[Subtask]"
-                f" initial_skip slot={slot_id}"
+            self._log_subtask(
+                f"initial_skip slot={slot_id}"
                 f" enabled={self._subtask_interval > 0}"
-                f" planner_attached={self._vlm_planner is not None}",
-                flush=True,
+                f" planner_attached={self._vlm_planner is not None}"
             )
             return env_output
 
@@ -578,14 +550,12 @@ class EnvWorker(Worker):
         should_prime = (
             self._steps_since_subtask_update == 0 and current_task == main_task
         )
-        print(
-            "[Subtask]"
-            f" initial_check slot={slot_id}"
+        self._log_subtask(
+            f"initial_check slot={slot_id}"
             f" should_prime={should_prime}"
             f" steps_since_update={self._steps_since_subtask_update}"
             f" main_task={main_task!r}"
-            f" current_task={current_task!r}",
-            flush=True,
+            f" current_task={current_task!r}"
         )
         if not should_prime:
             return env_output
@@ -600,12 +570,10 @@ class EnvWorker(Worker):
         self, slot_id: int, env_output: EnvOutput
     ) -> EnvOutput:
         if self._subtask_interval <= 0 or self._vlm_planner is None:
-            print(
-                "[Subtask]"
-                f" initial_skip slot={slot_id}"
+            self._log_subtask(
+                f"initial_skip slot={slot_id}"
                 f" enabled={self._subtask_interval > 0}"
-                f" planner_attached={self._vlm_planner is not None}",
-                flush=True,
+                f" planner_attached={self._vlm_planner is not None}"
             )
             return env_output
 
@@ -614,14 +582,12 @@ class EnvWorker(Worker):
         should_prime = (
             self._steps_since_subtask_update == 0 and current_task == main_task
         )
-        print(
-            "[Subtask]"
-            f" initial_check slot={slot_id}"
+        self._log_subtask(
+            f"initial_check slot={slot_id}"
             f" should_prime={should_prime}"
             f" steps_since_update={self._steps_since_subtask_update}"
             f" main_task={main_task!r}"
-            f" current_task={current_task!r}",
-            flush=True,
+            f" current_task={current_task!r}"
         )
         if not should_prime:
             return env_output
@@ -647,33 +613,27 @@ class EnvWorker(Worker):
                 from ``self.env_list``).
         """
         if self._subtask_interval <= 0 or self._vlm_planner is None:
-            print(
-                "[Subtask]"
-                f" skip slot={slot_id}"
+            self._log_subtask(
+                f"skip slot={slot_id}"
                 f" enabled={self._subtask_interval > 0}"
-                f" planner_attached={self._vlm_planner is not None}",
-                flush=True,
+                f" planner_attached={self._vlm_planner is not None}"
             )
             return
 
         self._steps_since_subtask_update += 1
-        print(
-            "[Subtask]"
-            f" tick slot={slot_id}"
+        self._log_subtask(
+            f"tick slot={slot_id}"
             f" steps_since_update={self._steps_since_subtask_update}"
             f" interval={self._subtask_interval}"
-            f" adaptive={self._subtask_adaptive}",
-            flush=True,
+            f" adaptive={self._subtask_adaptive}"
         )
         if self._subtask_adaptive and (
             self._steps_since_subtask_update < self._subtask_min_interval
         ):
-            print(
-                "[Subtask]"
-                f" waiting_min_interval slot={slot_id}"
+            self._log_subtask(
+                f"waiting_min_interval slot={slot_id}"
                 f" steps_since_update={self._steps_since_subtask_update}"
-                f" min_interval={self._subtask_min_interval}",
-                flush=True,
+                f" min_interval={self._subtask_min_interval}"
             )
             return
 
@@ -694,37 +654,31 @@ class EnvWorker(Worker):
                 and self._prev_top_score > self._subtask_score_threshold
             )
             should_trigger = should_trigger or plateau_triggered or score_triggered
-        print(
-            "[Subtask]"
-            f" trigger_check slot={slot_id}"
+        self._log_subtask(
+            f"trigger_check slot={slot_id}"
             f" should_trigger={should_trigger}"
             f" interval_triggered={interval_triggered}"
             f" plateau_triggered={plateau_triggered}"
             f" score_triggered={score_triggered}"
             f" has_prev_top_score={self._top_reward_has_prev_score}"
             f" prev_top_score={self._prev_top_score}"
-            f" recent_top_deltas={list(self._recent_top_deltas)!r}",
-            flush=True,
+            f" recent_top_deltas={list(self._recent_top_deltas)!r}"
         )
 
         if not should_trigger:
-            print(
-                "[Subtask]"
-                f" not_triggered slot={slot_id}"
-                f" steps_since_update={self._steps_since_subtask_update}",
-                flush=True,
+            self._log_subtask(
+                f"not_triggered slot={slot_id}"
+                f" steps_since_update={self._steps_since_subtask_update}"
             )
             return
 
         env = self.env_list[slot_id]
         obs = getattr(env, "last_obs", None) or {}
         if not self._is_current_subtask_complete(slot_id, obs, reason="interval"):
-            print(
-                "[Subtask]"
-                f" hold_current slot={slot_id}"
+            self._log_subtask(
+                f"hold_current slot={slot_id}"
                 f" reason=interval"
-                f" current_task={self._get_current_task_description(slot_id)!r}",
-                flush=True,
+                f" current_task={self._get_current_task_description(slot_id)!r}"
             )
             return
         new_subtask = self._request_subtask(slot_id, obs, reason="interval")
@@ -735,33 +689,27 @@ class EnvWorker(Worker):
     async def _maybe_update_subtask_async(self, slot_id: int) -> None:
         """Async variant of subtask refresh for the interact event loop."""
         if self._subtask_interval <= 0 or self._vlm_planner is None:
-            print(
-                "[Subtask]"
-                f" skip slot={slot_id}"
+            self._log_subtask(
+                f"skip slot={slot_id}"
                 f" enabled={self._subtask_interval > 0}"
-                f" planner_attached={self._vlm_planner is not None}",
-                flush=True,
+                f" planner_attached={self._vlm_planner is not None}"
             )
             return
 
         self._steps_since_subtask_update += 1
-        print(
-            "[Subtask]"
-            f" tick slot={slot_id}"
+        self._log_subtask(
+            f"tick slot={slot_id}"
             f" steps_since_update={self._steps_since_subtask_update}"
             f" interval={self._subtask_interval}"
-            f" adaptive={self._subtask_adaptive}",
-            flush=True,
+            f" adaptive={self._subtask_adaptive}"
         )
         if self._subtask_adaptive and (
             self._steps_since_subtask_update < self._subtask_min_interval
         ):
-            print(
-                "[Subtask]"
-                f" waiting_min_interval slot={slot_id}"
+            self._log_subtask(
+                f"waiting_min_interval slot={slot_id}"
                 f" steps_since_update={self._steps_since_subtask_update}"
-                f" min_interval={self._subtask_min_interval}",
-                flush=True,
+                f" min_interval={self._subtask_min_interval}"
             )
             return
 
@@ -782,25 +730,21 @@ class EnvWorker(Worker):
                 and self._prev_top_score > self._subtask_score_threshold
             )
             should_trigger = should_trigger or plateau_triggered or score_triggered
-        print(
-            "[Subtask]"
-            f" trigger_check slot={slot_id}"
+        self._log_subtask(
+            f"trigger_check slot={slot_id}"
             f" should_trigger={should_trigger}"
             f" interval_triggered={interval_triggered}"
             f" plateau_triggered={plateau_triggered}"
             f" score_triggered={score_triggered}"
             f" has_prev_top_score={self._top_reward_has_prev_score}"
             f" prev_top_score={self._prev_top_score}"
-            f" recent_top_deltas={list(self._recent_top_deltas)!r}",
-            flush=True,
+            f" recent_top_deltas={list(self._recent_top_deltas)!r}"
         )
 
         if not should_trigger:
-            print(
-                "[Subtask]"
-                f" not_triggered slot={slot_id}"
-                f" steps_since_update={self._steps_since_subtask_update}",
-                flush=True,
+            self._log_subtask(
+                f"not_triggered slot={slot_id}"
+                f" steps_since_update={self._steps_since_subtask_update}"
             )
             return
 
@@ -809,12 +753,10 @@ class EnvWorker(Worker):
         if not await self._is_current_subtask_complete_async(
             slot_id, obs, reason="interval"
         ):
-            print(
-                "[Subtask]"
-                f" hold_current slot={slot_id}"
+            self._log_subtask(
+                f"hold_current slot={slot_id}"
                 f" reason=interval"
-                f" current_task={self._get_current_task_description(slot_id)!r}",
-                flush=True,
+                f" current_task={self._get_current_task_description(slot_id)!r}"
             )
             return
         new_subtask = await self._request_subtask_async(slot_id, obs, reason="interval")

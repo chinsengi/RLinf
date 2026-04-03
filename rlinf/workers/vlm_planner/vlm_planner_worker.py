@@ -368,6 +368,10 @@ class VLMPlannerWorker:
                 )
             self._logger.info("[VLMPlannerWorker] TOPReward enabled.")
 
+    def _log_subtask(self, message: str) -> None:
+        """Route subtask planner instrumentation through the worker logger."""
+        self._logger.info(f"[Subtask] {message}")
+
     # ------------------------------------------------------------------
     # Backend loading
     # ------------------------------------------------------------------
@@ -491,12 +495,10 @@ class VLMPlannerWorker:
         Raises:
             ValueError: If *main_task* is empty.
         """
-        print(
-            "[Subtask]"
-            f" planner_request main_task={main_task!r}"
+        self._log_subtask(
+            f"planner_request main_task={main_task!r}"
             f" current_subtask={current_subtask!r}"
-            f" num_images={len(images)}",
-            flush=True,
+            f" num_images={len(images)}"
         )
         if not main_task or not main_task.strip():
             raise ValueError(
@@ -512,9 +514,8 @@ class VLMPlannerWorker:
             subtask = self._generate(messages, self._max_new_tokens_subtask)
             subtask = _normalize_subtask_output(subtask)
         except Exception as exc:
-            print(
-                f"[Subtask] planner_error main_task={main_task!r} error={exc!r}",
-                flush=True,
+            self._logger.warning(
+                f"[Subtask] planner_error main_task={main_task!r} error={exc!r}"
             )
             self._logger.warning(
                 f"[VLMPlannerWorker] get_next_subtask failed: {exc}. "
@@ -522,10 +523,7 @@ class VLMPlannerWorker:
             )
             subtask = ""
 
-        print(
-            f"[Subtask] planner_generated subtask={subtask!r}",
-            flush=True,
-        )
+        self._log_subtask(f"planner_generated subtask={subtask!r}")
         self._logger.info(f"[VLMPlannerWorker] Next subtask: '{subtask}'")
         return subtask
 
