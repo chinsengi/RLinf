@@ -176,7 +176,7 @@ env:
     # Anchor TOPReward to the episode-level goal (stable across subtask changes).
     # Use "current_task" only if stage-conditioned dense reward is needed.
     # With subtask planning enabled, TOPReward follows the current subtask.
-    subtask_interval: 1
+    subtask_interval: 10
 
 vlm_planner:
   max_new_tokens_subtask: 64

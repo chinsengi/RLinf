@@ -260,9 +260,9 @@ VLMPlanner (GPU 2) ◄── frames + instruction ── EnvWorker ────�
 | Config | Reward | Subtask Planning | Startup Command |
 |---|---|---|---|
 | `yam_ppo_openpi_async` | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
-| `yam_ppo_openpi_subtask_async` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_subtask_async` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 10`, adaptive refresh enabled) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
 | `yam_ppo_openpi_sync` | TOPReward (dense, VLM-based) | no (`subtask_interval: 0`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
-| `yam_ppo_openpi_subtask_sync` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 1`) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
+| `yam_ppo_openpi_subtask_sync` | TOPReward (dense, VLM-based) | yes (`subtask_interval: 10`, adaptive refresh enabled) | `submit_yam_training.sh --interactive` or `submit_yam_beaker_cluster.sh` |
 
 All four remote configs use the same startup flow. The `_async` pair runs
 `train_embodied_agent_staged_async.py`; the `_sync` pair runs
