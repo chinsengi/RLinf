@@ -15,8 +15,8 @@
 import numpy as np
 import torch
 
-from rlinf.envs.remote.remote_env import RemoteEnv
 from rlinf.envs.remote.proto import robot_env_pb2
+from rlinf.envs.remote.remote_env import RemoteEnv
 
 
 def test_remote_env_step_does_not_issue_implicit_reset() -> None:
@@ -36,9 +36,7 @@ def test_remote_env_step_does_not_issue_implicit_reset() -> None:
         )
 
     env.chunk_step = _fake_chunk_step
-    env.reset = (
-        lambda *args, **kwargs: reset_calls.append(True)
-    )  # type: ignore[assignment]
+    env.reset = lambda *args, **kwargs: reset_calls.append(True)  # type: ignore[assignment]
 
     obs, reward, terminated, truncated, infos = env.step(
         np.array([0.1, -0.2], dtype=np.float32),

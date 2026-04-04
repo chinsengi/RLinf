@@ -329,7 +329,10 @@ def test_compute_top_reward_uses_baseline_after_subtask_reset(monkeypatch):
     worker._recent_top_deltas.append(0.25)
 
     assert worker._apply_subtask_update(0, "grasp the left corner") is True
-    assert worker._planner_client._seed_top_reward_baseline_sync(0, worker.env_list) is True
+    assert (
+        worker._planner_client._seed_top_reward_baseline_sync(0, worker.env_list)
+        is True
+    )
     assert worker._prev_top_score == pytest.approx(2.0)
     assert worker._top_reward_has_prev_score is True
     assert list(worker._recent_top_deltas) == []

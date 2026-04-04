@@ -152,8 +152,7 @@ class VLMPlannerClient:
             0 for _ in range(slot_count)
         ]
         self._initial_task_descriptions: list[str] = [
-            str(train_cfg.get("task_description", ""))
-            for _ in range(slot_count)
+            str(train_cfg.get("task_description", "")) for _ in range(slot_count)
         ]
 
         if self._top_reward_enabled and slot_count != 1:
@@ -345,9 +344,7 @@ class VLMPlannerClient:
             getattr(env, "last_obs", None), task_description
         )
 
-    def request_subtask_sync(
-        self, slot_id: int, obs: dict[str, Any]
-    ) -> str:
+    def request_subtask_sync(self, slot_id: int, obs: dict[str, Any]) -> str:
         images = self.extract_planner_images(obs)
         main_task = self._initial_task_descriptions[slot_id]
         subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
@@ -385,7 +382,9 @@ class VLMPlannerClient:
 
         new_subtask = self.request_subtask_sync(slot_id, env_output.obs)
         if self.apply_subtask_update(slot_id, new_subtask, env_list):
-            self.sync_subtask_into_env_output(slot_id, env_output, new_subtask, env_list)
+            self.sync_subtask_into_env_output(
+                slot_id, env_output, new_subtask, env_list
+            )
             self.reset_subtask_update_state()
             self._seed_top_reward_baseline_sync(slot_id, env_list, env_output.obs)
         return env_output
@@ -464,7 +463,9 @@ class VLMPlannerClient:
                 self._episode_frames.append(frame)
 
             if len(self._episode_frames) > self._top_reward_max_frames:
-                self._episode_frames = self._episode_frames[-self._top_reward_max_frames :]
+                self._episode_frames = self._episode_frames[
+                    -self._top_reward_max_frames :
+                ]
 
             instruction = self.get_top_reward_instruction(slot_id, env_list)
             score_ref = self._vlm_planner.compute_top_reward.remote(
@@ -521,7 +522,9 @@ class VLMPlannerClient:
                 self._episode_frames.append(frame)
 
             if len(self._episode_frames) > self._top_reward_max_frames:
-                self._episode_frames = self._episode_frames[-self._top_reward_max_frames :]
+                self._episode_frames = self._episode_frames[
+                    -self._top_reward_max_frames :
+                ]
 
             instruction = self.get_top_reward_instruction(slot_id, env_list)
             score_ref = self._vlm_planner.compute_top_reward.remote(
@@ -539,7 +542,9 @@ class VLMPlannerClient:
 
         if env_output.rewards is not None:
             env_output.rewards[:, -1] = reward
-        self._log_info(f"[EnvWorker] TOPReward: score={score_t:.4f}, delta={reward:.4f}")
+        self._log_info(
+            f"[EnvWorker] TOPReward: score={score_t:.4f}, delta={reward:.4f}"
+        )
         return env_output
 
     def on_env_step(

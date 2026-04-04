@@ -90,7 +90,9 @@ def _make_env(task_description="fold the towel"):
 
 
 def _make_client() -> VLMPlannerClient:
-    client = VLMPlannerClient(slot_count=1, worker_timer=lambda *_a, **_k: nullcontext())
+    client = VLMPlannerClient(
+        slot_count=1, worker_timer=lambda *_a, **_k: nullcontext()
+    )
     client._log_info = lambda *_args, **_kwargs: None
     return client
 
@@ -151,7 +153,9 @@ def test_adaptive_subtask_update_queues_and_resolves_sync():
 
 
 def test_out_of_order_slot_resolution_keeps_both_subtask_updates():
-    client = VLMPlannerClient(slot_count=2, worker_timer=lambda *_a, **_k: nullcontext())
+    client = VLMPlannerClient(
+        slot_count=2, worker_timer=lambda *_a, **_k: nullcontext()
+    )
     client._log_info = lambda *_args, **_kwargs: None
     client._subtask_interval = 1
     client._subtask_adaptive = False
