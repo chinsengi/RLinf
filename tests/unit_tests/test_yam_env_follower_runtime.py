@@ -64,12 +64,22 @@ class _FakeRobot:
 class _FakeRobotEnv:
     def __init__(self, robots):
         self._robots = robots
+        self.reset_calls = 0
+        self.get_obs_calls = 0
 
     def get_all_robots(self):
         return self._robots
 
     def robot(self, name):
         return self._robots[name]
+
+    def get_obs(self):
+        self.get_obs_calls += 1
+        return {"raw": True}
+
+    def reset(self):
+        self.reset_calls += 1
+        return {"raw": True}
 
 
 def _make_env():
@@ -95,6 +105,16 @@ def _make_env():
             np.full(7, 1.0, dtype=np.float32),
         ),
     }
+    env._configured_reset_joint_positions = {}
+    env._skip_home_on_initial_reset = True
+    env._has_reset_once = True
+    env._restore_pd_on_next_reset = False
+    env._num_steps = 0
+    env._elapsed_steps = np.zeros(1, dtype=np.int32)
+    env._episode_start_time = None
+    env._reset_metrics = Mock()
+    env._wrap_obs = lambda raw_obs: raw_obs
+    env._is_start = True
     env._logger = Mock()
     return env, left_robot, right_robot
 
@@ -135,6 +155,24 @@ def test_move_robots_to_reset_pose_restores_default_pd_gains_after_zero_torque()
     assert right_robot.update_kp_kd_calls
     assert np.allclose(left_robot.kp, np.full(7, 10.0, dtype=np.float32))
     assert np.allclose(right_robot.kp, np.full(7, 10.0, dtype=np.float32))
+
+
+def test_reset_after_prepare_for_reconnection_rearms_pd_gains():
+    env, left_robot, right_robot = _make_env()
+
+    env.enter_zero_torque_mode()
+    env.prepare_for_reconnection()
+
+    obs, _ = env.reset()
+
+    assert obs == {"raw": True}
+    assert left_robot.update_kp_kd_calls
+    assert right_robot.update_kp_kd_calls
+    assert np.allclose(left_robot.kp, np.full(7, 10.0, dtype=np.float32))
+    assert np.allclose(right_robot.kp, np.full(7, 10.0, dtype=np.float32))
+    assert env._robot_env.get_obs_calls == 1
+    assert env._robot_env.reset_calls == 0
+    assert env._restore_pd_on_next_reset is False
 
 
 def test_read_robot_joint_position_combines_joint_and_gripper_state():

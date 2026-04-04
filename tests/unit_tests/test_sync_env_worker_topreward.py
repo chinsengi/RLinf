@@ -610,3 +610,68 @@ def test_maybe_update_subtask_fixed_mode_preserves_old_interval_behavior(monkeyp
 
     assert len(worker._vlm_planner.calls) == 1
     assert worker._steps_since_subtask_update == 0
+
+
+def test_initial_subtask_planning_replaces_parent_task_before_first_send(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = EnvWorker.__new__(EnvWorker)
+    inner_env = SimpleNamespace(task_description="Pick up the stuffed animals.")
+    env = SimpleNamespace(
+        unwrapped=inner_env,
+        last_obs={
+            "main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8),
+            "task_descriptions": ["Pick up the stuffed animals."],
+        },
+    )
+    worker.env_list = [env]
+    worker._initial_task_descriptions = ["Pick up the stuffed animals."]
+    worker._subtask_interval = 10
+    worker._steps_since_subtask_update = 0
+    worker._vlm_planner = _PlannerStub(result="pick up the blue one")
+    worker._top_reward_enabled = False
+    worker.log_info = lambda *_args, **_kwargs: None
+
+    env_output = SimpleNamespace(
+        obs={
+            "main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8),
+            "task_descriptions": ["Pick up the stuffed animals."],
+        },
+        final_obs=None,
+    )
+
+    updated = worker._maybe_plan_initial_subtask(0, env_output)
+
+    assert len(worker._vlm_planner.calls) == 1
+    assert worker._vlm_planner.calls[0][1] == "Pick up the stuffed animals."
+    assert inner_env.task_description == "pick up the blue one"
+    assert updated.obs["task_descriptions"] == ["pick up the blue one"]
+
+
+def test_initial_subtask_planning_skips_after_progress_has_started(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = EnvWorker.__new__(EnvWorker)
+    inner_env = SimpleNamespace(task_description="Pick up the stuffed animals.")
+    env = SimpleNamespace(unwrapped=inner_env, last_obs={})
+    worker.env_list = [env]
+    worker._initial_task_descriptions = ["Pick up the stuffed animals."]
+    worker._subtask_interval = 10
+    worker._steps_since_subtask_update = 3
+    worker._vlm_planner = _PlannerStub(result="pick up the blue one")
+    worker._top_reward_enabled = False
+    worker.log_info = lambda *_args, **_kwargs: None
+
+    updated = worker._maybe_plan_initial_subtask(
+        0,
+        SimpleNamespace(
+            obs={"task_descriptions": ["Pick up the stuffed animals."]},
+            final_obs=None,
+        ),
+    )
+
+    assert len(worker._vlm_planner.calls) == 0
+    assert inner_env.task_description == "Pick up the stuffed animals."
+    assert updated.obs["task_descriptions"] == ["Pick up the stuffed animals."]

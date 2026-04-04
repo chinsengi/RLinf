@@ -45,7 +45,6 @@ Recommended follower-based setup:
 ```bash
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --use-follower-servers \
     --no-tunnel
 ```
 
@@ -117,7 +116,6 @@ Robot-server-side knobs:
 ```bash
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --use-follower-servers \
     --no-tunnel \
     --port 50051
 ```
@@ -137,7 +135,6 @@ Optional gripper limit overrides:
 ```bash
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --use-follower-servers \
     --gripper-open <value> \
     --gripper-close <value> \
     --no-tunnel

@@ -50,6 +50,7 @@ def test_pi05_get_model_forwards_precision_to_adapter(monkeypatch):
             "add_value_head": True,
             "openpi": {
                 "noise_method": "flow_sde",
+                "noise_anneal": True,
                 "value_after_vlm": True,
                 "value_vlm_mode": "mean_token",
                 "train_expert_only": False,
@@ -62,6 +63,35 @@ def test_pi05_get_model_forwards_precision_to_adapter(monkeypatch):
     assert captured["checkpoint_dir"] == "unused-checkpoint"
     assert captured["precision"] == "bf16"
     assert captured["add_value_head"] is True
+    assert captured["noise_anneal"] is True
+
+
+def test_get_scheduled_noise_level_matches_legacy_openpi_schedule():
+    fixed = adapter_mod._get_scheduled_noise_level(
+        noise_level=0.5,
+        noise_anneal=False,
+        noise_params=(0.16, 0.12, 200.0),
+        global_step=50,
+        device=torch.device("cpu"),
+    )
+    annealed = adapter_mod._get_scheduled_noise_level(
+        noise_level=0.5,
+        noise_anneal=True,
+        noise_params=(0.16, 0.12, 200.0),
+        global_step=50,
+        device=torch.device("cpu"),
+    )
+    annealed_clamped = adapter_mod._get_scheduled_noise_level(
+        noise_level=0.5,
+        noise_anneal=True,
+        noise_params=(0.16, 0.12, 200.0),
+        global_step=500,
+        device=torch.device("cpu"),
+    )
+
+    assert fixed.item() == 0.5
+    assert torch.isclose(annealed, torch.tensor(0.15))
+    assert torch.isclose(annealed_clamped, torch.tensor(0.12))
 
 
 def test_normalize_floating_parameter_dtypes_only_converts_floating_params():

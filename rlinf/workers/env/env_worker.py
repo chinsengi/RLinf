@@ -320,6 +320,62 @@ class EnvWorker(Worker):
         )
         return True
 
+    @staticmethod
+    def _extract_planner_images(obs: dict[str, Any]) -> list[np.ndarray]:
+        main_images = obs.get("main_images", None)
+        if main_images is None:
+            return []
+
+        if isinstance(main_images, torch.Tensor):
+            main_images = main_images.numpy()
+
+        if main_images.ndim == 4:
+            return [main_images[0]]
+        return [main_images]
+
+    @staticmethod
+    def _inject_task_description_into_obs(
+        obs: dict[str, Any] | None, task_description: str
+    ) -> None:
+        if isinstance(obs, dict):
+            obs["task_descriptions"] = [str(task_description)]
+
+    def _sync_subtask_into_env_output(
+        self, slot_id: int, env_output: EnvOutput, task_description: str
+    ) -> None:
+        self._inject_task_description_into_obs(env_output.obs, task_description)
+        self._inject_task_description_into_obs(env_output.final_obs, task_description)
+        env = self.env_list[slot_id]
+        self._inject_task_description_into_obs(
+            getattr(env, "last_obs", None), task_description
+        )
+
+    def _request_subtask(self, slot_id: int, obs: dict[str, Any]) -> str:
+        images = self._extract_planner_images(obs)
+        main_task = self._initial_task_descriptions[slot_id]
+        subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
+        return ray.get(subtask_ref)
+
+    def _maybe_plan_initial_subtask(
+        self, slot_id: int, env_output: EnvOutput
+    ) -> EnvOutput:
+        if self._subtask_interval <= 0 or self._vlm_planner is None:
+            return env_output
+
+        main_task = self._initial_task_descriptions[slot_id]
+        current_task = self._get_current_task_description(slot_id)
+        should_prime = (
+            self._steps_since_subtask_update == 0 and current_task == main_task
+        )
+        if not should_prime:
+            return env_output
+
+        new_subtask = self._request_subtask(slot_id, env_output.obs)
+        if self._apply_subtask_update(slot_id, new_subtask):
+            self._sync_subtask_into_env_output(slot_id, env_output, new_subtask)
+            self._reset_subtask_update_state()
+        return env_output
+
     def _maybe_update_subtask(self, slot_id: int) -> None:
         """Optionally call the VLM planner to refresh the current subtask.
 
@@ -360,25 +416,8 @@ class EnvWorker(Worker):
             return
 
         env = self.env_list[slot_id]
-
-        # Collect the most recent observation image for the planner.
-        import ray
-
         obs = getattr(env, "last_obs", None) or {}
-        images = []
-        main_images = obs.get("main_images", None)
-        if main_images is not None:
-            if isinstance(main_images, torch.Tensor):
-                main_images = main_images.numpy()
-            # main_images shape: (B, H, W, 3) or (1, H, W, 3); take first frame.
-            if main_images.ndim == 4:
-                images.append(main_images[0])
-            else:
-                images.append(main_images)
-
-        main_task = self._initial_task_descriptions[slot_id]
-        subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
-        new_subtask: str = ray.get(subtask_ref)
+        new_subtask = self._request_subtask(slot_id, obs)
 
         if self._apply_subtask_update(slot_id, new_subtask):
             self._reset_subtask_update_state()
@@ -743,7 +782,7 @@ class EnvWorker(Worker):
         )
         return chunk_action
 
-    def recv_rollout_results(
+    async def recv_rollout_results(
         self, input_channel: Channel, mode="train"
     ) -> RolloutResult:
         assert mode in ["train", "eval"], f"{mode=} is not supported"
@@ -768,11 +807,12 @@ class EnvWorker(Worker):
             raise ValueError("Cannot infer batch size from rollout result.")
 
         for src_rank, expected_size in src_ranks_and_sizes:
-            rollout_result = input_channel.get(
+            rollout_result = await input_channel.get(
                 key=CommMapper.build_channel_key(
                     src_rank, self._rank, extra=f"{mode}_rollout_results"
                 ),
-            )
+                async_op=True,
+            ).async_wait()
 
             actual_size = _infer_rollout_batch_size(rollout_result)
             assert actual_size == expected_size, (
@@ -1064,7 +1104,10 @@ class EnvWorker(Worker):
         for epoch in range(self.rollout_epoch):
             env_outputs = self.bootstrap_step()
             for slot_id in range(self.slot_count):
-                env_output: EnvOutput = env_outputs[slot_id]
+                env_output: EnvOutput = self._maybe_plan_initial_subtask(
+                    slot_id, env_outputs[slot_id]
+                )
+                env_outputs[slot_id] = env_output
                 env_batch = env_output.to_dict()
                 self.send_env_batch(
                     output_channel,
@@ -1087,7 +1130,7 @@ class EnvWorker(Worker):
                             env_output.intervene_flags,
                         )
 
-                    rollout_result = self.recv_rollout_results(
+                    rollout_result = await self.recv_rollout_results(
                         input_channel, mode="train"
                     )
                     rewards = self.compute_bootstrap_rewards(
@@ -1143,7 +1186,9 @@ class EnvWorker(Worker):
                         env_output.intervene_flags,
                     )
 
-                rollout_result = self.recv_rollout_results(input_channel, mode="train")
+                rollout_result = await self.recv_rollout_results(
+                    input_channel, mode="train"
+                )
                 rewards = self.compute_bootstrap_rewards(
                     env_output, rollout_result.bootstrap_values
                 )

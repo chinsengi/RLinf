@@ -46,7 +46,7 @@ session. Training is not submitted yet.
 
 ```bash
 bash scripts/submit_yam_training.sh \
-    --config yam_ppo_openpi_async \
+    --config yam_ppo_openpi \
     --interactive --allow-dirty
 ```
 
@@ -55,8 +55,9 @@ Use `yam_ppo_openpi_sync` instead if you want the sync staged runtime.
 In `--interactive` mode, this command only creates the Beaker session and
 starts Ray. It does **not** build or run the training command, so training-only
 arguments such as `--model-path`, `--task`, or Hydra overrides after `--`
-(for example `algorithm.lr=0`) have no effect at this step. Apply them in
-Step 4 when you launch the Python training command manually.
+(for example `actor.optim.lr=0 actor.optim.value_lr=0`) have no effect at this
+step. Apply them in Step 4 when you launch the Python training command
+manually.
 
 Beaker prints a session ID. Keep it for Step 4, where you will attach and start
 training manually. Pass `--workspace <beaker-workspace>` if you want to submit
@@ -76,7 +77,6 @@ Use `yam_ppo_openpi_sync` here as well if you want the sync staged runtime.
 
 That path starts Ray and waits without creating an interactive Beaker session.
 In that case, use direct SSH in Step 4 instead of `beaker session attach`.
-
 ### Step 2: Get the container's Tailscale IP
 
 Watch the Beaker logs for:
@@ -91,28 +91,36 @@ this ip is also aliased as `beaker-0`. Sometimes you will use it to SSH into the
 ### Step 3: Start the robot server with persistent reverse SSH tunnel
 
 ```bash
-# Real hardware — tunnel reconnects automatically when new Beaker jobs start
+# Real hardware — async/default desktop timing
+bash scripts/start_robot_server.sh \
+    --config examples/embodiment/config/env/yam_pi05_follower.yaml
+
+# Real hardware — sync desktop timing
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
-    --use-follower-servers
+    --train-config examples/embodiment/config/yam_ppo_openpi_sync.yaml
 
 # Dummy mode (no CAN bus / robot hardware needed — for pipeline testing)
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
     --dummy
 ```
 
-Add `--verbose` to inspect robot joint states before serving and log every
-chunk step action during execution. The first chunk will be paused until you
-approve it by running `touch /tmp/rlinf_approve_chunk` in another terminal:
+Use `--verbose` to inspect robot joint states before serving and log every
+chunk step action during execution. Use `--sbs` for step-by-step debugging; it
+implies `--verbose`, still waits for first-chunk approval, and then pauses for
+Enter before every chunk:
 
 ```bash
+# Verbose logging + first-chunk approval
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-    --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
-    --use-follower-servers --verbose
+    --verbose
+
+# Step-by-step debugging (implies --verbose)
+bash scripts/start_robot_server.sh \
+    --config examples/embodiment/config/env/yam_pi05_follower.yaml \
+    --sbs
 ```
 
 The server stays running indefinitely. `autossh` reconnects the reverse tunnel
@@ -123,15 +131,20 @@ Behavior to expect:
 
 - When the desktop-side episode timer expires, the server returns both arms to
   home, shows the configured cooldown countdown, then restarts from home.
-- `--train-config` makes the desktop server read timing from the same Beaker
-  training YAML, so `env.return_home_minutes` and `env.server_cooldown_minutes`
-  only need to be edited once for the desktop-side timer. Training rollout
-  length is controlled separately by `env.rollout_horizon_chunks`.
-- If you omit `--train-config`, the launcher now defaults to
-  `examples/embodiment/config/yam_ppo_openpi_async.yaml`.
-- You can point `--train-config` at either the `_async` or `_sync` YAM config.
+- `--train-config` is optional. The desktop server itself only needs `--config`.
+- If you omit `--train-config`, the launcher uses the async timing defaults.
+  Pass `examples/embodiment/config/yam_ppo_openpi_sync.yaml` only when you want
+  the desktop return-home / cooldown timer to match the sync training YAML.
+- Follower servers start by default. Use `--no-follower-servers` only if you
+  explicitly want to skip them.
+- With `--verbose`, the first chunk pauses until you approve it by running
+  `touch /tmp/rlinf_approve_chunk` in another terminal.
+- With `--sbs`, the server does everything from `--verbose` and also waits for
+  Enter before every chunk.
 - A Beaker-side `Ctrl+C` returns the robot home and switches to zero-torque
   waiting mode without shutting down the desktop server.
+- Starting a new Beaker training client re-arms the follower controller and
+  resumes from home.
 - A desktop-side `Ctrl+C` performs the full local shutdown after returning home.
 
 > **Note:** `autossh` must be installed on the desktop. The script prints
@@ -146,6 +159,8 @@ attach to the Beaker session and launch training manually:
 beaker session attach <session-id>
 cd /weka/oe-training-default/shiruic/RLinf
 source .venv/bin/activate
+
+# Async staged runtime
 python examples/embodiment/train_embodied_agent_staged_async.py \
     --config-name yam_ppo_openpi_async \
     actor.model.model_path=thomas0829/folding_towel_pi05 \
@@ -162,8 +177,10 @@ python examples/embodiment/train_embodied_agent_staged.py \
     'env.eval.task_description=Fold the towel.'
 ```
 
-To run without gradient updating the model from the same interactive session, add `algorithm.lr=0`
-to the manual training command:
+These YAM configs already disable weight updates with `actor.optim.lr=0` and
+`actor.optim.value_lr=0`. If you override either one elsewhere and want to keep
+the run in no-update mode from the same interactive session, set both back to
+zero in the manual training command:
 
 ```bash
 python examples/embodiment/train_embodied_agent_staged_async.py \
@@ -172,7 +189,8 @@ python examples/embodiment/train_embodied_agent_staged_async.py \
     rollout.model.model_path=thomas0829/folding_towel_pi05 \
     'env.train.task_description=Fold the towel.' \
     'env.eval.task_description=Fold the towel.' \
-    algorithm.lr=0
+    actor.optim.lr=0 \
+    actor.optim.value_lr=0
 ```
 
 Apply any other Hydra overrides here as well, for example:
@@ -194,8 +212,18 @@ SSH into the container and run the same command there:
 ssh shiruic@beaker-0  # or ssh shiruic@<tailscale-ip>
 cd /weka/oe-training-default/shiruic/RLinf
 source .venv/bin/activate
+
+# Async staged runtime
 python examples/embodiment/train_embodied_agent_staged_async.py \
     --config-name yam_ppo_openpi_async \
+    actor.model.model_path=thomas0829/folding_towel_pi05 \
+    rollout.model.model_path=thomas0829/folding_towel_pi05 \
+    'env.train.task_description=Fold the towel.' \
+    'env.eval.task_description=Fold the towel.'
+
+# Sync staged runtime
+python examples/embodiment/train_embodied_agent_staged.py \
+    --config-name yam_ppo_openpi_sync \
     actor.model.model_path=thomas0829/folding_towel_pi05 \
     rollout.model.model_path=thomas0829/folding_towel_pi05 \
     'env.train.task_description=Fold the towel.' \
