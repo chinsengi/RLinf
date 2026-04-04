@@ -42,13 +42,14 @@ from rlinf.workers.env.vlm_planner_client import (
 class _PlannerStub:
     def __init__(self, subtask_result="grasp the corner", score_result=1.25):
         self.calls = []
+        self.subtask_result = subtask_result
         self.scores = [score_result]
         self.get_next_subtask = SimpleNamespace(remote=self._get_next_subtask)
         self.compute_top_reward = SimpleNamespace(remote=self._compute_top_reward)
 
     def _get_next_subtask(self, images, main_task):
         self.calls.append(("subtask", images, main_task))
-        return "grasp the corner"
+        return self.subtask_result
 
     def _compute_top_reward(self, frames, instruction):
         self.calls.append(("top_reward", list(frames), instruction))
@@ -92,6 +93,11 @@ def _make_client() -> VLMPlannerClient:
     client = VLMPlannerClient(slot_count=1, worker_timer=lambda *_a, **_k: nullcontext())
     client._log_info = lambda *_args, **_kwargs: None
     return client
+
+
+@pytest.fixture(autouse=True)
+def _mock_ray_get(monkeypatch):
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
 
 
 def test_initial_subtask_planning_updates_env_and_observations():
@@ -138,7 +144,10 @@ def test_adaptive_subtask_update_queues_and_resolves_sync():
 
     assert env.unwrapped.task_description == "grasp the corner"
     assert client._steps_since_subtask_update == 0
-    assert len(client._vlm_planner.calls) == 1
+    assert [call[0] for call in client._vlm_planner.calls] == [
+        "subtask",
+        "top_reward",
+    ]
 
 
 def test_out_of_order_slot_resolution_keeps_both_subtask_updates():
@@ -162,6 +171,33 @@ def test_out_of_order_slot_resolution_keeps_both_subtask_updates():
     assert envs[0].unwrapped.task_description == "grasp the left corner"
     assert envs[1].unwrapped.task_description == "align the top block"
     assert client._last_applied_subtask_request_id == [1, 1]
+
+
+def test_subtask_switch_seeds_top_reward_baseline_for_next_chunk():
+    client = _make_client()
+    client._top_reward_enabled = True
+    client._top_reward_max_frames = 16
+    client._initial_task_descriptions = ["fold the towel"]
+    client._vlm_planner = _PlannerStub(score_result=1.0)
+    client._vlm_planner.scores = [1.0, 1.4]
+
+    env = _make_env("fold the towel")
+
+    assert client.apply_subtask_update(0, "grasp the corner", [env]) is True
+    assert client._seed_top_reward_baseline_sync(0, [env]) is True
+    assert client._prev_top_score == pytest.approx(1.0)
+    assert client._top_reward_has_prev_score is True
+
+    env_output = EnvOutput(
+        obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+        rewards=torch.zeros((1, 1), dtype=torch.float32),
+        dones=torch.zeros((1, 1), dtype=torch.bool),
+    )
+    client.submit_top_reward(env_output, 0, [env])
+    client.resolve_pending_sync(0, [env])
+
+    assert env_output.rewards[0, -1].item() == pytest.approx(0.4)
+    assert list(client._recent_top_deltas) == [pytest.approx(0.4)]
 
 
 def test_submit_top_reward_is_nonblocking_until_sync_resolve():

@@ -229,6 +229,88 @@ class VLMPlannerClient:
         )
         return True
 
+    def _seed_top_reward_baseline_state(
+        self,
+        slot_id: int,
+        env_list: list[Any],
+        obs: dict[str, Any] | None,
+        score_t: float,
+    ) -> bool:
+        if not self._top_reward_enabled or obs is None:
+            return False
+
+        images = self.extract_planner_images(obs)
+        if not images:
+            return False
+
+        self._episode_frames = [np.asarray(images[0])]
+        self._prev_top_score = float(score_t)
+        self._top_reward_has_prev_score = True
+        self._log_info(
+            "[EnvWorker] Seeded TOPReward baseline "
+            f"for slot {slot_id}: score={score_t:.4f}, "
+            f"instruction='{self.get_top_reward_instruction(slot_id, env_list)}'"
+        )
+        return True
+
+    def _seed_top_reward_baseline_sync(
+        self,
+        slot_id: int,
+        env_list: list[Any],
+        obs: dict[str, Any] | None = None,
+    ) -> bool:
+        """Seed TOPReward after a subtask switch without emitting reward."""
+        if not self._top_reward_enabled or self._vlm_planner is None:
+            return False
+
+        baseline_obs = obs
+        if baseline_obs is None:
+            env = self._get_env(env_list, slot_id)
+            baseline_obs = getattr(env, "last_obs", None)
+        if baseline_obs is None:
+            return False
+
+        images = self.extract_planner_images(baseline_obs)
+        if not images:
+            return False
+
+        instruction = self.get_top_reward_instruction(slot_id, env_list)
+        with self._worker_timer("top_reward"):
+            score_ref = self._vlm_planner.compute_top_reward.remote(images, instruction)
+            score_t = ray.get(score_ref)
+        return self._seed_top_reward_baseline_state(
+            slot_id, env_list, baseline_obs, score_t
+        )
+
+    async def _seed_top_reward_baseline_async(
+        self,
+        slot_id: int,
+        env_list: list[Any],
+        obs: dict[str, Any] | None = None,
+    ) -> bool:
+        """Async counterpart to ``_seed_top_reward_baseline_sync``."""
+        if not self._top_reward_enabled or self._vlm_planner is None:
+            return False
+
+        baseline_obs = obs
+        if baseline_obs is None:
+            env = self._get_env(env_list, slot_id)
+            baseline_obs = getattr(env, "last_obs", None)
+        if baseline_obs is None:
+            return False
+
+        images = self.extract_planner_images(baseline_obs)
+        if not images:
+            return False
+
+        instruction = self.get_top_reward_instruction(slot_id, env_list)
+        with self._worker_timer("top_reward"):
+            score_ref = self._vlm_planner.compute_top_reward.remote(images, instruction)
+            score_t = await score_ref
+        return self._seed_top_reward_baseline_state(
+            slot_id, env_list, baseline_obs, score_t
+        )
+
     @staticmethod
     def extract_planner_images(obs: dict[str, Any]) -> list[np.ndarray]:
         main_images = obs.get("main_images", None)
@@ -305,6 +387,7 @@ class VLMPlannerClient:
         if self.apply_subtask_update(slot_id, new_subtask, env_list):
             self.sync_subtask_into_env_output(slot_id, env_output, new_subtask, env_list)
             self.reset_subtask_update_state()
+            self._seed_top_reward_baseline_sync(slot_id, env_list, env_output.obs)
         return env_output
 
     def maybe_update_subtask(self, slot_id: int, env_list: list[Any]) -> None:
@@ -345,19 +428,22 @@ class VLMPlannerClient:
         pending: _PendingSubtask,
         new_subtask: str,
         env_list: list[Any],
-    ) -> None:
+    ) -> bool:
         if pending.request_id <= self._last_applied_subtask_request_id[slot_id]:
-            return
+            return False
         if self.apply_subtask_update(slot_id, new_subtask, env_list):
             self._last_applied_subtask_request_id[slot_id] = pending.request_id
             self.reset_subtask_update_state()
+            return True
+        return False
 
     def resolve_pending_subtask_sync(self, slot_id: int, env_list: list[Any]) -> None:
         pending = self._pending_subtasks.pop(slot_id, None)
         if pending is None:
             return
         new_subtask = ray.get(pending.ref)
-        self.finish_pending_subtask(slot_id, pending, new_subtask, env_list)
+        if self.finish_pending_subtask(slot_id, pending, new_subtask, env_list):
+            self._seed_top_reward_baseline_sync(slot_id, env_list)
 
     def submit_top_reward(
         self,
@@ -480,4 +566,7 @@ class VLMPlannerClient:
         pending_subtask = self._pending_subtasks.pop(slot_id, None)
         if pending_subtask is not None:
             new_subtask = await pending_subtask.ref
-            self.finish_pending_subtask(slot_id, pending_subtask, new_subtask, env_list)
+            if self.finish_pending_subtask(
+                slot_id, pending_subtask, new_subtask, env_list
+            ):
+                await self._seed_top_reward_baseline_async(slot_id, env_list)

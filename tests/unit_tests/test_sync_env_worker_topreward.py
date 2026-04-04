@@ -45,6 +45,7 @@ except Exception:
     sys.modules.setdefault("ray.actor", ray_actor_stub)
 
 from rlinf.workers.env.env_worker import EnvWorker, _apply_action_chunk_smoothing
+from rlinf.workers.env.vlm_planner_client import VLMPlannerClient
 
 
 class _CfgNode(dict):
@@ -63,15 +64,32 @@ def _cfg_node(data):
     return data
 
 
+@pytest.fixture(autouse=True)
+def _mock_ray_get(monkeypatch):
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+
+
+def _attach_planner_client(worker: EnvWorker, *, slot_count: int = 1) -> None:
+    worker._planner_client = VLMPlannerClient(
+        slot_count=slot_count,
+        log_info=lambda *_args, **_kwargs: None,
+        worker_timer=lambda *_args, **_kwargs: nullcontext(),
+    )
+
+
 class _PlannerStub:
     def __init__(self, result="pick up the corner"):
         self.calls = []
         self.result = result
         self.get_next_subtask = SimpleNamespace(remote=self._get_next_subtask)
+        self.compute_top_reward = SimpleNamespace(remote=self._compute_top_reward)
 
     def _get_next_subtask(self, images, main_task):
         self.calls.append((images, main_task))
         return self.result
+
+    def _compute_top_reward(self, frames, instruction):
+        return 0.0
 
 
 class _TopRewardPlannerStub:
@@ -103,6 +121,7 @@ def _make_adaptive_worker(
         last_obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
     )
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker.env_list = [env]
     worker._initial_task_descriptions = ["fold the towel"]
     worker._subtask_interval = subtask_interval
@@ -130,8 +149,12 @@ def _make_adaptive_worker(
 
 def _make_top_reward_worker(scores, *, subtask_interval=0):
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker.env_list = [
-        SimpleNamespace(unwrapped=SimpleNamespace(task_description="fold the towel"))
+        SimpleNamespace(
+            unwrapped=SimpleNamespace(task_description="fold the towel"),
+            last_obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+        )
     ]
     worker._initial_task_descriptions = ["fold the towel"]
     worker._top_reward_enabled = True
@@ -157,6 +180,7 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     """_apply_subtask_update calls _reset_top_reward_state() without args."""
     inner_env = SimpleNamespace(task_description="fold the towel")
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
     worker._top_reward_enabled = True
     worker._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
@@ -179,6 +203,7 @@ def test_apply_subtask_update_resets_when_subtask_changes():
     """Subtask updates reset reward state when TOPReward is enabled."""
     inner_env = SimpleNamespace(task_description="fold the towel")
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
     worker._top_reward_enabled = True
     worker._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
@@ -249,6 +274,7 @@ def test_get_next_subtask_prompt_includes_main_task():
 
 def test_top_reward_uses_initial_task_when_subtask_planning_disabled():
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker._subtask_interval = 0
     worker._initial_task_descriptions = ["fold the towel"]
     worker.env_list = [
@@ -259,6 +285,7 @@ def test_top_reward_uses_initial_task_when_subtask_planning_disabled():
 
 def test_top_reward_uses_current_task_when_subtask_planning_enabled():
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker._subtask_interval = 10
     worker._initial_task_descriptions = ["fold the towel"]
     worker.env_list = [
@@ -291,17 +318,21 @@ def test_compute_top_reward_seeds_episode_with_zero_delta(monkeypatch):
     assert list(worker._recent_top_deltas) == [0.0, 0.5]
 
 
-def test_compute_top_reward_seeds_zero_delta_after_subtask_reset(monkeypatch):
+def test_compute_top_reward_uses_baseline_after_subtask_reset(monkeypatch):
     import ray
 
     monkeypatch.setattr(ray, "get", lambda ref: ref)
-    worker = _make_top_reward_worker([2.0], subtask_interval=10)
+    worker = _make_top_reward_worker([2.0, 2.5], subtask_interval=10)
     worker._episode_frames = [np.zeros((8, 8, 3), dtype=np.uint8)]
     worker._prev_top_score = 1.5
     worker._top_reward_has_prev_score = True
     worker._recent_top_deltas.append(0.25)
 
     assert worker._apply_subtask_update(0, "grasp the left corner") is True
+    assert worker._planner_client._seed_top_reward_baseline_sync(0, worker.env_list) is True
+    assert worker._prev_top_score == pytest.approx(2.0)
+    assert worker._top_reward_has_prev_score is True
+    assert list(worker._recent_top_deltas) == []
 
     env_output = SimpleNamespace(
         obs={"main_images": torch.zeros((1, 8, 8, 3), dtype=torch.uint8)},
@@ -309,10 +340,10 @@ def test_compute_top_reward_seeds_zero_delta_after_subtask_reset(monkeypatch):
     )
     updated_output = worker._compute_top_reward(env_output, 0)
 
-    assert updated_output.rewards[:, -1].item() == pytest.approx(0.0)
-    assert worker._prev_top_score == pytest.approx(2.0)
+    assert updated_output.rewards[:, -1].item() == pytest.approx(0.5)
+    assert worker._prev_top_score == pytest.approx(2.5)
     assert worker._top_reward_has_prev_score is True
-    assert list(worker._recent_top_deltas) == [0.0]
+    assert list(worker._recent_top_deltas) == [0.5]
 
 
 def test_submit_top_reward_is_nonblocking_until_resolve(monkeypatch):
@@ -359,6 +390,7 @@ def test_resolve_top_reward_updates_delta_after_previous_score(monkeypatch):
 
 def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker.cfg = _cfg_node(
         {
             "env": {
@@ -405,6 +437,7 @@ def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
 
 def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled():
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker.cfg = _cfg_node(
         {
             "env": {
@@ -451,6 +484,7 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
 
 def test_bootstrap_step_reuses_last_obs_for_remote_server_managed_env():
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker.cfg = _cfg_node(
         {
             "env": {
@@ -493,6 +527,7 @@ def test_env_interact_step_resets_subtask_counter_on_episode_done(monkeypatch):
     )
 
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker.cfg = _cfg_node(
         {
             "env": {
@@ -656,6 +691,7 @@ def test_maybe_update_subtask_respects_adaptive_cooldown(monkeypatch):
     assert worker._steps_since_subtask_update == 1
 
     worker._maybe_update_subtask(0)
+    worker._resolve_pending_subtask(0)
 
     assert len(worker._vlm_planner.calls) == 1
     assert worker._steps_since_subtask_update == 0
@@ -701,10 +737,8 @@ def test_maybe_update_subtask_fixed_mode_preserves_old_interval_behavior(monkeyp
 
 
 def test_initial_subtask_planning_replaces_parent_task_before_first_send(monkeypatch):
-    import ray
-
-    monkeypatch.setattr(ray, "get", lambda ref: ref)
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     inner_env = SimpleNamespace(task_description="Pick up the stuffed animals.")
     env = SimpleNamespace(
         unwrapped=inner_env,
@@ -738,10 +772,8 @@ def test_initial_subtask_planning_replaces_parent_task_before_first_send(monkeyp
 
 
 def test_initial_subtask_planning_skips_after_progress_has_started(monkeypatch):
-    import ray
-
-    monkeypatch.setattr(ray, "get", lambda ref: ref)
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     inner_env = SimpleNamespace(task_description="Pick up the stuffed animals.")
     env = SimpleNamespace(unwrapped=inner_env, last_obs={})
     worker.env_list = [env]
