@@ -50,6 +50,33 @@ bash scripts/submit_yam_training.sh \
     --interactive --allow-dirty
 ```
 
+Use `yam_ppo_openpi_sync` instead if you want the sync staged runtime.
+
+In `--interactive` mode, this command only creates the Beaker session and
+starts Ray. It does **not** build or run the training command, so training-only
+arguments such as `--model-path`, `--task`, or Hydra overrides after `--`
+(for example `actor.optim.lr=0 actor.optim.value_lr=0`) have no effect at this
+step. Apply them in Step 4 when you launch the Python training command
+manually.
+
+Beaker prints a session ID. Keep it for Step 4, where you will attach and start
+training manually. Pass `--workspace <beaker-workspace>` if you want to submit
+outside the default workspace. This keeps server startup and training startup
+decoupled.
+
+If you have access to non-interactive Beaker jobs, you can also start an idle
+cluster instead:
+
+```bash
+bash scripts/submit_yam_beaker_cluster.sh \
+    --config yam_ppo_openpi_async \
+    --allow-dirty
+```
+
+Use `yam_ppo_openpi_sync` here as well if you want the sync staged runtime.
+
+That path starts Ray and waits without creating an interactive Beaker session.
+In that case, use direct SSH in Step 4 instead of `beaker session attach`.
 ### Step 2: Get the container's Tailscale IP
 
 Watch the Beaker logs for:
@@ -150,8 +177,10 @@ python examples/embodiment/train_embodied_agent_staged.py \
     'env.eval.task_description=Fold the towel.'
 ```
 
-To run without gradient updating the model from the same interactive session, add `algorithm.lr=0`
-to the manual training command:
+These YAM configs already disable weight updates with `actor.optim.lr=0` and
+`actor.optim.value_lr=0`. If you override either one elsewhere and want to keep
+the run in no-update mode from the same interactive session, set both back to
+zero in the manual training command:
 
 ```bash
 python examples/embodiment/train_embodied_agent_staged_async.py \
@@ -160,7 +189,8 @@ python examples/embodiment/train_embodied_agent_staged_async.py \
     rollout.model.model_path=thomas0829/folding_towel_pi05 \
     'env.train.task_description=Fold the towel.' \
     'env.eval.task_description=Fold the towel.' \
-    algorithm.lr=0
+    actor.optim.lr=0 \
+    actor.optim.value_lr=0
 ```
 
 Apply any other Hydra overrides here as well, for example:
