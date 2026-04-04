@@ -279,6 +279,8 @@ env** 之间的流水线重叠，从而提升 rollout 效率。
 - 通过 ``num_steps`` 设置不同的流匹配步数。
 
 - 通过修改 ``noise_method`` 使用不同的加噪方式。我们提供\ `flow_sde <https://arxiv.org/abs/2505.05470>`__\ 和\ `flow_noise <https://arxiv.org/abs/2505.22094>`__\ 两种方式。其中 ``noise_level`` 用于控制 ``flow_sde`` 的加噪强度，``noise_logvar_range`` 用于控制 ``flow_noise`` 的可学习噪声范围。
+  如果启用 ``noise_anneal: True``，则 ``noise_params`` 会按
+  ``[noise_start, noise_end, noise_anneal_steps]`` 的形式作用于 ``flow_sde`` 和 ``flow_cps``。
 
 - 通过设置 ``pi05: True`` 启用 π\ :sub:`0.5`\ 模型。
 
@@ -295,6 +297,8 @@ env** 之间的流水线重叠，从而提升 rollout 效率。
    openpi:
      noise_method: "flow_sde" # [flow_sde,flow_noise] 噪声注入方式，flow-sde 通过ode-sde转换引入噪声，flow-noise 引入噪声网络注入噪声
      noise_level: 0.5 # flow-sde 的噪声强度
+     noise_anneal: False # 若为True，则按 noise_params 对 flow-sde / flow-cps 噪声做退火
+     noise_params: [0.7, 0.3, 400] # [noise_start, noise_end, noise_anneal_steps]
      noise_logvar_range: [0.08, 0.16] # 针对 flow-noise 的可学习噪声范围
      joint_logprob: False # 是否优化联合概率密度函数，对于flow-sde，请设置为False，对于flow-noise，请设置为True
 

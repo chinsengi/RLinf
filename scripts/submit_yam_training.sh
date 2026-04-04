@@ -3,6 +3,7 @@
 # submit_yam_training.sh — Submit YAM training to Beaker.
 #
 # Supports staged YAM configs with explicit runtime suffixes:
+#   yam_ppo_openpi                  — alias of yam_ppo_openpi_async
 #   yam_ppo_openpi_async            — async PPO + π₀.5 + TOPReward (no subtask planning)
 #   yam_ppo_openpi_subtask_async    — async PPO + π₀.5 + TOPReward + subtask planning
 #   yam_ppo_openpi_sync             — sync PPO + π₀.5 + TOPReward (no subtask planning)
@@ -21,7 +22,7 @@
 #   1. Robot server + reverse SSH tunnel running on desktop:
 #        bash scripts/start_robot_server.sh \
 #            --config examples/embodiment/config/env/yam_pi05_follower.yaml \
-#            --use-follower-servers [--remote-host beaker-0] [--dummy]
+#            [--remote-host beaker-0] [--dummy]
 #   2. gantry installed: pip install beaker-gantry
 #
 # Usage:
@@ -62,6 +63,7 @@ Usage: bash scripts/submit_yam_training.sh [OPTIONS] [-- HYDRA_OVERRIDES...]
 Submit YAM training to Beaker with automatic component placement.
 
 Supported staged YAM configs (all require 3 GPUs):
+  yam_ppo_openpi                  3 GPUs — alias of yam_ppo_openpi_async
   yam_ppo_openpi_async            3 GPUs — async PPO, TOPReward only
   yam_ppo_openpi_subtask_async    3 GPUs — async PPO, TOPReward + VLM subtask planning
   yam_ppo_openpi_sync             3 GPUs — sync PPO, TOPReward only
@@ -92,7 +94,7 @@ After submission:
   1. Check Beaker logs until the head node is up on Tailscale
   2. Start robot server with reverse SSH tunnel to the stable hostname:
      bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml \
-           --use-follower-servers --remote-host beaker-0 [--dummy]
+           --remote-host beaker-0 [--dummy]
 
 Using the stable Tailscale hostname is more reliable than using a one-off IP:
 if the Beaker node is replaced, autossh can reconnect to the new job when it
@@ -151,9 +153,14 @@ if [ -z "$EXP_NAME" ]; then
     fi
 fi
 
-case "$CONFIG_NAME" in
+RESOLVED_CONFIG_NAME="$CONFIG_NAME"
+if [ "$CONFIG_NAME" = "yam_ppo_openpi" ]; then
+    RESOLVED_CONFIG_NAME="yam_ppo_openpi_async"
+fi
+
+case "$RESOLVED_CONFIG_NAME" in
     *_desktop_async|*_desktop_sync)
-        echo "Error: ${CONFIG_NAME} uses the desktop-driven 2-node topology."
+        echo "Error: ${RESOLVED_CONFIG_NAME} uses the desktop-driven 2-node topology."
         echo "Use scripts/submit_yam_beaker_cluster.sh to start the Beaker head"
         echo "and scripts/join_beaker_cluster.sh from the desktop to join node rank 1."
         exit 1
@@ -164,7 +171,7 @@ esac
 IS_TOPREWARD=false
 ENTRY_SCRIPT="train_embodied_agent.py"
 
-case "$CONFIG_NAME" in
+case "$RESOLVED_CONFIG_NAME" in
     yam_*_async)
         IS_TOPREWARD=true
         ENTRY_SCRIPT="train_embodied_agent_staged_async.py"
@@ -253,6 +260,9 @@ if [ -n "$INTERACTIVE" ]; then
 
     echo "=== Submit Interactive Beaker Session ==="
     echo "Config:       ${CONFIG_NAME}"
+    if [ "$RESOLVED_CONFIG_NAME" != "$CONFIG_NAME" ]; then
+        echo "Resolved:     ${RESOLVED_CONFIG_NAME}"
+    fi
     echo "GPUs:         ${GPUS}"
     echo "Cluster:      ${CLUSTER}"
     echo "Workspace:    ${WORKSPACE}"
@@ -279,7 +289,7 @@ else
 
     # --- Build the training command (runs on head node only) ---
     TRAIN_CMD="python examples/embodiment/${ENTRY_SCRIPT}"
-    TRAIN_CMD+=" --config-name ${CONFIG_NAME}"
+    TRAIN_CMD+=" --config-name ${RESOLVED_CONFIG_NAME}"
     TRAIN_CMD+=" cluster.num_nodes=${REPLICAS}"
 
     # For single replica the placement is baked into the config:
@@ -403,7 +413,7 @@ else
     echo "  1. Check logs for '=== Tailscale IP ===' to get the head node IP"
     echo "  2. Start robot server: bash scripts/start_robot_server.sh \\"
     echo "       --config examples/embodiment/config/env/yam_pi05_follower.yaml \\"
-    echo "       --use-follower-servers --remote-host <tailscale-ip> [--dummy]"
+    echo "       --remote-host <tailscale-ip> [--dummy]"
     echo ""
 
     if [ "$DRY_RUN" = "true" ]; then

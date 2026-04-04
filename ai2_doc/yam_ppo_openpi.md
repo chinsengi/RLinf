@@ -152,7 +152,6 @@ Then start the desktop-side robot server:
 bash scripts/start_robot_server.sh \
     --config examples/embodiment/config/env/yam_pi05_follower.yaml \
     --train-config examples/embodiment/config/yam_ppo_openpi_async.yaml \
-    --use-follower-servers \
     --remote-host <tailscale-ip>
 ```
 
