@@ -321,23 +321,17 @@ class EnvWorker(Worker):
         return True
 
     @staticmethod
-    def _extract_planner_images(obs: Any) -> list[np.ndarray]:
-        images = []
-        if not isinstance(obs, dict):
-            return images
-
+    def _extract_planner_images(obs: dict[str, Any]) -> list[np.ndarray]:
         main_images = obs.get("main_images", None)
         if main_images is None:
-            return images
+            return []
 
         if isinstance(main_images, torch.Tensor):
             main_images = main_images.numpy()
 
         if main_images.ndim == 4:
-            images.append(main_images[0])
-        else:
-            images.append(main_images)
-        return images
+            return [main_images[0]]
+        return [main_images]
 
     @staticmethod
     def _inject_task_description_into_obs(
@@ -356,9 +350,7 @@ class EnvWorker(Worker):
             getattr(env, "last_obs", None), task_description
         )
 
-    def _request_subtask(self, slot_id: int, obs: Any) -> str:
-        import ray
-
+    def _request_subtask(self, slot_id: int, obs: dict[str, Any]) -> str:
         images = self._extract_planner_images(obs)
         main_task = self._initial_task_descriptions[slot_id]
         subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
@@ -790,7 +782,7 @@ class EnvWorker(Worker):
         )
         return chunk_action
 
-    def recv_rollout_results(
+    async def recv_rollout_results(
         self, input_channel: Channel, mode="train"
     ) -> RolloutResult:
         assert mode in ["train", "eval"], f"{mode=} is not supported"
@@ -815,11 +807,12 @@ class EnvWorker(Worker):
             raise ValueError("Cannot infer batch size from rollout result.")
 
         for src_rank, expected_size in src_ranks_and_sizes:
-            rollout_result = input_channel.get(
+            rollout_result = await input_channel.get(
                 key=CommMapper.build_channel_key(
                     src_rank, self._rank, extra=f"{mode}_rollout_results"
                 ),
-            )
+                async_op=True,
+            ).async_wait()
 
             actual_size = _infer_rollout_batch_size(rollout_result)
             assert actual_size == expected_size, (
@@ -1137,7 +1130,7 @@ class EnvWorker(Worker):
                             env_output.intervene_flags,
                         )
 
-                    rollout_result = self.recv_rollout_results(
+                    rollout_result = await self.recv_rollout_results(
                         input_channel, mode="train"
                     )
                     rewards = self.compute_bootstrap_rewards(
@@ -1193,7 +1186,9 @@ class EnvWorker(Worker):
                         env_output.intervene_flags,
                     )
 
-                rollout_result = self.recv_rollout_results(input_channel, mode="train")
+                rollout_result = await self.recv_rollout_results(
+                    input_channel, mode="train"
+                )
                 rewards = self.compute_bootstrap_rewards(
                     env_output, rollout_result.bootstrap_values
                 )

@@ -33,25 +33,14 @@ These configs are auto-selected here by the standard launchers whenever the
 config name ends in ``_async``.
 """
 
-import importlib.util
 import json
-from pathlib import Path
 
 import hydra
 import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf
 
 from rlinf.config import validate_cfg
-
-_SCRIPT_DIR = Path(__file__).resolve().parent
-_STAGED_SCRIPT_PATH = _SCRIPT_DIR / "train_embodied_agent_staged.py"
-_STAGED_SPEC = importlib.util.spec_from_file_location(
-    "train_embodied_agent_staged", _STAGED_SCRIPT_PATH
-)
-assert _STAGED_SPEC is not None and _STAGED_SPEC.loader is not None
-_STAGED_MODULE = importlib.util.module_from_spec(_STAGED_SPEC)
-_STAGED_SPEC.loader.exec_module(_STAGED_MODULE)
-run_with_runtime = _STAGED_MODULE.run_with_runtime
+from rlinf.runners.staged_embodied_runtime import run_with_runtime
 
 mp.set_start_method("spawn", force=True)
 
