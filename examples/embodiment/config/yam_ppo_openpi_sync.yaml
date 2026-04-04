@@ -254,6 +254,8 @@ actor:
       value_vlm_mode: mean_token
       config_name: "pi05_yam_follower"
       num_images_in_input: 3
+      noise_level: 0.2
+      noise_anneal: False
       discrete_state_input: True
       noise_method: "flow_sde"
       action_horizon: 30

@@ -80,10 +80,13 @@ python -m sglang.launch_server \
     --model-path ~/Model/qwen-vl-instruct \
     --host 127.0.0.1 \
     --port 30000 \
+    --weight-loader-disable-mmap \
     --skip-tokenizer-init
 ```
 
 Use `xslingcn/sglang` branch `sglang-http` for this path.
+On our setup, `--weight-loader-disable-mmap` is important to avoid abnormally
+slow model loading from local / network snapshots.
 
 Matching config override:
 
@@ -173,7 +176,7 @@ env:
     # Anchor TOPReward to the episode-level goal (stable across subtask changes).
     # Use "current_task" only if stage-conditioned dense reward is needed.
     # With subtask planning enabled, TOPReward follows the current subtask.
-    subtask_interval: 1
+    subtask_interval: 10
 
 vlm_planner:
   max_new_tokens_subtask: 64
