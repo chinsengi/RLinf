@@ -318,13 +318,17 @@ class EnvWorker(Worker):
     def _resolve_pending_subtask(self, slot_id: int) -> None:
         self._planner_client.resolve_pending_subtask_sync(slot_id, self.env_list)
 
-    def _finish_pending_subtask(self, slot_id: int, pending: Any, new_subtask: str) -> None:
+    def _finish_pending_subtask(
+        self, slot_id: int, pending: Any, new_subtask: str
+    ) -> None:
         self._planner_client.finish_pending_subtask(
             slot_id, pending, new_subtask, self.env_list
         )
 
     def _submit_top_reward(self, env_output: EnvOutput, slot_id: int) -> EnvOutput:
-        return self._planner_client.submit_top_reward(env_output, slot_id, self.env_list)
+        return self._planner_client.submit_top_reward(
+            env_output, slot_id, self.env_list
+        )
 
     def _resolve_pending_top_reward(self, slot_id: int) -> None:
         self._planner_client.resolve_pending_top_reward_sync(slot_id)
@@ -537,7 +541,9 @@ class EnvWorker(Worker):
             intervene_flags=intervene_flags,
         )
 
-        env_output = self._planner_client.on_env_step(slot_id, env_output, self.env_list)
+        env_output = self._planner_client.on_env_step(
+            slot_id, env_output, self.env_list
+        )
 
         return env_output, env_info
 
