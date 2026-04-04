@@ -23,8 +23,8 @@ import torch
 from rlinf.data.embodied_io_struct import RolloutResult
 from rlinf.envs.remote.remote_env import RobotServerDisconnectedError
 from rlinf.utils.comm_mapping import CommMapper
-from rlinf.workers.env.env_worker import EnvWorker
 from rlinf.workers.env.async_env_worker import AsyncEnvWorker
+from rlinf.workers.env.env_worker import EnvWorker
 
 
 def test_async_env_worker_waits_for_staged_shutdown_on_remote_disconnect() -> None:
