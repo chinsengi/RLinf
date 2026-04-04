@@ -13,11 +13,10 @@
 # limitations under the License.
 
 import asyncio
-from collections import defaultdict, deque
+from collections import defaultdict
 from typing import Any, Literal
 
 import numpy as np
-import ray
 import torch
 from omegaconf import DictConfig
 
@@ -35,6 +34,7 @@ from rlinf.scheduler import Channel, Cluster, Worker
 from rlinf.utils.comm_mapping import CommMapper
 from rlinf.utils.metric_utils import compute_split_num
 from rlinf.utils.placement import HybridComponentPlacement
+from rlinf.workers.env.vlm_planner_client import VLMPlannerClient
 
 
 def _apply_action_chunk_smoothing(
@@ -90,6 +90,39 @@ def _apply_action_chunk_smoothing(
 
 
 class EnvWorker(Worker):
+    _PLANNER_CLIENT_STATE_FIELDS = {
+        "_episode_frames",
+        "_initial_task_descriptions",
+        "_last_applied_subtask_request_id",
+        "_pending_subtasks",
+        "_pending_top_rewards",
+        "_prev_top_score",
+        "_recent_top_deltas",
+        "_steps_since_subtask_update",
+        "_subtask_adaptive",
+        "_subtask_interval",
+        "_subtask_min_interval",
+        "_subtask_plateau_threshold",
+        "_subtask_plateau_window",
+        "_subtask_request_counter",
+        "_subtask_score_threshold",
+        "_top_reward_enabled",
+        "_top_reward_has_prev_score",
+        "_top_reward_max_frames",
+        "_vlm_planner",
+    }
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in self._PLANNER_CLIENT_STATE_FIELDS:
+            setattr(self._ensure_planner_client(), name, value)
+            return
+        super().__setattr__(name, value)
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._PLANNER_CLIENT_STATE_FIELDS:
+            return getattr(self._ensure_planner_client(), name)
+        raise AttributeError(name)
+
     def __init__(self, cfg: DictConfig):
         Worker.__init__(self)
 
@@ -113,62 +146,12 @@ class EnvWorker(Worker):
 
         # Env configurations
         self.enable_offload = self.cfg.env.train.get("enable_offload", False)
-        # VLM planner integration (optional slot-indexed subtask updates).
-        # When subtask_interval > 0 the env worker calls the VLM planner every
-        # subtask_interval chunk steps and updates env.task_description.
-        self._subtask_interval: int = int(self.cfg.env.train.get("subtask_interval", 0))
-        self._subtask_adaptive: bool = bool(
-            self.cfg.env.train.get("subtask_adaptive", True)
+        self._planner_client = VLMPlannerClient(
+            cfg,
+            slot_count=self.slot_count,
+            log_info=self.log_info,
+            worker_timer=self.worker_timer,
         )
-        self._subtask_min_interval: int = int(
-            self.cfg.env.train.get("subtask_min_interval", 2)
-        )
-        self._subtask_plateau_window: int = max(
-            int(self.cfg.env.train.get("subtask_plateau_window", 3)),
-            1,
-        )
-        self._subtask_plateau_threshold: float = float(
-            self.cfg.env.train.get("subtask_plateau_threshold", 0.01)
-        )
-        self._subtask_score_threshold: float = float(
-            self.cfg.env.train.get("subtask_score_threshold", -0.5)
-        )
-        self._steps_since_subtask_update: int = 0
-        self._recent_top_deltas: deque[float] = deque(
-            maxlen=self._subtask_plateau_window
-        )
-        self._vlm_planner = None  # set via set_vlm_planner() after construction
-
-        # TOPReward dense reward state.
-        self._top_reward_enabled: bool = bool(
-            self.cfg.env.train.get("top_reward_enabled", False)
-        )
-        self._top_reward_max_frames: int = int(
-            self.cfg.env.train.get("top_reward_max_frames", 16)
-        )
-        # NOTE: _episode_frames and _prev_top_score are worker-global (not
-        # per-slot). This is correct only when there is a single pipeline slot.
-        self._episode_frames: list[np.ndarray] = []
-        self._prev_top_score: float = 0.0
-        self._top_reward_has_prev_score: bool = False
-        # there can be a sequence of tasks
-        # TODO: make task_description a list to avoid uniform slot task descriptions
-        self._initial_task_descriptions: list[str] = [
-            str(self.cfg.env.train.get("task_description", ""))
-            for _ in range(self.slot_count)
-        ]
-        if self._top_reward_enabled and self.slot_count != 1:
-            raise ValueError(
-                "TOPReward currently supports exactly one pipeline slot. "
-                "Set rollout.pipeline_slot_count=1 "
-                "when env.train.top_reward_enabled=true."
-            )
-        if self._subtask_interval > 0 and not any(self._initial_task_descriptions):
-            raise ValueError(
-                "Subtask planning (subtask_interval > 0) requires a non-empty "
-                "env.train.task_description. Set it to a concrete episode goal "
-                "(e.g. 'fold the towel')."
-            )
         self.only_eval = getattr(self.cfg.runner, "only_eval", False)
         self.enable_eval = self.cfg.runner.val_check_interval > 0 or self.only_eval
         if not self.only_eval:
@@ -266,226 +249,100 @@ class EnvWorker(Worker):
             except Exception:
                 pass
 
+    def _ensure_planner_client(self) -> VLMPlannerClient:
+        planner_client = self.__dict__.get("_planner_client")
+        if planner_client is None:
+            planner_client = VLMPlannerClient(
+                log_info=getattr(self, "log_info", None),
+                worker_timer=getattr(self, "worker_timer", None),
+            )
+            self.__dict__["_planner_client"] = planner_client
+        return planner_client
+
+    def set_planner_handle(self, planner_handle) -> None:
+        """Set the VLM planner handle used by this env worker."""
+        self._planner_client.set_planner_handle(planner_handle)
+
     def set_vlm_planner(self, planner_handle) -> None:
-        """Inject a VLMPlannerWorker Ray handle for VLM-driven features.
-
-        Call this from the runner after both workers have been created, passing
-        the Ray remote handle (e.g. ``vlm_planner_actor``).  The handle is used
-        for two purposes:
-
-        1. **TOPReward scoring** (when ``top_reward_enabled=True``): each chunk
-           step calls ``planner_handle.compute_top_reward.remote()`` to get a
-           dense progress reward from log P("True" | frames, instruction).
-        2. **Subtask planning** (when ``subtask_interval > 0``): every
-           ``subtask_interval`` chunk steps calls
-           ``planner_handle.get_next_subtask.remote(images, main_task)``
-           and updates ``env.task_description`` (and ``SetTaskDescription``
-           on the server).
-
-        Args:
-            planner_handle: A VLMPlannerWorker Ray actor handle, or None to
-                disable VLM-driven features.
-        """
-        self._vlm_planner = planner_handle
-        self.log_info(
-            f"[EnvWorker] VLM planner handle set (subtask_interval="
-            f"{self._subtask_interval})."
-        )
+        """Backward-compatible alias for ``set_planner_handle``."""
+        self.set_planner_handle(planner_handle)
 
     def _get_current_task_description(self, slot_id: int) -> str:
-        env = self.env_list[slot_id]
-        inner_env = getattr(env, "unwrapped", env)
-        return str(getattr(inner_env, "task_description", ""))
+        return self._planner_client.get_current_task_description(slot_id, self.env_list)
 
     def _reset_subtask_update_state(self) -> None:
         """Reset per-episode subtask planner cadence state."""
-        self._steps_since_subtask_update = 0
+        self._planner_client.reset_subtask_update_state()
 
     def _get_top_reward_instruction(self, slot_id: int) -> str:
-        if self._subtask_interval <= 0:
-            return self._initial_task_descriptions[slot_id]
-        return self._get_current_task_description(slot_id)
+        return self._planner_client.get_top_reward_instruction(slot_id, self.env_list)
 
     def _apply_subtask_update(self, slot_id: int, new_subtask: str) -> bool:
-        env = self.env_list[slot_id]
-        inner_env = getattr(env, "unwrapped", env)
-        if not new_subtask or not hasattr(inner_env, "task_description"):
-            return False
-
-        inner_env.task_description = new_subtask
-        if self._top_reward_enabled:
-            self._reset_top_reward_state()
-        self.log_info(
-            f"[EnvWorker] Subtask updated for slot {slot_id}: '{new_subtask}'"
+        return self._planner_client.apply_subtask_update(
+            slot_id, new_subtask, self.env_list
         )
-        return True
 
     @staticmethod
     def _extract_planner_images(obs: dict[str, Any]) -> list[np.ndarray]:
-        main_images = obs.get("main_images", None)
-        if main_images is None:
-            return []
-
-        if isinstance(main_images, torch.Tensor):
-            main_images = main_images.numpy()
-
-        if main_images.ndim == 4:
-            return [main_images[0]]
-        return [main_images]
+        return VLMPlannerClient.extract_planner_images(obs)
 
     @staticmethod
     def _inject_task_description_into_obs(
         obs: dict[str, Any] | None, task_description: str
     ) -> None:
-        if isinstance(obs, dict):
-            obs["task_descriptions"] = [str(task_description)]
+        VLMPlannerClient.inject_task_description_into_obs(obs, task_description)
 
     def _sync_subtask_into_env_output(
         self, slot_id: int, env_output: EnvOutput, task_description: str
     ) -> None:
-        self._inject_task_description_into_obs(env_output.obs, task_description)
-        self._inject_task_description_into_obs(env_output.final_obs, task_description)
-        env = self.env_list[slot_id]
-        self._inject_task_description_into_obs(
-            getattr(env, "last_obs", None), task_description
+        self._planner_client.sync_subtask_into_env_output(
+            slot_id, env_output, task_description, self.env_list
         )
 
     def _request_subtask(self, slot_id: int, obs: dict[str, Any]) -> str:
-        images = self._extract_planner_images(obs)
-        main_task = self._initial_task_descriptions[slot_id]
-        subtask_ref = self._vlm_planner.get_next_subtask.remote(images, main_task)
-        return ray.get(subtask_ref)
+        return self._planner_client.request_subtask_sync(slot_id, obs)
+
+    def _submit_subtask_request(self, slot_id: int, obs: dict[str, Any]) -> None:
+        self._planner_client.submit_subtask_request(slot_id, obs)
 
     def _maybe_plan_initial_subtask(
         self, slot_id: int, env_output: EnvOutput
     ) -> EnvOutput:
-        if self._subtask_interval <= 0 or self._vlm_planner is None:
-            return env_output
-
-        main_task = self._initial_task_descriptions[slot_id]
-        current_task = self._get_current_task_description(slot_id)
-        should_prime = (
-            self._steps_since_subtask_update == 0 and current_task == main_task
+        return self._planner_client.maybe_plan_initial_subtask(
+            slot_id, env_output, self.env_list
         )
-        if not should_prime:
-            return env_output
-
-        new_subtask = self._request_subtask(slot_id, env_output.obs)
-        if self._apply_subtask_update(slot_id, new_subtask):
-            self._sync_subtask_into_env_output(slot_id, env_output, new_subtask)
-            self._reset_subtask_update_state()
-        return env_output
 
     def _maybe_update_subtask(self, slot_id: int) -> None:
-        """Optionally call the VLM planner to refresh the current subtask.
+        self._planner_client.maybe_update_subtask(slot_id, self.env_list)
 
-        Called each chunk step from :meth:`interact`.  When
-        ``subtask_interval > 0`` and a VLM planner handle is available, polls
-        the planner and writes the new subtask description into the env so that
-        the next observation includes the updated ``task_descriptions`` text.
+    def _resolve_pending_subtask(self, slot_id: int) -> None:
+        self._planner_client.resolve_pending_subtask_sync(slot_id, self.env_list)
 
-        Args:
-            slot_id: Pipeline slot index (used to select the correct env
-                from ``self.env_list``).
-        """
-        if self._subtask_interval <= 0 or self._vlm_planner is None:
-            return
+    def _finish_pending_subtask(self, slot_id: int, pending: Any, new_subtask: str) -> None:
+        self._planner_client.finish_pending_subtask(
+            slot_id, pending, new_subtask, self.env_list
+        )
 
-        self._steps_since_subtask_update += 1
-        if self._subtask_adaptive and (
-            self._steps_since_subtask_update < self._subtask_min_interval
-        ):
-            return
+    def _submit_top_reward(self, env_output: EnvOutput, slot_id: int) -> EnvOutput:
+        return self._planner_client.submit_top_reward(env_output, slot_id, self.env_list)
 
-        should_trigger = self._steps_since_subtask_update >= self._subtask_interval
-        if self._subtask_adaptive and self._top_reward_enabled:
-            recent_deltas = list(self._recent_top_deltas)
-            plateau_triggered = len(recent_deltas) >= self._subtask_plateau_window and (
-                all(
-                    abs(delta) < self._subtask_plateau_threshold
-                    for delta in recent_deltas[-self._subtask_plateau_window :]
-                )
-            )
-            score_triggered = bool(
-                self._top_reward_has_prev_score
-                and self._prev_top_score > self._subtask_score_threshold
-            )
-            should_trigger = should_trigger or plateau_triggered or score_triggered
+    def _resolve_pending_top_reward(self, slot_id: int) -> None:
+        self._planner_client.resolve_pending_top_reward_sync(slot_id)
 
-        if not should_trigger:
-            return
+    def _finish_pending_top_reward(self, pending: Any, score_t: float) -> None:
+        self._planner_client.finish_pending_top_reward(pending, score_t)
 
-        env = self.env_list[slot_id]
-        obs = getattr(env, "last_obs", None) or {}
-        new_subtask = self._request_subtask(slot_id, obs)
-
-        if self._apply_subtask_update(slot_id, new_subtask):
-            self._reset_subtask_update_state()
+    async def _resolve_pending_vlm_results(self, slot_id: int) -> None:
+        self._planner_client.resolve_pending_sync(slot_id, self.env_list)
 
     def _compute_top_reward(self, env_output: EnvOutput, slot_id: int) -> EnvOutput:
-        """Compute TOPReward dense progress reward and inject into env_output.
-
-        Extracts the current frame, queries the VLM planner for a progress
-        score, and writes ``score_t - score_{t-1}`` into the reward tensor.
-
-        Args:
-            env_output: The env output from ``env_interact_step``.
-            slot_id: Pipeline slot index.
-
-        Returns:
-            Modified env_output with dense reward injected.
-        """
-        if not self._top_reward_enabled or self._vlm_planner is None:
-            return env_output
-
-        with self.worker_timer("top_reward"):
-            # Extract current frame from observation.
-            main_images = env_output.obs.get("main_images", None)
-            if main_images is not None:
-                if isinstance(main_images, torch.Tensor):
-                    frame = main_images[0].cpu().numpy()  # (H, W, 3)
-                else:
-                    frame = np.asarray(main_images[0])
-                self._episode_frames.append(frame)
-
-            # Trim to max frames.
-            if len(self._episode_frames) > self._top_reward_max_frames:
-                self._episode_frames = self._episode_frames[
-                    -self._top_reward_max_frames :
-                ]
-
-            # Get instruction from the unwrapped env so wrapper attribute shadowing
-            # can never return a stale value.
-            instruction = self._get_top_reward_instruction(slot_id)
-
-            score_ref = self._vlm_planner.compute_top_reward.remote(
-                self._episode_frames, instruction
-            )
-            score_t = ray.get(score_ref)
-
-        if self._top_reward_has_prev_score:
-            reward = float(score_t) - self._prev_top_score
-        else:
-            # Seed the new episode/subtask segment with the first score rather
-            # than comparing it against the reset sentinel.
-            reward = 0.0
-        self._prev_top_score = float(score_t)
-        self._top_reward_has_prev_score = True
-        self._recent_top_deltas.append(reward)
-
-        # Inject reward into the last chunk position.
-        if env_output.rewards is not None:
-            env_output.rewards[:, -1] = reward
-        self.log_info(f"[EnvWorker] TOPReward: score={score_t:.4f}, delta={reward:.4f}")
-
-        return env_output
+        return self._planner_client.compute_top_reward_sync(
+            env_output, slot_id, self.env_list
+        )
 
     def _reset_top_reward_state(self) -> None:
         """Reset TOPReward episode state for a new episode."""
-        self._episode_frames = []
-        self._prev_top_score = 0.0
-        self._top_reward_has_prev_score = False
-        self._recent_top_deltas.clear()
+        self._planner_client.reset_top_reward_state()
 
     def _setup_env_and_wrappers(self, env_cls, env_cfg, num_envs_per_stage: int):
         env_list = []
@@ -680,14 +537,7 @@ class EnvWorker(Worker):
             intervene_flags=intervene_flags,
         )
 
-        # Inject TOPReward dense reward if enabled.
-        env_output = self._compute_top_reward(env_output, slot_id)
-
-        # Reset TOPReward state on episode done.
-        if self._top_reward_enabled and chunk_dones[:, -1].any():
-            self._reset_top_reward_state()
-        if chunk_dones[:, -1].any():
-            self._reset_subtask_update_state()
+        env_output = self._planner_client.on_env_step(slot_id, env_output, self.env_list)
 
         return env_output, env_info
 
@@ -974,9 +824,7 @@ class EnvWorker(Worker):
                     reset_on_rollout_epoch or len(self.last_obs_list) <= slot_id
                 )
                 if should_reset:
-                    self._reset_subtask_update_state()
-                    if self._top_reward_enabled:
-                        self._reset_top_reward_state()
+                    self._planner_client.reset_for_env_reset()
                     self.env_list[slot_id].is_start = True
                     extracted_obs, infos = self.env_list[slot_id].reset()
                     intervene_actions = None
@@ -1030,9 +878,7 @@ class EnvWorker(Worker):
 
     def _reset_envs_for_next_rollout_epoch(self) -> list[EnvOutput]:
         env_outputs: list[EnvOutput] = []
-        self._reset_subtask_update_state()
-        if self._top_reward_enabled:
-            self._reset_top_reward_state()
+        self._planner_client.reset_for_env_reset()
         dones = self._get_zero_dones()
         terminations = dones.clone()
         truncations = dones.clone()
@@ -1133,6 +979,7 @@ class EnvWorker(Worker):
                     rollout_result = await self.recv_rollout_results(
                         input_channel, mode="train"
                     )
+                    await self._resolve_pending_vlm_results(slot_id)
                     rewards = self.compute_bootstrap_rewards(
                         env_output, rollout_result.bootstrap_values
                     )
@@ -1189,6 +1036,7 @@ class EnvWorker(Worker):
                 rollout_result = await self.recv_rollout_results(
                     input_channel, mode="train"
                 )
+                await self._resolve_pending_vlm_results(slot_id)
                 rewards = self.compute_bootstrap_rewards(
                     env_output, rollout_result.bootstrap_values
                 )

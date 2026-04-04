@@ -23,8 +23,9 @@ grpc_connect_timeout: 300.0      # seconds to wait for server on startup (0 = no
 # Task description injected into observations (can be updated by VLM planner).
 task_description: ""
 
-# Auto-reset and termination handling (read by RemoteEnv; also sent to client
-# via GetSpaces but the config value here takes precedence).
+# Compatibility fields for the generic embodied runtime.
+# Remote YAM restart is authoritative on the desktop RobotServer side; the
+# Beaker-side RemoteEnv never performs implicit client-side resets.
 auto_reset: false
 ignore_terminations: true
 group_size: 1

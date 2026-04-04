@@ -81,6 +81,9 @@ class AsyncEnvWorker(EnvWorker):
             }
             metric_channel.put(metrics, async_op=True)
 
+    async def _resolve_pending_vlm_results(self, slot_id: int) -> None:
+        await self._planner_client.resolve_pending_async(slot_id, self.env_list)
+
     async def stop(self):
         if self._interact_task is not None and not self._interact_task.done():
             self._interact_task.cancel()

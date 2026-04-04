@@ -120,6 +120,9 @@ def _make_adaptive_worker(
         maxlen=plateau_window,
     )
     worker._episode_frames = []
+    worker._pending_subtasks = {}
+    worker._last_applied_subtask_request_id = [0]
+    worker._subtask_request_counter = [0]
     worker._vlm_planner = _PlannerStub()
     worker.log_info = lambda *_args, **_kwargs: None
     return worker
@@ -138,6 +141,7 @@ def _make_top_reward_worker(scores, *, subtask_interval=0):
     worker._prev_top_score = 0.0
     worker._top_reward_has_prev_score = False
     worker._recent_top_deltas = deque(maxlen=3)
+    worker._pending_top_rewards = {}
     worker._vlm_planner = _TopRewardPlannerStub(scores)
     worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
     worker.log_info = lambda *_args, **_kwargs: None
@@ -311,6 +315,48 @@ def test_compute_top_reward_seeds_zero_delta_after_subtask_reset(monkeypatch):
     assert list(worker._recent_top_deltas) == [0.0]
 
 
+def test_submit_top_reward_is_nonblocking_until_resolve(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_top_reward_worker([1.25])
+    env_output = SimpleNamespace(
+        obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+        rewards=torch.zeros((1, 1), dtype=torch.float32),
+        dones=torch.zeros((1, 1), dtype=torch.bool),
+    )
+
+    worker._submit_top_reward(env_output, 0)
+
+    assert env_output.rewards[0, 0].item() == 0.0
+    assert 0 in worker._pending_top_rewards
+
+    worker._resolve_pending_top_reward(0)
+
+    assert env_output.rewards[0, 0].item() == 0.0
+    assert worker._prev_top_score == 1.25
+    assert worker._top_reward_has_prev_score is True
+
+
+def test_resolve_top_reward_updates_delta_after_previous_score(monkeypatch):
+    import ray
+
+    monkeypatch.setattr(ray, "get", lambda ref: ref)
+    worker = _make_top_reward_worker([2.25])
+    worker._prev_top_score = 1.5
+    worker._top_reward_has_prev_score = True
+    env_output = SimpleNamespace(
+        obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+        rewards=torch.zeros((1, 1), dtype=torch.float32),
+        dones=torch.zeros((1, 1), dtype=torch.bool),
+    )
+
+    worker._submit_top_reward(env_output, 0)
+    worker._resolve_pending_top_reward(0)
+
+    assert env_output.rewards[0, 0].item() == pytest.approx(0.75)
+
+
 def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
     worker = EnvWorker.__new__(EnvWorker)
     worker.cfg = _cfg_node(
@@ -401,6 +447,43 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
     assert worker._episode_frames == []
     assert list(worker._recent_top_deltas) == []
     assert worker._steps_since_subtask_update == 0
+
+
+def test_bootstrap_step_reuses_last_obs_for_remote_server_managed_env():
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.cfg = _cfg_node(
+        {
+            "env": {
+                "train": {
+                    "env_type": "remote",
+                    "auto_reset": True,
+                    "ignore_terminations": False,
+                    "reset_on_rollout_epoch": False,
+                }
+            },
+            "actor": {"model": {"num_action_chunks": 1}},
+        }
+    )
+    worker.slot_count = 1
+    worker.train_num_envs_per_stage = 1
+    worker.last_obs_list = [{"states": "previous"}]
+    worker.last_intervened_info_list = [(None, None)]
+
+    reset_calls = []
+
+    class _Env:
+        is_start = False
+
+        def reset(self):
+            reset_calls.append(True)
+            return {"states": "reset"}, {}
+
+    worker.env_list = [_Env()]
+
+    env_outputs = worker.bootstrap_step()
+
+    assert reset_calls == []
+    assert env_outputs[0].obs == {"states": "previous"}
 
 
 def test_env_interact_step_resets_subtask_counter_on_episode_done(monkeypatch):
@@ -532,6 +615,7 @@ def test_maybe_update_subtask_triggers_on_plateau(monkeypatch):
     )
 
     worker._maybe_update_subtask(0)
+    worker._resolve_pending_subtask(0)
 
     assert len(worker._vlm_planner.calls) == 1
     assert worker.env_list[0].unwrapped.task_description == "pick up the corner"
@@ -549,6 +633,7 @@ def test_maybe_update_subtask_triggers_on_score_threshold(monkeypatch):
     )
 
     worker._maybe_update_subtask(0)
+    worker._resolve_pending_subtask(0)
 
     assert len(worker._vlm_planner.calls) == 1
     assert worker._steps_since_subtask_update == 0
@@ -565,6 +650,7 @@ def test_maybe_update_subtask_respects_adaptive_cooldown(monkeypatch):
     )
 
     worker._maybe_update_subtask(0)
+    worker._resolve_pending_subtask(0)
 
     assert len(worker._vlm_planner.calls) == 0
     assert worker._steps_since_subtask_update == 1
@@ -588,6 +674,7 @@ def test_maybe_update_subtask_falls_back_to_max_interval(monkeypatch):
     )
 
     worker._maybe_update_subtask(0)
+    worker._resolve_pending_subtask(0)
 
     assert len(worker._vlm_planner.calls) == 1
     assert worker._steps_since_subtask_update == 0
@@ -607,6 +694,7 @@ def test_maybe_update_subtask_fixed_mode_preserves_old_interval_behavior(monkeyp
     )
 
     worker._maybe_update_subtask(0)
+    worker._resolve_pending_subtask(0)
 
     assert len(worker._vlm_planner.calls) == 1
     assert worker._steps_since_subtask_update == 0

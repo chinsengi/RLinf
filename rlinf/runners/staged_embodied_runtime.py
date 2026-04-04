@@ -364,7 +364,7 @@ def run_with_runtime(cfg, *, use_async_runtime: bool) -> None:
         )
 
         if vlm_actor is not None:
-            env_group.set_vlm_planner(vlm_actor).wait()
+            env_group.set_planner_handle(vlm_actor).wait()
 
         runner.run()
     except KeyboardInterrupt:
