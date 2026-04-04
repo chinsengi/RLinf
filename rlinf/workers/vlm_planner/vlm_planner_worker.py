@@ -45,7 +45,7 @@ Architecture (active call paths for YAM)
         │  every subtask_interval steps          (subtask_interval > 0 only)
         │  images + main_task ───────────────▶  VLMPlannerWorker (Beaker)
         │                                           │
-        │  ◀── new subtask text ─────────────────  │  get_next_subtask()
+        │  ◀── new subtask text ─────────────────   │  get_next_subtask()
         │                                           │
         │  every chunk step (top_reward_enabled):   │
         │  episode frames + instruction ──────────▶ │  compute_top_reward()

@@ -1,4 +1,4 @@
-# YAM bimanual robot – sync PPO training with pi0.5 (OpenPI), RemoteEnv,
+# YAM bimanual robot - sync PPO training with pi0.5 (OpenPI), RemoteEnv,
 # TOPReward, and an external SGLang HTTP VLM planner.
 #
 # Algorithm: sync PPO with actor-critic, GAE advantage, and value head.
@@ -6,14 +6,14 @@
 #            No custom reward code required.
 #
 # Difference from yam_ppo_openpi_subtask_sync.yaml:
-#   subtask_interval: 0  — VLM predicts no subtasks; TOPReward scoring only.
+#   subtask_interval: 0  - VLM predicts no subtasks; TOPReward scoring only.
 #   Set subtask_interval > 0 to enable VLM subtask planning (see subtask config).
 #
 # Hardware topology (single Beaker node, 3 GPUs):
-#   GPU 0 – actor (pi0.5 FSDP training with value head)
-#   GPU 1 – rollout (pi0.5 inference)
-#   GPU 2 – external SGLang server + VLMPlannerWorker HTTP client path
-#   CPU   – EnvWorker (RemoteEnv gRPC client -> desktop RobotServer)
+#   GPU 0 - actor (pi0.5 FSDP training with value head)
+#   GPU 1 - rollout (pi0.5 inference)
+#   GPU 2 - external SGLang server + VLMPlannerWorker HTTP client path
+#   CPU   - EnvWorker (RemoteEnv gRPC client -> desktop RobotServer)
 #
 # Desktop:
 #   RobotServer wrapping YAMEnv, exposed via reverse SSH tunnel on :50051.
@@ -168,7 +168,7 @@ env:
     # Optional chunk post-processing for debugging shaky motions. This smooths
     # each predicted action chunk before it is executed by the env worker.
     action_chunk_smoothing:
-      enabled: True
+      enabled: False
       method: ema
       alpha: 0.35
     # Do not return home when a new rollout epoch starts.
@@ -188,7 +188,7 @@ env:
     subtask_interval: 0
 
     # Dummy mode: controlled at the ROBOT SERVER, not here.
-    # RemoteEnv does not read is_dummy — it proxies calls over gRPC to the server.
+    # RemoteEnv does not read is_dummy - it proxies calls over gRPC to the server.
     # To test without real hardware, start the robot server with --dummy:
     #   bash scripts/start_robot_server.sh --config .../yam_pi05_follower.yaml --dummy
 # VLM planner: Qwen3-VL-8B for TOPReward scoring only (no subtask planning).
@@ -225,7 +225,7 @@ rollout:
   pipeline_slot_count: 1
 
   collect_transitions: True
-  collect_prev_infos: True  # required for adv_type: gae — prev_values must be collected for GAE bootstrap
+  collect_prev_infos: True  # required for adv_type: gae - prev_values must be collected for GAE bootstrap
 
   model:
     model_path: "thomas0829/folding_towel_pi05"
@@ -290,7 +290,7 @@ actor:
 
 # reward section is metadata only when use_reward_model: False.
 # TOPReward is computed inline by VLMPlannerWorker (see vlm_planner.reward_scale above).
-# reward_scale here is NOT read by TOPReward — configure it under vlm_planner instead.
+# reward_scale here is NOT read by TOPReward - configure it under vlm_planner instead.
 reward:
   use_reward_model: False
   reward_type: top_reward
