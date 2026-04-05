@@ -211,11 +211,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         )
         self._cooldown_deadline: float | None = None
         self._restart_required: bool = False
-        # Running stats displayed in the SBS prompt so the operator can see
-        # how the current episode is going before approving each chunk.
-        self._episode_return: float = 0.0
-        self._last_chunk_reward_sum: float = 0.0
-        self._last_chunk_reward_max: float = 0.0
         # Latest status info pushed from the training client via
         # PushStatusInfo RPC (e.g. TOPReward score, lr).
         self._client_status_values: dict[str, float] = {}
@@ -298,9 +293,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._client_connected = False
         self._chunk_count = 0
         self._first_chunk_approved = not self._verbose
-        self._episode_return = 0.0
-        self._last_chunk_reward_sum = 0.0
-        self._last_chunk_reward_max = 0.0
         self._client_status_values = {}
         self._client_status_text = ""
         self._client_status_updated_at = 0.0
@@ -541,22 +533,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 infos_list,
             ) = self._env.chunk_step(actions)
         self._chunk_count += 1
-
-        # Update running stats for the SBS prompt.
-        try:
-            rewards_np = (
-                chunk_rewards.detach().cpu().numpy()
-                if hasattr(chunk_rewards, "detach")
-                else np.asarray(chunk_rewards)
-            )
-            per_step = rewards_np[0].astype(float)
-            self._last_chunk_reward_sum = float(per_step.sum())
-            self._last_chunk_reward_max = (
-                float(per_step.max()) if per_step.size else 0.0
-            )
-            self._episode_return += self._last_chunk_reward_sum
-        except Exception:
-            pass
 
         step_results = []
         chunk_size = request.chunk_size
