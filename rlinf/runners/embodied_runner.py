@@ -356,6 +356,11 @@ class EmbodiedRunner:
 
                     actor_training_metrics = actor_training_handle.wait()
 
+                    bppo_metrics_list = None
+                    if not any(actor_training_metrics):
+                        bppo_handle: Handle = self.actor.run_bppo_training()
+                        bppo_metrics_list = bppo_handle.wait()
+
                     self.global_step += 1
 
                     run_val, save_model, is_train_end = check_progress(
@@ -472,11 +477,22 @@ class EmbodiedRunner:
                     worker_group_name=self.env.worker_group_name,
                 )
 
+                bppo_metrics = {}
+                if bppo_metrics_list and any(bppo_metrics_list):
+                    bppo_metrics = {
+                        f"train/{k}": v
+                        for k, v in self._aggregate_numeric_metrics(
+                            bppo_metrics_list
+                        ).items()
+                    }
+                    self.metric_logger.log(bppo_metrics, _step)
+
                 logging_metrics = time_metrics
                 logging_metrics.update(eval_metrics)
                 logging_metrics.update(env_metrics)
                 logging_metrics.update(rollout_metrics)
                 logging_metrics.update(training_metrics)
+                logging_metrics.update(bppo_metrics)
 
                 self.print_metrics_table_async(
                     _step, self.max_steps, start_time, logging_metrics, start_step

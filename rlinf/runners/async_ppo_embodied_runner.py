@@ -145,6 +145,12 @@ class AsyncPPOEmbodiedRunner(EmbodiedRunner):
                     actor_training_handle = self.actor.run_training()
                     training_metrics = actor_training_handle.wait()
 
+                bppo_metrics_list = None
+                if not any(training_metrics):
+                    with self.timer("bppo_training"):
+                        bppo_handle = self.actor.run_bppo_training()
+                        bppo_metrics_list = bppo_handle.wait()
+
                 self.global_step += 1
                 self.actor.set_global_step(self.global_step).wait()
                 self.rollout.set_global_step(self.global_step).wait()
@@ -224,7 +230,22 @@ class AsyncPPOEmbodiedRunner(EmbodiedRunner):
                 add_prefix=False,
             )
 
-            logging_metrics = {**time_metrics, **train_metrics, **rollout_metrics}
+            bppo_metrics = {}
+            if bppo_metrics_list and any(bppo_metrics_list):
+                bppo_metrics = {
+                    f"train/{k}": v
+                    for k, v in self._aggregate_numeric_metrics(
+                        bppo_metrics_list
+                    ).items()
+                }
+                self.metric_logger.log(bppo_metrics, self.global_step)
+
+            logging_metrics = {
+                **time_metrics,
+                **train_metrics,
+                **rollout_metrics,
+                **bppo_metrics,
+            }
             if env_metrics:
                 logging_metrics.update(env_metrics)
 

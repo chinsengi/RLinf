@@ -20,6 +20,7 @@ import torch
 
 from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
 from rlinf.config import SupportedModel
+from rlinf.scheduler import Worker
 from rlinf.utils.distributed import all_reduce_dict, masked_normalization
 from rlinf.utils.metric_utils import append_to_dict, compute_rollout_metrics
 from rlinf.utils.nested_dict_process import put_tensor_device, split_dict_to_chunk
@@ -156,6 +157,8 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
 
     @_require_trainable_batch(skip_value={})
     def run_training(self) -> dict[str, Any]:
+        self._store_for_bppo()
+
         if self.is_weight_offloaded:
             self.load_param_and_grad(self.device)
         if self.is_optimizer_offloaded:
@@ -369,4 +372,288 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
             mean_metric_dict,
             op=torch.distributed.ReduceOp.AVG,
         )
+        return mean_metric_dict
+
+    @Worker.timer("bppo_training")
+    def run_bppo_training(self) -> dict[str, Any]:
+        """Run BPPO updates from the replay buffer during cooldown."""
+        if not self._bppo_enabled:
+            return {}
+
+        sample = self._sample_bppo_batch()
+        if sample is None:
+            self.log_info(
+                "[BPPO] No eligible replay data for cooldown training."
+            )
+            return {}
+
+        batch_version, replay_batch = sample
+        staleness = int(self.version) - batch_version
+        self.log_info(
+            f"[BPPO] Running cooldown training "
+            f"(buffer={len(self._bppo_replay_deque)}, staleness={staleness})"
+        )
+
+        bppo_cfg = self.cfg.algorithm.bppo
+
+        # --- recompute advantages on the replay batch -------------------------
+        self.rollout_batch = replay_batch
+
+        with torch.inference_mode():
+            proximal_values = self.rollout_batch.get("proximal_values", None)
+            prev_values = self.rollout_batch.get("prev_values", None)
+            adv_kwargs = {
+                "task_type": self.cfg.runner.task_type,
+                "adv_type": self.cfg.algorithm.adv_type,
+                "rewards": self.rollout_batch["rewards"],
+                "dones": self.rollout_batch["dones"],
+                "values": proximal_values
+                if proximal_values is not None
+                else prev_values,
+                "gamma": self.cfg.algorithm.get("gamma", 1),
+                "gae_lambda": self.cfg.algorithm.get("gae_lambda", 1),
+                "group_size": self.cfg.algorithm.get("group_size", 8),
+                "reward_type": self.cfg.algorithm.reward_type,
+                "loss_mask": self.rollout_batch.get("loss_mask", None),
+                "loss_mask_sum": self.rollout_batch.get("loss_mask_sum", None),
+            }
+            adv_and_ret = calculate_adv_and_returns(**adv_kwargs)
+            self.rollout_batch.update(adv_and_ret)
+            if adv_kwargs["loss_mask"] is not None:
+                self.rollout_batch["loss_mask"] = adv_kwargs["loss_mask"]
+            if adv_kwargs["loss_mask_sum"] is not None:
+                self.rollout_batch["loss_mask_sum"] = adv_kwargs["loss_mask_sum"]
+
+        # --- prepare model / optimizer ----------------------------------------
+        if self.is_weight_offloaded:
+            self.load_param_and_grad(self.device)
+        if self.is_optimizer_offloaded:
+            self.load_optimizer(self.device)
+
+        t_dim = int(self.rollout_batch["prev_logprobs"].shape[0])
+        b_dim = int(self.rollout_batch["prev_logprobs"].shape[1])
+        total_samples = t_dim * b_dim
+
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(self.cfg.actor.seed) + int(self._rank))
+        shuffle_id = torch.randperm(total_samples, generator=generator)
+
+        with torch.no_grad():
+            self.rollout_batch = flatten_rollout_batch_for_train(
+                self.rollout_batch, shuffle_id
+            )
+
+        if self.cfg.algorithm.normalize_advantages:
+            self.rollout_batch["advantages"] = masked_normalization(
+                self.rollout_batch["advantages"],
+                self.rollout_batch.get("loss_mask", None),
+            )
+
+        self.model.train()
+
+        world_size = int(self._world_size)
+        global_batch_size = int(self.cfg.actor.global_batch_size)
+        micro_batch_size = int(self.cfg.actor.micro_batch_size)
+
+        assert global_batch_size % (micro_batch_size * world_size) == 0, (
+            f"global_batch_size {global_batch_size} must be divisible by "
+            f"micro_batch_size {micro_batch_size} * world_size {world_size}"
+        )
+
+        per_rank_batch_size = global_batch_size // world_size
+        micro_per_rank = per_rank_batch_size // micro_batch_size
+        self.gradient_accumulation = micro_per_rank
+
+        flattened_size = int(self.rollout_batch["prev_logprobs"].shape[0])
+        assert flattened_size % per_rank_batch_size == 0, (
+            f"Flattened rollout size {flattened_size} must be divisible by "
+            f"per-rank batch size {per_rank_batch_size}"
+        )
+        num_global_batches = flattened_size // per_rank_batch_size
+
+        bppo_clip_high = float(bppo_cfg.get("clip_ratio_high", 0.1))
+        bppo_clip_low = float(bppo_cfg.get("clip_ratio_low", 0.1))
+        max_update_epochs = int(bppo_cfg.get("max_update_epochs", 4))
+
+        metrics: dict[str, list] = {}
+
+        # --- training loop (same structure as run_training, tighter clip) -----
+        for _ in range(max_update_epochs):
+            global_batch_iter = split_dict_to_chunk(
+                self.rollout_batch, num_global_batches
+            )
+
+            for train_global_batch in global_batch_iter:
+                micro_batch_iter = split_dict_to_chunk(
+                    train_global_batch, micro_per_rank
+                )
+
+                self.optimizer.zero_grad()
+
+                for mb_idx, data in enumerate(micro_batch_iter):
+                    data = put_tensor_device(
+                        data,
+                        f"cuda:{int(os.environ['LOCAL_RANK'])}",
+                    )
+                    backward_ctx = self.before_micro_batch(
+                        self.model,
+                        is_last_micro_batch=(mb_idx + 1)
+                        == self.gradient_accumulation,
+                    )
+
+                    advantages = data["advantages"]
+                    old_logprobs = data["prev_logprobs"]
+                    returns = data.get("returns", None)
+                    prev_values = data.get("prev_values", None)
+                    loss_mask = data.get("loss_mask", None)
+                    loss_mask_sum = data.get("loss_mask_sum", None)
+
+                    versions = data.get("versions", None)
+                    proximal_logprobs = data.get("proximal_logprobs", None)
+                    proximal_values = data.get("proximal_values", None)
+                    current_version = int(self.version) + 1
+
+                    forward_inputs = data.get("forward_inputs", None)
+                    if forward_inputs is None:
+                        raise ValueError(
+                            "Missing forward_inputs in BPPO training. "
+                            "Replay batch may be corrupted."
+                        )
+
+                    model_kwargs = {}
+                    if SupportedModel(self.cfg.actor.model.model_type) in [
+                        SupportedModel.OPENVLA,
+                        SupportedModel.OPENVLA_OFT,
+                    ]:
+                        model_kwargs["temperature"] = (
+                            self.cfg.algorithm.sampling_params.temperature_train
+                        )
+                        model_kwargs["top_k"] = (
+                            self.cfg.algorithm.sampling_params.top_k
+                        )
+                    elif (
+                        SupportedModel(self.cfg.actor.model.model_type)
+                        == SupportedModel.GR00T
+                    ):
+                        model_kwargs["prev_logprobs"] = old_logprobs
+
+                    compute_values = self.cfg.algorithm.adv_type == "gae"
+
+                    with self.amp_context:
+                        out = self.model(
+                            forward_inputs=forward_inputs,
+                            compute_logprobs=True,
+                            compute_entropy=(
+                                self.cfg.algorithm.entropy_bonus > 0
+                            ),
+                            compute_values=compute_values,
+                            use_cache=False,
+                            **model_kwargs,
+                        )
+
+                    if (
+                        SupportedModel(self.cfg.actor.model.model_type)
+                        == SupportedModel.GR00T
+                    ):
+                        old_logprobs = out["prev_logprobs"]
+
+                    loss_kwargs = {
+                        "loss_type": self.cfg.algorithm.loss_type,
+                        "logprob_type": self.cfg.algorithm.logprob_type,
+                        "reward_type": self.cfg.algorithm.reward_type,
+                        "single_action_dim": self.cfg.actor.model.get(
+                            "action_dim", 7
+                        ),
+                        "logprobs": out["logprobs"],
+                        "values": out.get("values", None),
+                        "old_logprobs": old_logprobs,
+                        "advantages": advantages,
+                        "returns": returns,
+                        "prev_values": proximal_values
+                        if proximal_values is not None
+                        else prev_values,
+                        "proximal_logprobs": proximal_logprobs,
+                        "versions": versions,
+                        "current_version": current_version,
+                        "behave_weight_threshold": self.cfg.algorithm.get(
+                            "behave_weight_threshold", None
+                        ),
+                        "clip_ratio_c": self.cfg.algorithm.get(
+                            "clip_ratio_c", 3.0
+                        ),
+                        "clip_ratio_high": bppo_clip_high,
+                        "clip_ratio_low": bppo_clip_low,
+                        "value_clip": self.cfg.algorithm.get(
+                            "value_clip", None
+                        ),
+                        "huber_delta": self.cfg.algorithm.get(
+                            "huber_delta", None
+                        ),
+                        "loss_mask": loss_mask,
+                        "loss_mask_sum": loss_mask_sum,
+                        "rollout_horizon_steps": self.cfg.env.train.rollout_horizon_steps,
+                        "task_type": self.cfg.runner.task_type,
+                        "critic_warmup": self.optimizer_steps
+                        < self.critic_warmup_steps,
+                    }
+
+                    loss, metrics_data = policy_loss(**loss_kwargs)
+
+                    entropy_loss = torch.tensor(
+                        0.0, device=torch.cuda.current_device()
+                    )
+                    if (
+                        self.cfg.algorithm.entropy_bonus > 0
+                        and not loss_kwargs["critic_warmup"]
+                    ):
+                        entropy = out["entropy"]
+                        entropy = reshape_entropy(
+                            entropy,
+                            entropy_type=self.cfg.algorithm.entropy_type,
+                            action_dim=self.cfg.actor.model.get(
+                                "action_dim", 7
+                            ),
+                            batch_size=out["logprobs"].shape[0],
+                        )
+                        entropy_loss = masked_mean(entropy, mask=loss_mask)
+                        loss = (
+                            loss
+                            - self.cfg.algorithm.entropy_bonus * entropy_loss
+                        )
+
+                    loss = loss / self.gradient_accumulation
+                    with backward_ctx:
+                        self.grad_scaler.scale(loss).backward()
+
+                    bppo_md = {
+                        f"bppo/{k.split('/')[-1]}": v
+                        for k, v in metrics_data.items()
+                    }
+                    bppo_md["bppo/entropy_loss"] = float(
+                        entropy_loss.detach().item()
+                    )
+                    bppo_md["bppo/total_loss"] = float(loss.detach().item())
+                    append_to_dict(metrics, bppo_md)
+
+                torch.cuda.empty_cache()
+
+                grad_norm, lr_list = self.optimizer_step()
+                extra = {"bppo/grad_norm": grad_norm, "bppo/lr": lr_list[0]}
+                if len(lr_list) > 1:
+                    extra["bppo/critic_lr"] = lr_list[1]
+                append_to_dict(metrics, extra)
+
+        # Don't step LR scheduler — BPPO is auxiliary replay training.
+        self.optimizer.zero_grad()
+        clear_memory()
+
+        mean_metric_dict = {k: float(np.mean(v)) for k, v in metrics.items()}
+        mean_metric_dict = all_reduce_dict(
+            mean_metric_dict,
+            op=torch.distributed.ReduceOp.AVG,
+        )
+        mean_metric_dict["bppo/replay_buffer_size"] = float(
+            len(self._bppo_replay_deque) if self._bppo_replay_deque else 0
+        )
+        mean_metric_dict["bppo/batch_staleness"] = float(staleness)
         return mean_metric_dict

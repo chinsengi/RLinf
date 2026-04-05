@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 import functools
 import os
 import time
@@ -1005,6 +1006,19 @@ class FSDPActor(FSDPModelManager, Worker):
         return batch
 
 
+def _clone_rollout_batch(batch: dict) -> dict:
+    """Deep-clone a rollout batch dict, moving all tensors to CPU."""
+    cloned: dict = {}
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor):
+            cloned[key] = value.detach().cpu().contiguous().clone()
+        elif isinstance(value, dict):
+            cloned[key] = _clone_rollout_batch(value)
+        else:
+            cloned[key] = value
+    return cloned
+
+
 def _require_trainable_batch(skip_value=None):
     """Decorator that skips the method when the rollout batch has no trainable data."""
 
@@ -1051,6 +1065,17 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.enable_sft_co_train = cfg.actor.get("enable_sft_co_train", False)
         self.version = 0
         self._nonfinite_training_warnings: set[str] = set()
+
+        bppo_cfg = cfg.algorithm.get("bppo", None)
+        self._bppo_enabled = bppo_cfg is not None and bppo_cfg.get("enabled", False)
+        if self._bppo_enabled:
+            maxlen = int(bppo_cfg.get("replay_buffer_size", 20))
+            self._bppo_replay_deque: collections.deque[tuple[int, dict]] = (
+                collections.deque(maxlen=maxlen)
+            )
+        else:
+            self._bppo_replay_deque = None
+
         if self.enable_sft_co_train:
             self._build_sft_data_loader()
 
@@ -1218,6 +1243,41 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     f"prev_logprobs for key {key!r}: {value.shape[:2]=} vs "
                     f"{prev_logprobs.shape[:2]=}."
                 )
+
+    def _store_for_bppo(self) -> None:
+        """Clone the current trainable rollout batch into the BPPO replay deque."""
+        if not self._bppo_enabled or self._bppo_replay_deque is None:
+            return
+        if not self._has_trainable_rollout_batch():
+            return
+        batch_clone = _clone_rollout_batch(self.rollout_batch)
+        self._bppo_replay_deque.append((int(self.version), batch_clone))
+
+    def _sample_bppo_batch(self) -> Optional[tuple[int, dict]]:
+        """Sample a non-stale batch from the BPPO replay deque.
+
+        Returns:
+            ``(collection_version, deep_cloned_batch)`` or ``None``.
+        """
+        if not self._bppo_enabled or not self._bppo_replay_deque:
+            return None
+
+        staleness_max = int(
+            self.cfg.algorithm.bppo.get("staleness_max_versions", 10)
+        )
+        current_version = int(self.version)
+
+        eligible = [
+            (ver, batch)
+            for ver, batch in self._bppo_replay_deque
+            if current_version - ver <= staleness_max
+        ]
+        if not eligible:
+            return None
+
+        idx = int(torch.randint(len(eligible), (1,)).item())
+        ver, batch = eligible[idx]
+        return ver, _clone_rollout_batch(batch)
 
     def _process_received_rollout_batch(
         self, rollout_batch: dict[str, torch.Tensor]
@@ -1479,6 +1539,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         """
         Run the training process using the received rollout batch.
         """
+        self._store_for_bppo()
 
         if self.is_weight_offloaded:
             self.load_param_and_grad(self.device)
@@ -1737,6 +1798,334 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             mean_metric_dict, op=torch.distributed.ReduceOp.AVG
         )
 
+        return mean_metric_dict
+
+    @Worker.timer("bppo_training")
+    def run_bppo_training(self) -> dict:
+        """Run BPPO updates from the replay buffer during cooldown."""
+        if not self._bppo_enabled:
+            return {}
+
+        sample = self._sample_bppo_batch()
+        if sample is None:
+            self.log_info(
+                "[BPPO] No eligible replay data for cooldown training."
+            )
+            return {}
+
+        batch_version, replay_batch = sample
+        staleness = int(self.version) - batch_version
+        self.log_info(
+            f"[BPPO] Running cooldown training "
+            f"(buffer={len(self._bppo_replay_deque)}, staleness={staleness})"
+        )
+
+        bppo_cfg = self.cfg.algorithm.bppo
+
+        # --- recompute advantages on the replay batch -------------------------
+        self.rollout_batch = replay_batch
+
+        with torch.inference_mode():
+            adv_kwargs = {
+                "task_type": self.cfg.runner.task_type,
+                "adv_type": self.cfg.algorithm.adv_type,
+                "rewards": self.rollout_batch["rewards"],
+                "dones": self.rollout_batch["dones"],
+                "values": self.rollout_batch.get("prev_values", None),
+                "gamma": self.cfg.algorithm.get("gamma", 1),
+                "gae_lambda": self.cfg.algorithm.get("gae_lambda", 1),
+                "group_size": self.cfg.algorithm.get("group_size", 8),
+                "reward_type": self.cfg.algorithm.reward_type,
+                "loss_mask": self.rollout_batch.get("loss_mask", None),
+                "loss_mask_sum": self.rollout_batch.get("loss_mask_sum", None),
+                "normalize_advantages": self.cfg.algorithm.get(
+                    "normalize_advantages", True
+                ),
+            }
+            adv_and_ret = calculate_adv_and_returns(**adv_kwargs)
+            self.rollout_batch.update(adv_and_ret)
+            if adv_kwargs["loss_mask"] is not None:
+                self.rollout_batch["loss_mask"] = adv_kwargs["loss_mask"]
+            if adv_kwargs["loss_mask_sum"] is not None:
+                self.rollout_batch["loss_mask_sum"] = adv_kwargs["loss_mask_sum"]
+
+        # --- prepare model / optimizer ----------------------------------------
+        if self.is_weight_offloaded:
+            self.load_param_and_grad(self.device)
+        if self.is_optimizer_offloaded:
+            self.load_optimizer(self.device)
+
+        self.model.train()
+        rollout_size = (
+            self.rollout_batch["prev_logprobs"].shape[0]
+            * self.rollout_batch["prev_logprobs"].shape[1]
+        )
+        g = torch.Generator()
+        g.manual_seed(self.cfg.actor.seed + self._rank)
+        shuffle_id = torch.randperm(rollout_size, generator=g)
+
+        with torch.no_grad():
+            self.rollout_batch = process_nested_dict_for_train(
+                self.rollout_batch, shuffle_id
+            )
+
+        assert (
+            self.cfg.actor.global_batch_size
+            % (self.cfg.actor.micro_batch_size * self._world_size)
+            == 0
+        ), "global_batch_size is not divisible by micro_batch_size * world_size"
+
+        self.gradient_accumulation = (
+            self.cfg.actor.global_batch_size
+            // self.cfg.actor.micro_batch_size
+            // self._world_size
+        )
+
+        rollout_size = self.rollout_batch["prev_logprobs"].size(0)
+        batch_size_per_rank = self.cfg.actor.global_batch_size // self._world_size
+        assert rollout_size % batch_size_per_rank == 0, (
+            f"{rollout_size} is not divisible by {batch_size_per_rank}"
+        )
+
+        bppo_clip_high = float(bppo_cfg.get("clip_ratio_high", 0.1))
+        bppo_clip_low = float(bppo_cfg.get("clip_ratio_low", 0.1))
+        max_update_epochs = int(bppo_cfg.get("max_update_epochs", 4))
+
+        metrics: dict = {}
+
+        # --- training loop (same as run_training, tighter clip) ---------------
+        for _ in range(max_update_epochs):
+            rollout_dataloader_iter = split_dict_to_chunk(
+                self.rollout_batch,
+                rollout_size // batch_size_per_rank,
+            )
+            for train_global_batch in rollout_dataloader_iter:
+                train_global_batch_size = train_global_batch[
+                    "prev_logprobs"
+                ].shape[0]
+                assert (
+                    train_global_batch_size % self.cfg.actor.micro_batch_size
+                    == 0
+                ), (
+                    f"{train_global_batch_size=}, "
+                    f"{self.cfg.actor.micro_batch_size}"
+                )
+
+                train_micro_batch = split_dict_to_chunk(
+                    train_global_batch,
+                    train_global_batch_size // self.cfg.actor.micro_batch_size,
+                )
+
+                self.optimizer.zero_grad()
+                for idx, batch in enumerate(train_micro_batch):
+                    batch = put_tensor_device(
+                        batch,
+                        f"{Worker.torch_device_type}:{int(os.environ['LOCAL_RANK'])}",
+                    )
+                    backward_ctx = self.before_micro_batch(
+                        self.model,
+                        is_last_micro_batch=(idx + 1)
+                        == self.gradient_accumulation,
+                    )
+                    advantages = batch["advantages"]
+                    prev_logprobs = batch["prev_logprobs"]
+                    returns = batch.get("returns", None)
+                    prev_values = batch.get("prev_values", None)
+                    loss_mask = batch.get("loss_mask", None)
+                    loss_mask_sum = batch.get("loss_mask_sum", None)
+
+                    advantages = self._sanitize_training_tensor(
+                        "advantages", advantages, loss_mask
+                    )
+                    prev_logprobs = self._sanitize_training_tensor(
+                        "prev_logprobs", prev_logprobs, loss_mask
+                    )
+                    returns = self._sanitize_training_tensor(
+                        "returns", returns, loss_mask
+                    )
+                    prev_values = self._sanitize_training_tensor(
+                        "prev_values", prev_values, loss_mask
+                    )
+
+                    forward_inputs = batch.get("forward_inputs", None)
+                    if forward_inputs is None:
+                        raise ValueError(
+                            "Missing forward_inputs in BPPO training. "
+                            "Replay batch may be corrupted."
+                        )
+
+                    model_kwargs = {}
+                    if SupportedModel(self.cfg.actor.model.model_type) in [
+                        SupportedModel.OPENVLA,
+                        SupportedModel.OPENVLA_OFT,
+                    ]:
+                        model_kwargs["temperature"] = (
+                            self.cfg.algorithm.sampling_params.temperature_train
+                        )
+                        model_kwargs["top_k"] = (
+                            self.cfg.algorithm.sampling_params.top_k
+                        )
+                    elif (
+                        SupportedModel(self.cfg.actor.model.model_type)
+                        == SupportedModel.GR00T
+                    ):
+                        model_kwargs["prev_logprobs"] = prev_logprobs
+
+                    compute_values = self.cfg.algorithm.adv_type == "gae"
+
+                    with self.grad_anomaly_context():
+                        with self.amp_context:
+                            output_dict = self.model(
+                                forward_inputs=forward_inputs,
+                                compute_logprobs=True,
+                                compute_entropy=(
+                                    self.cfg.algorithm.entropy_bonus > 0
+                                ),
+                                compute_values=compute_values,
+                                use_cache=False,
+                                **model_kwargs,
+                            )
+
+                    if (
+                        SupportedModel(self.cfg.actor.model.model_type)
+                        == SupportedModel.GR00T
+                    ):
+                        prev_logprobs = output_dict["prev_logprobs"]
+
+                    output_dict["logprobs"] = self._sanitize_training_tensor(
+                        "logprobs", output_dict["logprobs"], loss_mask
+                    )
+                    output_dict["values"] = self._sanitize_training_tensor(
+                        "values", output_dict.get("values"), loss_mask
+                    )
+                    output_dict["entropy"] = self._sanitize_training_tensor(
+                        "entropy", output_dict.get("entropy"), loss_mask
+                    )
+
+                    loss_kwargs = {
+                        "loss_type": self.cfg.algorithm.loss_type,
+                        "logprob_type": self.cfg.algorithm.logprob_type,
+                        "reward_type": self.cfg.algorithm.reward_type,
+                        "single_action_dim": self.cfg.actor.model.get(
+                            "action_dim", 7
+                        ),
+                        "logprobs": output_dict["logprobs"],
+                        "values": output_dict.get("values", None),
+                        "old_logprobs": prev_logprobs,
+                        "advantages": advantages,
+                        "returns": returns,
+                        "prev_values": prev_values,
+                        "clip_ratio_high": bppo_clip_high,
+                        "clip_ratio_low": bppo_clip_low,
+                        "value_clip": self.cfg.algorithm.get(
+                            "value_clip", None
+                        ),
+                        "huber_delta": self.cfg.algorithm.get(
+                            "huber_delta", None
+                        ),
+                        "loss_mask": loss_mask,
+                        "loss_mask_sum": loss_mask_sum,
+                        "rollout_horizon_steps": self.cfg.env.train.rollout_horizon_steps,
+                        "task_type": self.cfg.runner.task_type,
+                        "critic_warmup": self.optimizer_steps
+                        < self.critic_warmup_steps,
+                    }
+                    with self.grad_anomaly_context():
+                        loss, metrics_data = policy_loss(**loss_kwargs)
+
+                    entropy_loss = torch.tensor(
+                        0.0, device=Worker.torch_platform.current_device()
+                    )
+                    if (
+                        self.cfg.algorithm.entropy_bonus > 0
+                        and not loss_kwargs["critic_warmup"]
+                    ):
+                        entropy = output_dict["entropy"]
+                        entropy = reshape_entropy(
+                            entropy,
+                            entropy_type=self.cfg.algorithm.entropy_type,
+                            action_dim=self.cfg.actor.model.get(
+                                "action_dim", 7
+                            ),
+                            batch_size=output_dict["logprobs"].shape[0],
+                        )
+                        entropy_mask = (
+                            loss_mask.reshape(entropy.shape)
+                            if loss_mask is not None and entropy is not None
+                            else loss_mask
+                        )
+                        with self.grad_anomaly_context():
+                            entropy_loss = masked_mean(
+                                entropy, mask=entropy_mask
+                            )
+                        loss -= self.cfg.algorithm.entropy_bonus * entropy_loss
+
+                    bppo_md = {
+                        f"bppo/{k.split('/')[-1]}": v
+                        for k, v in metrics_data.items()
+                    }
+                    bppo_md["bppo/entropy_loss"] = entropy_loss.detach().item()
+
+                    total_loss_metric = loss.detach()
+                    actor_signal_abs_max = self._masked_abs_max(
+                        advantages, loss_mask
+                    )
+                    critic_signal_abs_max = self._masked_abs_max(
+                        None
+                        if returns is None or prev_values is None
+                        else returns - prev_values,
+                        loss_mask,
+                    )
+                    if (
+                        actor_signal_abs_max == 0.0
+                        and critic_signal_abs_max == 0.0
+                    ):
+                        bppo_md["bppo/total_loss"] = total_loss_metric.item()
+                        append_to_dict(metrics, bppo_md)
+                        continue
+                    if (
+                        torch.isfinite(total_loss_metric)
+                        and total_loss_metric.abs() == 0
+                    ):
+                        bppo_md["bppo/total_loss"] = 0.0
+                        append_to_dict(metrics, bppo_md)
+                        continue
+
+                    loss /= self.gradient_accumulation
+                    if not torch.isfinite(loss):
+                        self.logger.warning(
+                            "[BPPO] Skipping micro-batch with non-finite "
+                            "total loss."
+                        )
+                        continue
+                    with backward_ctx, self.grad_anomaly_context():
+                        self.grad_scaler.scale(loss).backward()
+
+                    bppo_md["bppo/total_loss"] = total_loss_metric.item()
+                    append_to_dict(metrics, bppo_md)
+
+                self.torch_platform.empty_cache()
+
+                grad_norm, lr_list = self.optimizer_step()
+                extra = {
+                    "bppo/grad_norm": grad_norm,
+                    "bppo/lr": lr_list[0],
+                }
+                if len(lr_list) > 1:
+                    extra["bppo/critic_lr"] = lr_list[1]
+                append_to_dict(metrics, extra)
+
+        # Don't step LR scheduler — BPPO is auxiliary replay training.
+        self.optimizer.zero_grad()
+        clear_memory()
+        mean_metric_dict = {key: np.mean(value) for key, value in metrics.items()}
+        mean_metric_dict = all_reduce_dict(
+            mean_metric_dict, op=torch.distributed.ReduceOp.AVG
+        )
+        mean_metric_dict["bppo/replay_buffer_size"] = float(
+            len(self._bppo_replay_deque) if self._bppo_replay_deque else 0
+        )
+        mean_metric_dict["bppo/batch_staleness"] = float(staleness)
         return mean_metric_dict
 
     def set_global_step(self, global_step: int) -> None:
