@@ -261,7 +261,6 @@ actor:
       buffer_dtype: ${actor.model.precision}
 
 reward:
-  use_reward_model: False
   reward_type: top_reward
 
 critic:

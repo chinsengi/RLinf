@@ -279,11 +279,7 @@ actor:
       reduce_dtype: ${actor.model.precision}
       buffer_dtype: ${actor.model.precision}
 
-# reward section is metadata only when use_reward_model: False.
-# TOPReward is computed inline by VLMPlannerWorker (see vlm_planner.reward_scale above).
-# reward_scale here is NOT read by TOPReward — configure it under vlm_planner instead.
 reward:
-  use_reward_model: False
   reward_type: top_reward
 
 critic:

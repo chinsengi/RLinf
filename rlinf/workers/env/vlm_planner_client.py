@@ -163,7 +163,7 @@ class VLMPlannerClient:
             train_cfg.get("top_reward_enabled", False)
         )
         self._top_reward_max_frames: int = int(
-            train_cfg.get("top_reward_max_frames", 16)
+            train_cfg.get("top_reward_max_frames", 1000)
         )
         self._episode_frames: list[np.ndarray] = []
         self._prev_top_score: float = 0.0
