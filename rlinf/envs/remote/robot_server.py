@@ -191,6 +191,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         jpeg_quality: int = _JPEG_QUALITY,
         verbose: bool = False,
         step_by_step: bool = False,
+        no_action: bool = False,
         request_shutdown=None,
     ):
         self._env = env
@@ -198,6 +199,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._jpeg_quality = jpeg_quality
         self._verbose = verbose or step_by_step
         self._step_by_step = step_by_step
+        self._no_action = no_action and step_by_step
         self._first_chunk_approved = not self._verbose
         self._request_shutdown = request_shutdown
 
@@ -420,15 +422,16 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         print("\n" + "=" * 60, flush=True)
         print("  FIRST CHUNK — waiting for approval before executing", flush=True)
         print("=" * 60, flush=True)
-        print(
-            f"  chunk_size={actions.shape[1]}, action_dim={actions.shape[2]}",
-            flush=True,
-        )
-        for i in range(actions.shape[1]):
+        if not self._no_action:
             print(
-                f"  step {i}: {np.array2string(actions[0, i], precision=4, suppress_small=True)}",
+                f"  chunk_size={actions.shape[1]}, action_dim={actions.shape[2]}",
                 flush=True,
             )
+            for i in range(actions.shape[1]):
+                print(
+                    f"  step {i}: {np.array2string(actions[0, i], precision=4, suppress_small=True)}",
+                    flush=True,
+                )
         print("=" * 60, flush=True)
         print("  Press Enter to approve, or Ctrl+C the server to abort.", flush=True)
         print("=" * 60 + "\n", flush=True)
@@ -478,7 +481,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             request.num_envs, request.chunk_size, request.action_dim
         )
         self._print_chunk_task_context()
-        if self._verbose:
+        if self._verbose and not self._no_action:
             logger.info(
                 f"[ChunkStep] Received chunk: num_envs={request.num_envs}, "
                 f"chunk_size={request.chunk_size}, action_dim={request.action_dim}"
@@ -742,6 +745,7 @@ def serve(
     dummy: bool = False,
     verbose: bool = False,
     step_by_step: bool = False,
+    no_action: bool = False,
     reward_frame_interval: int = 5,
 ):
     """Start the gRPC server with a YAMEnv instance.
@@ -807,6 +811,7 @@ def serve(
         jpeg_quality=jpeg_quality,
         verbose=verbose,
         step_by_step=step_by_step,
+        no_action=no_action,
         request_shutdown=_request_shutdown,
     )
     robot_env_pb2_grpc.add_RobotEnvServiceServicer_to_server(servicer, server)
@@ -965,6 +970,11 @@ def main():
         help="Step-by-step mode: wait for Enter before executing each chunk",
     )
     parser.add_argument(
+        "--no-action",
+        action="store_true",
+        help="Suppress per-step action logging in SBS mode. Only effective with --sbs.",
+    )
+    parser.add_argument(
         "--reward-frame-interval",
         type=int,
         default=5,
@@ -979,6 +989,7 @@ def main():
         dummy=args.dummy,
         verbose=args.verbose,
         step_by_step=args.sbs,
+        no_action=args.no_action,
         reward_frame_interval=args.reward_frame_interval,
     )
 
