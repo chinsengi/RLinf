@@ -367,8 +367,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             img_channels=obs_spaces["main_images"].shape[2],
             max_episode_steps=self._env._max_episode_steps,
             control_rate_hz=self._env._control_rate_hz,
-            auto_reset=self._env.auto_reset,
-            ignore_terminations=self._env.ignore_terminations,
             num_wrist_images=(
                 obs_spaces["wrist_images"].shape[0]
                 if "wrist_images" in obs_spaces

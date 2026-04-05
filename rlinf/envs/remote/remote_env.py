@@ -18,6 +18,10 @@ This environment presents the same interface as ``YAMEnv`` but forwards all
 calls to a gRPC server (typically running on the robot's local machine and
 exposed to the Beaker container via a reverse SSH tunnel over Tailscale).
 
+The remote YAM transport is server-managed: the desktop ``RobotServer`` owns
+all episode restart / cooldown / safe-recovery state. ``RemoteEnv`` never
+performs implicit client-side resets after terminal or truncated steps.
+
 Usage in YAML config::
 
     env_type: remote
@@ -194,10 +198,11 @@ class RemoteEnv(gym.Env):
         self._img_c = spaces.img_channels
         self._max_episode_steps = spaces.max_episode_steps
         self._control_rate_hz = spaces.control_rate_hz
-        self.auto_reset = bool(cfg.get("auto_reset", spaces.auto_reset))
-        self.ignore_terminations = bool(
-            cfg.get("ignore_terminations", spaces.ignore_terminations)
-        )
+        # Remote YAM always uses desktop-side restart ownership. Keep these
+        # compatibility attributes aligned with the runtime's generic env
+        # assumptions without depending on any extra gRPC metadata.
+        self.auto_reset = False
+        self.ignore_terminations = True
 
         # Gym spaces
         obs_space = {
@@ -308,7 +313,13 @@ class RemoteEnv(gym.Env):
         return obs, {}
 
     def step(self, actions=None, auto_reset=True):
-        """Single step — delegates to chunk_step with chunk_size=1."""
+        """Single step — delegates to chunk_step with chunk_size=1.
+
+        ``auto_reset`` is accepted only for short-term call compatibility.
+        Remote YAM restart is always managed by the desktop RobotServer, so the
+        flag is ignored and no implicit Reset RPC is issued here.
+        """
+        del auto_reset
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
         if actions is not None:
@@ -331,9 +342,6 @@ class RemoteEnv(gym.Env):
         terminated = chunk_terminations[:, 0].bool().numpy()
         truncated = chunk_truncations[:, 0].bool().numpy()
         infos = infos_list[0] if infos_list else {}
-
-        if auto_reset and (np.any(terminated) or np.any(truncated)):
-            obs, _ = self.reset()
 
         return obs, reward, terminated, truncated, infos
 
@@ -420,14 +428,10 @@ class RemoteEnv(gym.Env):
         past_terminations = raw_chunk_terminations.any(dim=1)
         past_truncations = raw_chunk_truncations.any(dim=1)
 
-        if self.auto_reset or self.ignore_terminations:
-            chunk_terminations = torch.zeros_like(raw_chunk_terminations)
-            chunk_terminations[:, -1] = past_terminations
-            chunk_truncations = torch.zeros_like(raw_chunk_truncations)
-            chunk_truncations[:, -1] = past_truncations
-        else:
-            chunk_terminations = raw_chunk_terminations.clone()
-            chunk_truncations = raw_chunk_truncations.clone()
+        chunk_terminations = torch.zeros_like(raw_chunk_terminations)
+        chunk_terminations[:, -1] = past_terminations
+        chunk_truncations = torch.zeros_like(raw_chunk_truncations)
+        chunk_truncations[:, -1] = past_truncations
 
         # Track latest obs for VLM subtask planner image context.
         if obs_list:

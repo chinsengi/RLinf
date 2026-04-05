@@ -112,8 +112,6 @@ def test_robot_env_servicer_reports_multiview_counts():
         action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(14,), dtype=np.float32)
         _max_episode_steps = 100
         _control_rate_hz = 10.0
-        auto_reset = False
-        ignore_terminations = True
 
     response = RobotEnvServicer(DummyEnv()).GetSpaces(None, None)
 
