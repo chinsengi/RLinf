@@ -24,7 +24,10 @@ from rlinf.utils.distributed import all_reduce_dict, masked_normalization
 from rlinf.utils.metric_utils import append_to_dict, compute_rollout_metrics
 from rlinf.utils.nested_dict_process import put_tensor_device, split_dict_to_chunk
 from rlinf.utils.utils import clear_memory, masked_mean, reshape_entropy
-from rlinf.workers.actor.fsdp_actor_worker import EmbodiedFSDPActor
+from rlinf.workers.actor.fsdp_actor_worker import (
+    EmbodiedFSDPActor,
+    _require_trainable_batch,
+)
 
 
 def flatten_rollout_batch_for_train(
@@ -60,16 +63,9 @@ def flatten_rollout_batch_for_train(
 class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
     """Embodied FSDP actor worker for async PPO / decoupled actor-critic training."""
 
+    @_require_trainable_batch(skip_value={})
     @torch.inference_mode()
     def compute_advantages_and_returns(self) -> dict[str, torch.Tensor]:
-        if not self._has_trainable_rollout_batch():
-            self.log_info(
-                "[ActorTrain] Skipping advantage computation because the rollout "
-                "batch only contains cooldown / non-training transitions."
-            )
-            return {}
-        self._validate_trainable_rollout_batch()
-
         proximal_values = self.rollout_batch.get("proximal_values", None)
         prev_values = self.rollout_batch.get("prev_values", None)
 
@@ -98,12 +94,9 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
         return rollout_metrics
 
+    @_require_trainable_batch()
     @torch.inference_mode()
     def compute_proximal_logprobs(self) -> None:
-        if not self._has_trainable_rollout_batch():
-            return
-        self._validate_trainable_rollout_batch()
-
         assert not self.is_weight_offloaded, (
             "Weight offloading is not supported when recomputing proximal logprobs."
         )
@@ -161,15 +154,8 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
         )
         self.rollout_batch["proximal_logprobs"] = proximal_logprobs
 
+    @_require_trainable_batch(skip_value={})
     def run_training(self) -> dict[str, Any]:
-        if not self._has_trainable_rollout_batch():
-            self.log_info(
-                "[ActorTrain] Skipping training because the rollout batch is empty "
-                "after filtering non-training transitions."
-            )
-            return {}
-        self._validate_trainable_rollout_batch()
-
         if self.is_weight_offloaded:
             self.load_param_and_grad(self.device)
         if self.is_optimizer_offloaded:

@@ -216,7 +216,6 @@ class EnvWorker(Worker):
             except Exception:
                 pass
 
-
     @staticmethod
     def _should_collect_env_output(env_output: EnvOutput | None) -> bool:
         return env_output is not None and env_output.collect_for_training
@@ -295,9 +294,7 @@ class EnvWorker(Worker):
         self._planner_client.apply_resolved_top_reward(pending, score_t)
 
     async def _resolve_pending_vlm_results(self, slot_id: int) -> None:
-        self._planner_client.resolve_pending_vlm_results_sync(
-            slot_id, self.env_list
-        )
+        self._planner_client.resolve_pending_vlm_results_sync(slot_id, self.env_list)
 
     def _compute_top_reward(self, env_output: EnvOutput, slot_id: int) -> EnvOutput:
         return self._planner_client.compute_top_reward_sync(
@@ -936,7 +933,9 @@ class EnvWorker(Worker):
                         await asyncio.sleep(0)
 
                     env_output = env_outputs[slot_id]
-                    should_collect_previous = self._should_collect_env_output(env_output)
+                    should_collect_previous = self._should_collect_env_output(
+                        env_output
+                    )
                     curr_obs = env_output.obs
                     if env_output.intervene_actions is not None:
                         self.rollout_results[slot_id].update_last_actions(
@@ -982,9 +981,7 @@ class EnvWorker(Worker):
                             env_output.truncations if should_collect_previous else None
                         ),
                         terminations=(
-                            env_output.terminations
-                            if should_collect_previous
-                            else None
+                            env_output.terminations if should_collect_previous else None
                         ),
                         rewards=rewards,
                     )

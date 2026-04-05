@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import os
 import time
 from functools import partial
@@ -1004,6 +1005,26 @@ class FSDPActor(FSDPModelManager, Worker):
         return batch
 
 
+def _require_trainable_batch(skip_value=None):
+    """Decorator that skips the method when the rollout batch has no trainable data."""
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if not self._has_trainable_rollout_batch():
+                self.log_info(
+                    f"[ActorTrain] Skipping {func.__name__} because the rollout "
+                    "batch only contains cooldown / non-training transitions."
+                )
+                return skip_value
+            self._validate_trainable_rollout_batch()
+            return func(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
 class EmbodiedFSDPActor(FSDPModelManager, Worker):
     def __init__(self, cfg: DictConfig):
         Worker.__init__(self)
@@ -1229,7 +1250,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             rollout_batch["loss_mask_sum"] = loss_mask_sum
 
         # filter data by rewards
-        if self.cfg.algorithm.get("filter_rewards", False) and "rewards" in rollout_batch:
+        if (
+            self.cfg.algorithm.get("filter_rewards", False)
+            and "rewards" in rollout_batch
+        ):
             rewards = rollout_batch[
                 "rewards"
             ]  # [n_chunk_step, batch, num_action_chunks]
@@ -1279,18 +1303,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         return rollout_batch
 
+    @_require_trainable_batch(skip_value={})
     def compute_advantages_and_returns(self) -> dict[str, torch.Tensor]:
         """
         Compute the advantages and returns.
         """
-        if not self._has_trainable_rollout_batch():
-            self.log_info(
-                "[ActorTrain] Skipping advantage computation because the rollout "
-                "batch only contains cooldown / non-training transitions."
-            )
-            return {}
-        self._validate_trainable_rollout_batch()
-
         kwargs = {
             "task_type": self.cfg.runner.task_type,
             "adv_type": self.cfg.algorithm.adv_type,
@@ -1456,18 +1473,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             return 0.0
         return float(values.abs().max().item())
 
+    @_require_trainable_batch(skip_value={})
     @Worker.timer("run_training")
     def run_training(self) -> None:
         """
         Run the training process using the received rollout batch.
         """
-        if not self._has_trainable_rollout_batch():
-            self.log_info(
-                "[ActorTrain] Skipping training because the rollout batch is empty "
-                "after filtering non-training transitions."
-            )
-            return {}
-        self._validate_trainable_rollout_batch()
 
         if self.is_weight_offloaded:
             self.load_param_and_grad(self.device)

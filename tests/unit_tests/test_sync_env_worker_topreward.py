@@ -519,7 +519,10 @@ def test_run_interact_once_skips_cooldown_chunk_from_training_data():
 
     worker.bootstrap_step = lambda: [
         EnvOutput(
-            obs={"states": torch.zeros((1, 4)), "main_images": torch.zeros((1, 2, 2, 3))},
+            obs={
+                "states": torch.zeros((1, 4)),
+                "main_images": torch.zeros((1, 2, 2, 3)),
+            },
             rewards=None,
             dones=torch.zeros((1, 1), dtype=torch.bool),
             terminations=torch.zeros((1, 1), dtype=torch.bool),
@@ -544,7 +547,10 @@ def test_run_interact_once_skips_cooldown_chunk_from_training_data():
     worker.env_interact_step = lambda _actions, _slot_id: (
         EnvOutput(
             obs={"states": torch.ones((1, 4)), "main_images": torch.ones((1, 2, 2, 3))},
-            final_obs={"states": torch.ones((1, 4)), "main_images": torch.ones((1, 2, 2, 3))},
+            final_obs={
+                "states": torch.ones((1, 4)),
+                "main_images": torch.ones((1, 2, 2, 3)),
+            },
             rewards=torch.zeros((1, 1), dtype=torch.float32),
             dones=torch.zeros((1, 1), dtype=torch.bool),
             terminations=torch.zeros((1, 1), dtype=torch.bool),
@@ -860,7 +866,10 @@ def test_initial_subtask_planning_replaces_parent_task_before_first_send(monkeyp
     updated = worker._maybe_plan_initial_subtask(0, env_output)
 
     assert len(worker._planner_client._vlm_planner.calls) == 1
-    assert worker._planner_client._vlm_planner.calls[0][1] == "Pick up the stuffed animals."
+    assert (
+        worker._planner_client._vlm_planner.calls[0][1]
+        == "Pick up the stuffed animals."
+    )
     assert inner_env.task_description == "pick up the blue one"
     assert updated.obs["task_descriptions"] == ["pick up the blue one"]
 

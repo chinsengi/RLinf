@@ -406,8 +406,6 @@ class RemoteEnv(gym.Env):
                 infos = self._record_metrics(
                     step_reward, step_term, np.zeros_like(step_term), {}
                 )
-            if collection_paused:
-                infos["collection_paused"] = True
             infos_list.append(infos)
             rewards.append(step_reward)
             terminations.append(step_term)
