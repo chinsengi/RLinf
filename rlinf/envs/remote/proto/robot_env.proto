@@ -21,6 +21,15 @@ service RobotEnvService {
   // Switch the robot into zero-torque / zero-gravity mode.
   rpc EnterZeroTorqueMode(Empty) returns (Empty);
 
+  // Push wall-clock episode timing from the training client to the server.
+  // Lets Beaker override the desktop-side episode duration and cooldown
+  // without restarting the RobotServer.
+  rpc SetEpisodeTiming(EpisodeTimingRequest) returns (Empty);
+
+  // Push a key-value status payload (e.g. TOPReward score) from the training
+  // client to the server, so it can be shown in the SBS prompt.
+  rpc PushStatusInfo(StatusInfoRequest) returns (Empty);
+
   // Close the environment.
   rpc Close(Empty) returns (Empty);
 }
@@ -33,6 +42,21 @@ message ResetRequest {
 
 message TaskDescriptionRequest {
   string task_description = 1;
+}
+
+message EpisodeTimingRequest {
+  // Wall-clock episode duration in seconds. Negative or zero = keep current.
+  float episode_duration_s = 1;
+  // Cooldown after an episode ends, in seconds. Negative = keep current.
+  float episode_cooldown_s = 2;
+}
+
+message StatusInfoRequest {
+  // Free-form key → float values to show in the SBS prompt. Typical keys:
+  // "top_reward_score", "top_reward_delta", "lr", "global_step".
+  map<string, float> values = 1;
+  // Optional free-form text appended to the status line (e.g. subtask name).
+  string text = 2;
 }
 
 // Observation from a single step.

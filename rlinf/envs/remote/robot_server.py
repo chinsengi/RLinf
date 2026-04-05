@@ -211,6 +211,16 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         )
         self._cooldown_deadline: float | None = None
         self._restart_required: bool = False
+        # Running stats displayed in the SBS prompt so the operator can see
+        # how the current episode is going before approving each chunk.
+        self._episode_return: float = 0.0
+        self._last_chunk_reward_sum: float = 0.0
+        self._last_chunk_reward_max: float = 0.0
+        # Latest status info pushed from the training client via
+        # PushStatusInfo RPC (e.g. TOPReward score, lr).
+        self._client_status_values: dict[str, float] = {}
+        self._client_status_text: str = ""
+        self._client_status_updated_at: float = 0.0
         # Protects all env operations so that safe_recover() and gRPC
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
@@ -250,6 +260,35 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             flush=True,
         )
 
+    def _format_sbs_status(self) -> str:
+        """Return a one-line status summary for the SBS prompt."""
+        # Episode wall-clock timing from the wrapped env.
+        duration_s = float(getattr(self._env, "_episode_duration_s", 0.0))
+        start = getattr(self._env, "_episode_start_time", None)
+        if start is not None:
+            elapsed_s = max(0.0, time.monotonic() - start)
+        else:
+            elapsed_s = 0.0
+        remaining_s = max(0.0, duration_s - elapsed_s) if duration_s > 0 else 0.0
+
+        def _fmt(sec: float) -> str:
+            m, s = divmod(int(sec), 60)
+            return f"{m}:{s:02d}"
+
+        next_chunk = self._chunk_count + 1
+        parts = [
+            f"chunk#{next_chunk}",
+            f"ep_time={_fmt(elapsed_s)}/{_fmt(duration_s)} (left={_fmt(remaining_s)})",
+        ]
+        # Append client-pushed values (TOPReward score/delta, lr, ...).
+        if self._client_status_values:
+            client_age_s = time.monotonic() - self._client_status_updated_at
+            kv_strs = [f"{k}={v:+.4f}" for k, v in self._client_status_values.items()]
+            parts.append(f"client({client_age_s:.0f}s ago): " + ", ".join(kv_strs))
+        if self._client_status_text:
+            parts.append(self._client_status_text)
+        return " | ".join(parts)
+
     def _touch(self) -> None:
         """Record that a client RPC was received."""
         self._last_rpc_time = time.monotonic()
@@ -260,6 +299,12 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._client_connected = False
         self._chunk_count = 0
         self._first_chunk_approved = not self._verbose
+        self._episode_return = 0.0
+        self._last_chunk_reward_sum = 0.0
+        self._last_chunk_reward_max = 0.0
+        self._client_status_values = {}
+        self._client_status_text = ""
+        self._client_status_updated_at = 0.0
 
     def _get_current_raw_obs_locked(self) -> dict:
         """Return the latest raw observation without commanding the robot."""
@@ -379,13 +424,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             ),
         )
 
-    _APPROVAL_FILE = "/tmp/rlinf_approve_chunk"
-
     def _wait_for_first_chunk_approval(self, actions: np.ndarray) -> None:
-        """Block until the user approves the first chunk by creating a file."""
-        if os.path.exists(self._APPROVAL_FILE):
-            os.remove(self._APPROVAL_FILE)
-
+        """Block until the user approves the first chunk by pressing Enter."""
         print("\n" + "=" * 60, flush=True)
         print("  FIRST CHUNK — waiting for approval before executing", flush=True)
         print("=" * 60, flush=True)
@@ -399,17 +439,15 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 flush=True,
             )
         print("=" * 60, flush=True)
-        print(
-            f"  To approve, run:  touch {self._APPROVAL_FILE}",
-            flush=True,
-        )
-        print("  To abort, Ctrl+C the server.", flush=True)
+        print("  Press Enter to approve, or Ctrl+C the server to abort.", flush=True)
         print("=" * 60 + "\n", flush=True)
 
-        while not os.path.exists(self._APPROVAL_FILE):
-            time.sleep(0.5)
+        try:
+            with open("/dev/tty", "r") as tty:
+                tty.readline()
+        except OSError:
+            input()
 
-        os.remove(self._APPROVAL_FILE)
         self._first_chunk_approved = True
         logger.info("[ChunkStep] First chunk approved. Executing...")
 
@@ -473,6 +511,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             self._wait_for_first_chunk_approval(actions)
 
         if self._step_by_step:
+            print(f"[SBS] {self._format_sbs_status()}", flush=True)
             print("[SBS] Press Enter to execute this chunk...", flush=True)
             try:
                 with open("/dev/tty", "r") as tty:
@@ -499,6 +538,22 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 infos_list,
             ) = self._env.chunk_step(actions)
         self._chunk_count += 1
+
+        # Update running stats for the SBS prompt.
+        try:
+            rewards_np = (
+                chunk_rewards.detach().cpu().numpy()
+                if hasattr(chunk_rewards, "detach")
+                else np.asarray(chunk_rewards)
+            )
+            per_step = rewards_np[0].astype(float)
+            self._last_chunk_reward_sum = float(per_step.sum())
+            self._last_chunk_reward_max = (
+                float(per_step.max()) if per_step.size else 0.0
+            )
+            self._episode_return += self._last_chunk_reward_sum
+        except Exception:
+            pass
 
         step_results = []
         chunk_size = request.chunk_size
@@ -552,6 +607,36 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._touch()
         with self._env_lock:
             self._env.enter_zero_torque_mode()
+        return robot_env_pb2.Empty()
+
+    def SetEpisodeTiming(self, request, context):
+        self._touch()
+        duration_s = float(request.episode_duration_s)
+        cooldown_s = float(request.episode_cooldown_s)
+        changes = []
+        if duration_s > 0:
+            old = float(getattr(self._env, "_episode_duration_s", 0.0))
+            self._env._episode_duration_s = duration_s
+            changes.append(f"episode_duration_s: {old:.1f} -> {duration_s:.1f}")
+        if cooldown_s >= 0:
+            old = self._episode_cooldown_s
+            self._episode_cooldown_s = cooldown_s
+            # Keep env-side value in sync for any code that reads it directly.
+            if hasattr(self._env, "_episode_cooldown_s"):
+                self._env._episode_cooldown_s = cooldown_s
+            changes.append(f"episode_cooldown_s: {old:.1f} -> {cooldown_s:.1f}")
+        if changes:
+            logger.info(
+                "[RobotServer] Episode timing updated from client: %s",
+                ", ".join(changes),
+            )
+        return robot_env_pb2.Empty()
+
+    def PushStatusInfo(self, request, context):
+        self._touch()
+        self._client_status_values = {k: float(v) for k, v in request.values.items()}
+        self._client_status_text = str(request.text or "")
+        self._client_status_updated_at = time.monotonic()
         return robot_env_pb2.Empty()
 
     def Close(self, request, context):

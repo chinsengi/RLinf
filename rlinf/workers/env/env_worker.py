@@ -288,10 +288,17 @@ class EnvWorker(Worker):
         )
 
     def _resolve_pending_top_reward(self, slot_id: int) -> None:
-        self._planner_client.resolve_pending_top_reward_sync(slot_id)
+        self._planner_client.resolve_pending_top_reward_sync(slot_id, self.env_list)
 
-    def _finish_pending_top_reward(self, pending: Any, score_t: float) -> None:
-        self._planner_client.apply_resolved_top_reward(pending, score_t)
+    def _finish_pending_top_reward(
+        self, pending: Any, score_t: float, slot_id: int | None = None
+    ) -> None:
+        env = (
+            self.env_list[slot_id]
+            if slot_id is not None and 0 <= slot_id < len(self.env_list)
+            else None
+        )
+        self._planner_client.apply_resolved_top_reward(pending, score_t, env=env)
 
     async def _resolve_pending_vlm_results(self, slot_id: int) -> None:
         self._planner_client.resolve_pending_vlm_results_sync(slot_id, self.env_list)

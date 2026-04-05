@@ -750,8 +750,13 @@ def validate_embodied_cfg(cfg):
             raise ValueError("env.server_cooldown_minutes must be >= 0.")
         with open_dict(cfg):
             cfg.env.server_episode_duration_s = return_home_minutes * 60.0
+            # Mirror into env.train so RemoteEnv can push timing to the
+            # desktop RobotServer at connect time (lets Beaker be the single
+            # timing source without restarting the desktop server).
+            cfg.env.train.episode_duration_s = return_home_minutes * 60.0
             if server_cooldown_minutes is not None:
                 cfg.env.server_cooldown_s = float(server_cooldown_minutes) * 60.0
+                cfg.env.train.episode_cooldown_s = float(server_cooldown_minutes) * 60.0
             # When a desktop RobotServer enforces the return-home timer, rollout
             # epoch boundaries must never command an extra env.reset(), or the
             # robot will return home early for a training bookkeeping reason

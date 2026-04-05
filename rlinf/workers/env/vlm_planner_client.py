@@ -527,8 +527,24 @@ class VLMPlannerClient:
         )
         return env_output
 
+    def _push_top_reward_to_env(self, env: Any, score_t: float, reward: float) -> None:
+        push = getattr(env, "push_status_info", None)
+        if callable(push):
+            try:
+                push(
+                    values={
+                        "top_reward_score": float(score_t),
+                        "top_reward_delta": float(reward),
+                    }
+                )
+            except Exception:
+                pass
+
     def apply_resolved_top_reward(
-        self, pending: _PendingTopReward, score_t: float
+        self,
+        pending: _PendingTopReward,
+        score_t: float,
+        env: Any = None,
     ) -> None:
         if self._top_reward_has_prev_score:
             reward = float(score_t) - self._prev_top_score
@@ -539,15 +555,20 @@ class VLMPlannerClient:
         self._recent_top_deltas.append(reward)
         if pending.env_output.rewards is not None:
             pending.env_output.rewards[:, -1] = reward
+        if env is not None:
+            self._push_top_reward_to_env(env, score_t, reward)
         if pending.done_on_step:
             self.reset_top_reward_state()
 
-    def resolve_pending_top_reward_sync(self, slot_id: int) -> None:
+    def resolve_pending_top_reward_sync(
+        self, slot_id: int, env_list: list[Any] | None = None
+    ) -> None:
         pending = self._pending_top_rewards.pop(slot_id, None)
         if pending is None:
             return
         score_t = ray.get(pending.score_ref)
-        self.apply_resolved_top_reward(pending, score_t)
+        env = env_list[slot_id] if env_list is not None else None
+        self.apply_resolved_top_reward(pending, score_t, env=env)
         if pending.done_on_step:
             self._episode_done_waiting_for_top_reward_reset[slot_id] = False
 
@@ -593,6 +614,8 @@ class VLMPlannerClient:
         self._log_info(
             f"[EnvWorker] TOPReward: score={score_t:.4f}, delta={reward:.4f}"
         )
+        if 0 <= slot_id < len(env_list):
+            self._push_top_reward_to_env(env_list[slot_id], score_t, reward)
         return env_output
 
     def on_env_step(
@@ -615,14 +638,15 @@ class VLMPlannerClient:
     def resolve_pending_vlm_results_sync(
         self, slot_id: int, env_list: list[Any]
     ) -> None:
-        self.resolve_pending_top_reward_sync(slot_id)
+        self.resolve_pending_top_reward_sync(slot_id, env_list)
         self.resolve_pending_subtask_sync(slot_id, env_list)
 
     async def resolve_pending_async(self, slot_id: int, env_list: list[Any]) -> None:
         pending_top_reward = self._pending_top_rewards.pop(slot_id, None)
         if pending_top_reward is not None:
             score_t = await pending_top_reward.score_ref
-            self.apply_resolved_top_reward(pending_top_reward, score_t)
+            env = env_list[slot_id] if 0 <= slot_id < len(env_list) else None
+            self.apply_resolved_top_reward(pending_top_reward, score_t, env=env)
             if pending_top_reward.done_on_step:
                 self._episode_done_waiting_for_top_reward_reset[slot_id] = False
 
