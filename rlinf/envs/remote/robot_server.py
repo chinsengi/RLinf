@@ -290,7 +290,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             step_results.append(
                 robot_env_pb2.StepResult(
                     observation=obs_proto,
-                    reward=0.0,
+                    reward=float("nan"),
                     terminated=False,
                     truncated=bool(truncated and step_idx == chunk_size - 1),
                 )

@@ -46,7 +46,30 @@ def get_model_weights_id(versions: torch.Tensor) -> str:
 
 @dataclass(kw_only=True)
 class EnvOutput:
-    """Environment output for a single chunk step."""
+    """Environment output for one env-worker chunk step.
+
+    Attributes:
+        obs: Latest observation after the chunk step. This is the observation
+            sent back to rollout for the next policy forward pass.
+        final_obs: Final observation for terminated/truncated envs when the env
+            reports an auto-reset style final frame. ``None`` when unavailable.
+        dones: Per-env done flags for the chunk, typically shaped
+            ``[batch, num_action_chunks]``.
+        terminations: Per-env terminal flags for the chunk. These represent
+            environment-defined success/failure endings rather than time limits.
+        truncations: Per-env truncation flags for the chunk, such as time-limit
+            cutoffs or server-managed restart boundaries.
+        rewards: Per-env rewards aligned with ``dones``/``terminations``/
+            ``truncations`` for the executed chunk.
+        intervene_actions: Optional override actions actually executed by the
+            environment when human or safety intervention occurred.
+        intervene_flags: Optional boolean mask indicating which action elements
+            in ``intervene_actions`` replaced the model-predicted actions.
+        collect_for_training: Whether this env output should become part of the
+            training trajectory. Remote cooldown/restart chunks use ``False`` so
+            rollout can receive the latest observation without learning from the
+            pause transition.
+    """
 
     obs: dict[str, Any]
     final_obs: Optional[dict[str, Any]] = None
@@ -57,6 +80,7 @@ class EnvOutput:
 
     intervene_actions: Optional[torch.Tensor] = None  # [B]
     intervene_flags: Optional[torch.Tensor] = None  # [B]
+    collect_for_training: bool = True
 
     def __post_init__(self):
         self.obs = put_tensor_device(self.obs, "cpu")
@@ -716,7 +740,7 @@ def convert_trajectories_to_batch(
     batch: dict[str, torch.Tensor] = {}
 
     # -------- obs / forward_inputs: dict[str, Tensor] --------
-    if trajectories[0].curr_obs:
+    if any(traj.curr_obs for traj in trajectories):
         all_keys: set[str] = set()
         for traj in trajectories:
             all_keys.update(traj.curr_obs.keys())
@@ -728,7 +752,7 @@ def convert_trajectories_to_batch(
             if tensors:
                 batch["curr_obs"][key] = torch.cat(tensors, dim=1)
 
-    if trajectories[0].next_obs:
+    if any(traj.next_obs for traj in trajectories):
         all_keys: set[str] = set()
         for traj in trajectories:
             all_keys.update(traj.next_obs.keys())
@@ -740,7 +764,7 @@ def convert_trajectories_to_batch(
             if tensors:
                 batch["next_obs"][key] = torch.cat(tensors, dim=1)
 
-    if trajectories[0].forward_inputs:
+    if any(traj.forward_inputs for traj in trajectories):
         all_keys: set[str] = set()
         for traj in trajectories:
             all_keys.update(traj.forward_inputs.keys())
@@ -755,14 +779,11 @@ def convert_trajectories_to_batch(
                 batch["forward_inputs"][key] = torch.cat(tensors, dim=1)
 
     # -------- tensor fields --------
-    reference_trajectory = trajectories[0]
-    for field_name in reference_trajectory.__dataclass_fields__.keys():
-        if not isinstance(getattr(reference_trajectory, field_name), torch.Tensor):
-            continue
+    for field_name in Trajectory.__dataclass_fields__.keys():
         field_list = [
             getattr(traj, field_name)
             for traj in trajectories
-            if getattr(traj, field_name) is not None
+            if isinstance(getattr(traj, field_name), torch.Tensor)
         ]
         if field_list:
             batch[field_name] = torch.cat(field_list, dim=1)

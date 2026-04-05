@@ -92,6 +92,7 @@ def _apply_action_chunk_smoothing(
 class EnvWorker(Worker):
     _PLANNER_CLIENT_STATE_FIELDS = {
         "_episode_frames",
+        "_episode_done_waiting_for_top_reward_reset",
         "_initial_task_descriptions",
         "_last_applied_subtask_request_id",
         "_pending_subtasks",
@@ -259,6 +260,10 @@ class EnvWorker(Worker):
             self.__dict__["_planner_client"] = planner_client
         return planner_client
 
+    @staticmethod
+    def _should_collect_env_output(env_output: EnvOutput | None) -> bool:
+        return env_output is not None and env_output.collect_for_training
+
     def set_planner_handle(self, planner_handle) -> None:
         """Set the VLM planner handle used by this env worker."""
         self._planner_client.set_planner_handle(planner_handle)
@@ -318,10 +323,10 @@ class EnvWorker(Worker):
     def _resolve_pending_subtask(self, slot_id: int) -> None:
         self._planner_client.resolve_pending_subtask_sync(slot_id, self.env_list)
 
-    def _finish_pending_subtask(
+    def _apply_resolved_subtask(
         self, slot_id: int, pending: Any, new_subtask: str
     ) -> None:
-        self._planner_client.finish_pending_subtask(
+        self._planner_client.apply_resolved_subtask(
             slot_id, pending, new_subtask, self.env_list
         )
 
@@ -334,10 +339,12 @@ class EnvWorker(Worker):
         self._planner_client.resolve_pending_top_reward_sync(slot_id)
 
     def _finish_pending_top_reward(self, pending: Any, score_t: float) -> None:
-        self._planner_client.finish_pending_top_reward(pending, score_t)
+        self._planner_client.apply_resolved_top_reward(pending, score_t)
 
     async def _resolve_pending_vlm_results(self, slot_id: int) -> None:
-        self._planner_client.resolve_pending_sync(slot_id, self.env_list)
+        self._planner_client.resolve_pending_vlm_results_sync(
+            slot_id, self.env_list
+        )
 
     def _compute_top_reward(self, env_output: EnvOutput, slot_id: int) -> EnvOutput:
         return self._planner_client.compute_top_reward_sync(
@@ -539,6 +546,7 @@ class EnvWorker(Worker):
             truncations=chunk_truncations,
             intervene_actions=intervene_actions,
             intervene_flags=intervene_flags,
+            collect_for_training=not bool(infos.get("collection_paused", False)),
         )
 
         env_output = self._planner_client.on_env_step(
@@ -975,6 +983,7 @@ class EnvWorker(Worker):
                         await asyncio.sleep(0)
 
                     env_output = env_outputs[slot_id]
+                    should_collect_previous = self._should_collect_env_output(env_output)
                     curr_obs = env_output.obs
                     if env_output.intervene_actions is not None:
                         self.rollout_results[slot_id].update_last_actions(
@@ -986,31 +995,51 @@ class EnvWorker(Worker):
                         input_channel, mode="train"
                     )
                     await self._resolve_pending_vlm_results(slot_id)
-                    rewards = self.compute_bootstrap_rewards(
-                        env_output, rollout_result.bootstrap_values
+                    next_env_output, env_info = self.env_interact_step(
+                        rollout_result.actions, slot_id
+                    )
+                    should_collect_current = self._should_collect_env_output(
+                        next_env_output
+                    )
+                    rewards = (
+                        self.compute_bootstrap_rewards(
+                            env_output, rollout_result.bootstrap_values
+                        )
+                        if should_collect_previous
+                        else None
                     )
                     chunk_step_result = ChunkStepResult(
-                        actions=rollout_result.forward_inputs.get("action", None),
+                        actions=rollout_result.forward_inputs.get("action", None)
+                        if should_collect_current
+                        else None,
                         prev_logprobs=rollout_result.prev_logprobs
-                        if self.collect_prev_infos
+                        if self.collect_prev_infos and should_collect_current
                         else None,
                         prev_values=rollout_result.prev_values
-                        if self.collect_prev_infos
+                        if self.collect_prev_infos and should_collect_current
                         else None,
-                        forward_inputs=rollout_result.forward_inputs,
-                        versions=rollout_result.versions,
-                        dones=env_output.dones,
-                        truncations=env_output.truncations,
-                        terminations=env_output.terminations,
+                        forward_inputs=rollout_result.forward_inputs
+                        if should_collect_current
+                        else {},
+                        versions=rollout_result.versions
+                        if should_collect_current
+                        else None,
+                        dones=env_output.dones if should_collect_previous else None,
+                        truncations=(
+                            env_output.truncations if should_collect_previous else None
+                        ),
+                        terminations=(
+                            env_output.terminations
+                            if should_collect_previous
+                            else None
+                        ),
                         rewards=rewards,
                     )
                     self.rollout_results[slot_id].append_step_result(chunk_step_result)
 
-                    env_output, env_info = self.env_interact_step(
-                        rollout_result.actions, slot_id
-                    )
-                    self._maybe_update_subtask(slot_id)
-                    env_batch = env_output.to_dict()
+                    if should_collect_current:
+                        self._maybe_update_subtask(slot_id)
+                    env_batch = next_env_output.to_dict()
                     self.send_env_batch(
                         output_channel,
                         {
@@ -1018,17 +1047,18 @@ class EnvWorker(Worker):
                             "final_obs": env_batch["final_obs"],
                         },
                     )
-                    if self.collect_transitions:
+                    if self.collect_transitions and should_collect_current:
                         next_obs = (
-                            env_output.final_obs
-                            if env_output.dones.any() and self.cfg.env.train.auto_reset
-                            else env_output.obs
+                            next_env_output.final_obs
+                            if next_env_output.dones.any()
+                            and self.cfg.env.train.auto_reset
+                            else next_env_output.obs
                         )
                         self.rollout_results[slot_id].append_transitions(
                             curr_obs, next_obs
                         )
 
-                    env_outputs[slot_id] = env_output
+                    env_outputs[slot_id] = next_env_output
                     self.record_env_metrics(env_metrics, env_info, epoch)
 
             for slot_id in range(self.slot_count):
@@ -1049,11 +1079,26 @@ class EnvWorker(Worker):
                 chunk_step_result = ChunkStepResult(
                     prev_values=rollout_result.prev_values
                     if self.collect_prev_infos
+                    and self._should_collect_env_output(env_output)
                     else None,
-                    dones=env_output.dones,
-                    truncations=env_output.truncations,
-                    terminations=env_output.terminations,
-                    rewards=rewards,
+                    dones=(
+                        env_output.dones
+                        if self._should_collect_env_output(env_output)
+                        else None
+                    ),
+                    truncations=(
+                        env_output.truncations
+                        if self._should_collect_env_output(env_output)
+                        else None
+                    ),
+                    terminations=(
+                        env_output.terminations
+                        if self._should_collect_env_output(env_output)
+                        else None
+                    ),
+                    rewards=(
+                        rewards if self._should_collect_env_output(env_output) else None
+                    ),
                 )
                 self.rollout_results[slot_id].append_step_result(chunk_step_result)
 

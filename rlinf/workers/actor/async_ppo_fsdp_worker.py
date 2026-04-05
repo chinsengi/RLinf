@@ -62,6 +62,14 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
 
     @torch.inference_mode()
     def compute_advantages_and_returns(self) -> dict[str, torch.Tensor]:
+        if not self._has_trainable_rollout_batch():
+            self.log_info(
+                "[ActorTrain] Skipping advantage computation because the rollout "
+                "batch only contains cooldown / non-training transitions."
+            )
+            return {}
+        self._validate_trainable_rollout_batch()
+
         proximal_values = self.rollout_batch.get("proximal_values", None)
         prev_values = self.rollout_batch.get("prev_values", None)
 
@@ -92,6 +100,10 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
 
     @torch.inference_mode()
     def compute_proximal_logprobs(self) -> None:
+        if not self._has_trainable_rollout_batch():
+            return
+        self._validate_trainable_rollout_batch()
+
         assert not self.is_weight_offloaded, (
             "Weight offloading is not supported when recomputing proximal logprobs."
         )
@@ -150,6 +162,14 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
         self.rollout_batch["proximal_logprobs"] = proximal_logprobs
 
     def run_training(self) -> dict[str, Any]:
+        if not self._has_trainable_rollout_batch():
+            self.log_info(
+                "[ActorTrain] Skipping training because the rollout batch is empty "
+                "after filtering non-training transitions."
+            )
+            return {}
+        self._validate_trainable_rollout_batch()
+
         if self.is_weight_offloaded:
             self.load_param_and_grad(self.device)
         if self.is_optimizer_offloaded:

@@ -22,6 +22,7 @@ Covers:
 - Adaptive subtask triggering (plateau, score threshold, cooldown, fallback)
 """
 
+import asyncio
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -44,6 +45,7 @@ except Exception:
     sys.modules.setdefault("ray", ray_stub)
     sys.modules.setdefault("ray.actor", ray_actor_stub)
 
+from rlinf.data.embodied_io_struct import EnvOutput, RolloutResult
 from rlinf.workers.env.env_worker import EnvWorker, _apply_action_chunk_smoothing
 from rlinf.workers.env.vlm_planner_client import VLMPlannerClient
 
@@ -483,6 +485,94 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
     assert worker._episode_frames == []
     assert list(worker._recent_top_deltas) == []
     assert worker._steps_since_subtask_update == 0
+
+
+def test_run_interact_once_skips_cooldown_chunk_from_training_data():
+    worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
+    worker.cfg = _cfg_node(
+        {
+            "env": {
+                "train": {
+                    "rollout_horizon_steps": 1,
+                    "auto_reset": True,
+                    "ignore_terminations": False,
+                }
+            },
+            "actor": {"model": {"num_action_chunks": 1}},
+            "algorithm": {"bootstrap_type": "standard", "gamma": 0.99},
+        }
+    )
+    worker.slot_count = 1
+    worker.rollout_epoch = 1
+    worker.n_train_chunk_steps = 1
+    worker.collect_transitions = True
+    worker.collect_prev_infos = True
+    worker.actor_split_num = 1
+    worker.env_list = [SimpleNamespace()]
+    worker.log_info = lambda *_args, **_kwargs: None
+    worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
+    worker._planner_client._log_info = lambda *_args, **_kwargs: None
+    worker._planner_client._worker_timer = lambda *_args, **_kwargs: nullcontext()
+    maybe_update_calls = []
+    sent_batches = []
+
+    worker.bootstrap_step = lambda: [
+        EnvOutput(
+            obs={"states": torch.zeros((1, 4)), "main_images": torch.zeros((1, 2, 2, 3))},
+            rewards=None,
+            dones=torch.zeros((1, 1), dtype=torch.bool),
+            terminations=torch.zeros((1, 1), dtype=torch.bool),
+            truncations=torch.zeros((1, 1), dtype=torch.bool),
+        )
+    ]
+    worker._maybe_plan_initial_subtask = lambda slot_id, env_output: env_output
+    worker.send_env_batch = lambda _channel, env_batch: sent_batches.append(env_batch)
+
+    async def _recv_rollout_results(_input_channel, mode="train"):
+        assert mode == "train"
+        return RolloutResult(
+            actions=torch.tensor([[0.2]], dtype=torch.float32),
+            prev_logprobs=torch.tensor([[0.1]], dtype=torch.float32),
+            prev_values=torch.tensor([[0.3]], dtype=torch.float32),
+            bootstrap_values=torch.zeros((1, 1), dtype=torch.float32),
+            forward_inputs={"action": torch.tensor([[0.2]], dtype=torch.float32)},
+        )
+
+    worker.recv_rollout_results = _recv_rollout_results
+    worker._resolve_pending_vlm_results = lambda slot_id: asyncio.sleep(0)
+    worker.env_interact_step = lambda _actions, _slot_id: (
+        EnvOutput(
+            obs={"states": torch.ones((1, 4)), "main_images": torch.ones((1, 2, 2, 3))},
+            final_obs={"states": torch.ones((1, 4)), "main_images": torch.ones((1, 2, 2, 3))},
+            rewards=torch.zeros((1, 1), dtype=torch.float32),
+            dones=torch.zeros((1, 1), dtype=torch.bool),
+            terminations=torch.zeros((1, 1), dtype=torch.bool),
+            truncations=torch.ones((1, 1), dtype=torch.bool),
+            collect_for_training=False,
+        ),
+        {},
+    )
+    worker._maybe_update_subtask = lambda slot_id: maybe_update_calls.append(slot_id)
+    worker.record_env_metrics = lambda *_args, **_kwargs: None
+    worker.store_last_obs_and_intervened_info = lambda env_outputs: None
+    worker.finish_rollout = lambda mode="train": None
+
+    asyncio.run(
+        worker._run_interact_once(
+            input_channel=None,
+            output_channel=None,
+            actor_channel=None,
+            cooperative_yield=False,
+        )
+    )
+
+    rollout_result = worker.rollout_results[0]
+    assert rollout_result.actions == []
+    assert rollout_result.curr_obs == []
+    assert rollout_result.next_obs == []
+    assert maybe_update_calls == []
+    assert len(sent_batches) == 2
 
 
 def test_bootstrap_step_reuses_last_obs_for_remote_server_managed_env():

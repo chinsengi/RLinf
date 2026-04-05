@@ -14,7 +14,11 @@
 
 import torch
 
-from rlinf.data.embodied_io_struct import EmbodiedRolloutResult
+from rlinf.data.embodied_io_struct import (
+    EmbodiedRolloutResult,
+    Trajectory,
+    convert_trajectories_to_batch,
+)
 
 
 def test_append_transitions_keeps_live_obs_task_descriptions() -> None:
@@ -42,3 +46,33 @@ def test_rollout_horizon_steps_propagates_to_trajectory() -> None:
     trajectory = rollout_result.to_trajectory()
 
     assert trajectory.rollout_horizon_steps == 12
+
+
+def test_convert_trajectories_to_batch_ignores_leading_empty_trajectory() -> None:
+    empty_trajectory = Trajectory(rollout_horizon_steps=8)
+    populated_trajectory = Trajectory(
+        rollout_horizon_steps=8,
+        prev_logprobs=torch.ones((1, 1, 1), dtype=torch.float32),
+        rewards=torch.ones((1, 1, 1), dtype=torch.float32),
+        dones=torch.zeros((2, 1, 1), dtype=torch.bool),
+        forward_inputs={"action": torch.ones((1, 1, 1), dtype=torch.float32)},
+        curr_obs={"states": torch.zeros((1, 1, 4), dtype=torch.float32)},
+        next_obs={"states": torch.ones((1, 1, 4), dtype=torch.float32)},
+    )
+
+    batch = convert_trajectories_to_batch([empty_trajectory, populated_trajectory])
+
+    assert batch["prev_logprobs"].shape == (1, 1, 1)
+    assert batch["rewards"].shape == (1, 1, 1)
+    assert batch["dones"].shape == (2, 1, 1)
+    assert batch["forward_inputs"]["action"].shape == (1, 1, 1)
+    assert batch["curr_obs"]["states"].shape == (1, 1, 4)
+    assert batch["next_obs"]["states"].shape == (1, 1, 4)
+
+
+def test_convert_trajectories_to_batch_handles_all_empty_trajectories() -> None:
+    batch = convert_trajectories_to_batch(
+        [Trajectory(rollout_horizon_steps=8), Trajectory(rollout_horizon_steps=8)]
+    )
+
+    assert batch == {}

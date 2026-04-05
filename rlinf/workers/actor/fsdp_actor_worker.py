@@ -1144,6 +1144,60 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         self.rollout_batch = self._process_received_rollout_batch(self.rollout_batch)
 
+    def _has_trainable_rollout_batch(self) -> bool:
+        """Return whether the current embodied rollout batch has trainable PPO data."""
+        rollout_batch = getattr(self, "rollout_batch", None)
+        if not isinstance(rollout_batch, dict) or not rollout_batch:
+            return False
+
+        for field_name in ("prev_logprobs", "rewards", "dones"):
+            value = rollout_batch.get(field_name)
+            if not isinstance(value, torch.Tensor) or value.numel() == 0:
+                return False
+
+        forward_inputs = rollout_batch.get("forward_inputs")
+        if not isinstance(forward_inputs, dict) or not forward_inputs:
+            return False
+
+        return True
+
+    def _validate_trainable_rollout_batch(self) -> None:
+        """Validate tensor alignment for a non-empty embodied rollout batch."""
+        prev_logprobs = self.rollout_batch["prev_logprobs"]
+        rewards = self.rollout_batch["rewards"]
+        dones = self.rollout_batch["dones"]
+
+        if rewards.shape[:2] != prev_logprobs.shape[:2]:
+            raise ValueError(
+                "Embodied rollout batch has misaligned rewards and prev_logprobs: "
+                f"{rewards.shape[:2]=} vs {prev_logprobs.shape[:2]=}."
+            )
+
+        if dones.shape[1:] != prev_logprobs.shape[1:]:
+            raise ValueError(
+                "Embodied rollout batch has misaligned dones and prev_logprobs "
+                f"batch/action dimensions: {dones.shape[1:]=} vs "
+                f"{prev_logprobs.shape[1:]=}."
+            )
+        if dones.shape[0] not in (prev_logprobs.shape[0], prev_logprobs.shape[0] + 1):
+            raise ValueError(
+                "Embodied rollout batch has an unexpected dones time dimension: "
+                f"{dones.shape[0]=} for {prev_logprobs.shape[0]=}."
+            )
+
+        for key, value in self.rollout_batch["forward_inputs"].items():
+            if not isinstance(value, torch.Tensor):
+                raise ValueError(
+                    "Embodied rollout batch forward_inputs must contain tensors, "
+                    f"got {type(value)} for key {key!r}."
+                )
+            if value.shape[:2] != prev_logprobs.shape[:2]:
+                raise ValueError(
+                    "Embodied rollout batch has misaligned forward_inputs and "
+                    f"prev_logprobs for key {key!r}: {value.shape[:2]=} vs "
+                    f"{prev_logprobs.shape[:2]=}."
+                )
+
     def _process_received_rollout_batch(
         self, rollout_batch: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
@@ -1151,12 +1205,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         original shape: [rollout_epoch x n_chunk_steps, bsz, num_action_chunks, ...]
         target shape: [n_chunk_steps, rollout_epoch x bsz, num_action_chunks, ...]
         """
+        if not rollout_batch:
+            return rollout_batch
+
         rollout_epoch = self.cfg.algorithm.rollout_epoch
         rollout_batch = process_nested_dict_for_adv(rollout_batch, rollout_epoch)
 
         if (
             not self.cfg.env.train.auto_reset
             and not self.cfg.env.train.ignore_terminations
+            and "dones" in rollout_batch
         ):
             dones = rollout_batch[
                 "dones"
@@ -1171,7 +1229,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             rollout_batch["loss_mask_sum"] = loss_mask_sum
 
         # filter data by rewards
-        if self.cfg.algorithm.get("filter_rewards", False):
+        if self.cfg.algorithm.get("filter_rewards", False) and "rewards" in rollout_batch:
             rewards = rollout_batch[
                 "rewards"
             ]  # [n_chunk_step, batch, num_action_chunks]
@@ -1225,6 +1283,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         """
         Compute the advantages and returns.
         """
+        if not self._has_trainable_rollout_batch():
+            self.log_info(
+                "[ActorTrain] Skipping advantage computation because the rollout "
+                "batch only contains cooldown / non-training transitions."
+            )
+            return {}
+        self._validate_trainable_rollout_batch()
+
         kwargs = {
             "task_type": self.cfg.runner.task_type,
             "adv_type": self.cfg.algorithm.adv_type,
@@ -1395,6 +1461,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         """
         Run the training process using the received rollout batch.
         """
+        if not self._has_trainable_rollout_batch():
+            self.log_info(
+                "[ActorTrain] Skipping training because the rollout batch is empty "
+                "after filtering non-training transitions."
+            )
+            return {}
+        self._validate_trainable_rollout_batch()
+
         if self.is_weight_offloaded:
             self.load_param_and_grad(self.device)
         if self.is_optimizer_offloaded:

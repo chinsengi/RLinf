@@ -39,7 +39,7 @@ from omegaconf import DictConfig
 
 from rlinf.envs.remote.proto import robot_env_pb2, robot_env_pb2_grpc
 from rlinf.envs.utils import to_tensor
-from rlinf.scheduler import WorkerInfo
+from rlinf.scheduler.manager.worker_manager import WorkerInfo
 from rlinf.utils.logging import get_logger
 
 _DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024
@@ -141,7 +141,7 @@ class RemoteEnv(gym.Env):
         num_envs: int,
         seed_offset: int,
         total_num_processes: int,
-        worker_info: Optional[WorkerInfo],
+        worker_info: Optional["WorkerInfo"],
     ):
         assert num_envs == 1, (
             f"RemoteEnv supports exactly 1 environment per worker, got {num_envs}."
@@ -391,16 +391,23 @@ class RemoteEnv(gym.Env):
                 obs["task_descriptions"] = [self._task_description]
                 obs_list.append(obs)
 
-            self._elapsed_steps += 1
-            self._num_steps += 1
-
-            step_reward = np.array([sr.reward], dtype=np.float32)
+            collection_paused = bool(np.isnan(sr.reward))
+            step_reward = np.array(
+                [0.0 if collection_paused else sr.reward], dtype=np.float32
+            )
             step_term = np.array([sr.terminated], dtype=bool)
             step_trunc = np.array([sr.truncated], dtype=bool)
 
-            infos = self._record_metrics(
-                step_reward, step_term, np.zeros_like(step_term), {}
-            )
+            if collection_paused:
+                infos = {"collection_paused": True}
+            else:
+                self._elapsed_steps += 1
+                self._num_steps += 1
+                infos = self._record_metrics(
+                    step_reward, step_term, np.zeros_like(step_term), {}
+                )
+            if collection_paused:
+                infos["collection_paused"] = True
             infos_list.append(infos)
             rewards.append(step_reward)
             terminations.append(step_term)
