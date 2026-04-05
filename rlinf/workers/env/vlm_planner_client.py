@@ -15,7 +15,7 @@
 from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import ray
@@ -23,6 +23,9 @@ import torch
 from omegaconf import DictConfig
 
 from rlinf.data.embodied_io_struct import EnvOutput
+
+if TYPE_CHECKING:
+    from rlinf.workers.vlm_planner.vlm_planner_worker import VLMPlannerWorker
 
 
 @dataclass
