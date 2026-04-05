@@ -477,11 +477,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
         )
-        # In SBS mode, the chunk context is shown inline in the SBS prompt
-        # below. Only print the separate header line for non-SBS verbose mode.
-        if not self._step_by_step:
-            self._print_chunk_task_context()
-        if self._verbose and not self._step_by_step:
+        self._print_chunk_task_context()
+        if self._verbose:
             logger.info(
                 f"[ChunkStep] Received chunk: num_envs={request.num_envs}, "
                 f"chunk_size={request.chunk_size}, action_dim={request.action_dim}"
