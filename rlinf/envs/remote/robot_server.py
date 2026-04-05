@@ -572,7 +572,24 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 f"truncated={[bool(chunk_truncations[0, i]) for i in range(chunk_size)]}"
             )
 
-        return robot_env_pb2.ChunkStepResponse(step_results=step_results)
+        # JPEG-compress intermediate reward frames captured by YAMEnv.
+        reward_frames_bytes = []
+        raw_reward_frames = getattr(self._env, "_last_chunk_reward_frames", [])
+        if raw_reward_frames:
+            import cv2
+
+            for frame in raw_reward_frames:
+                _, buf = cv2.imencode(
+                    ".jpg",
+                    cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+                    [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality],
+                )
+                reward_frames_bytes.append(bytes(buf))
+
+        return robot_env_pb2.ChunkStepResponse(
+            step_results=step_results,
+            reward_frames=reward_frames_bytes,
+        )
 
     def SetTaskDescription(self, request, context):
         self._touch()
@@ -725,6 +742,7 @@ def serve(
     dummy: bool = False,
     verbose: bool = False,
     step_by_step: bool = False,
+    reward_frame_interval: int = 5,
 ):
     """Start the gRPC server with a YAMEnv instance.
 
@@ -756,6 +774,13 @@ def serve(
         total_num_processes=1,
         worker_info=None,
     )
+
+    # Enable intermediate frame capture for TOPReward scoring.
+    env._reward_frame_interval = int(reward_frame_interval)
+    if reward_frame_interval > 0:
+        logger.info(
+            f"[RobotServer] Reward frame capture enabled: every {reward_frame_interval} steps"
+        )
 
     if verbose:
         _print_robot_state(env)
@@ -939,6 +964,13 @@ def main():
         action="store_true",
         help="Step-by-step mode: wait for Enter before executing each chunk",
     )
+    parser.add_argument(
+        "--reward-frame-interval",
+        type=int,
+        default=5,
+        help="Capture a camera frame every N low-level steps during chunk_step "
+        "for TOPReward scoring. 0 to disable. Default: 5 (6 frames per 30-step chunk).",
+    )
     args = parser.parse_args()
     serve(
         args.config_path,
@@ -947,6 +979,7 @@ def main():
         dummy=args.dummy,
         verbose=args.verbose,
         step_by_step=args.sbs,
+        reward_frame_interval=args.reward_frame_interval,
     )
 
 

@@ -500,6 +500,14 @@ class VLMPlannerClient:
             return env_output
 
         with self._worker_timer("top_reward"):
+            # Collect intermediate reward frames captured by the server
+            # during chunk execution (every N low-level steps).
+            env = env_list[slot_id]
+            reward_frames = getattr(env, "_last_reward_frames", [])
+            for rf in reward_frames:
+                self._episode_frames.append(np.asarray(rf))
+
+            # Append the final-step image from the env output.
             main_images = env_output.obs.get("main_images", None)
             if main_images is not None:
                 if isinstance(main_images, torch.Tensor):
@@ -582,6 +590,13 @@ class VLMPlannerClient:
             return env_output
 
         with self._worker_timer("top_reward"):
+            # Collect intermediate reward frames from the server.
+            env = env_list[slot_id]
+            reward_frames = getattr(env, "_last_reward_frames", [])
+            for rf in reward_frames:
+                self._episode_frames.append(np.asarray(rf))
+
+            # Append the final-step image from the env output.
             main_images = env_output.obs.get("main_images", None)
             if main_images is not None:
                 if isinstance(main_images, torch.Tensor):
