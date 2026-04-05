@@ -45,6 +45,32 @@ Summary of literature search:
 - `MOPO` ("MOPO: Model-based Offline Policy Optimization", Yu et al., 2020, arXiv: https://arxiv.org/abs/2005.13239) and `COMBO` ("Conservative Offline Model-Based Policy Optimization", Yu et al., 2021, arXiv: https://arxiv.org/abs/2102.08363)
   Model-based offline RL can help when data are very scarce, but this is probably the wrong first step here. Learning a reliable world model for image-conditioned robot behavior with TOPReward/subtask-dependent rewards is much higher risk than model-free replay updates.
 
+Implementation plan:
+- **Phase 1 — BPPO baseline (smallest delta from current PPO path):**
+  1. Add a cooldown replay buffer that retains recent non-cooldown rollout batches (with `forward_inputs`, `prev_logprobs`, `prev_values`, `versions`) instead of discarding them after the PPO update. Reuse or extend the existing `TrajectoryReplayBuffer` (`rlinf/data/replay_buffer.py`).
+  2. In the actor worker, when `_has_trainable_rollout_batch()` returns `False` (cooldown), sample from the replay buffer and run a BPPO-style update: recompute current-policy logprobs via `get_log_prob_value()` from saved `chains`/`denoise_inds`, compute importance ratio against saved `prev_logprobs`, apply clipped surrogate loss with a tighter clip than online PPO.
+  3. Add a budget mechanism: fixed number of minibatches per cooldown period (configurable in YAML), plus a staleness cutoff that drops replay entries older than N policy versions (using the `versions` field).
+  4. Add reward-version tagging: stamp each replay entry with the TOPReward/subtask-plan version so that stale-reward trajectories can be filtered or reweighted.
+  5. Validate: compare cooldown-BPPO vs. idle-cooldown on a YAM subtask config. Primary metric: sample efficiency (episodes to convergence).
+
+- **Phase 2 — Diffusion-QL / EDP (diffusion-native offline objective):**
+  1. Implement a Q-network that conditions on denoising timestep `t` in addition to (state, image, action). Start from the existing `CompactMultiQHead` in DSRL mode (`openpi_action_model.py:1241`), adding a timestep embedding input.
+  2. Implement post-hoc trajectory reweighting: during cooldown replay updates, compute Q-values at saved chain points and apply `loss = Σ_t [log π(chain_t | s) − α · Q(s, chain_t)]` as the actor objective.
+  3. Train the Q-network on replay data using standard Bellman backup with the clipped double-Q trick (reuse DSRL's twin-Q infrastructure).
+  4. Compare against Phase 1 BPPO baseline on the same YAM config.
+
+- **Phase 3 (optional) — IQL/CRR as critic components:**
+  - Only if Phase 2 shows Q-overestimation issues on narrow cooldown data.
+  - Swap the Bellman-backup critic with IQL's expectile regression or CRR's advantage-weighted objective, keeping the diffusion actor and post-hoc reweighting loss from Phase 2.
+
+Key files to modify:
+- `rlinf/workers/actor/async_ppo_fsdp_worker.py` — cooldown replay loop, BPPO loss
+- `rlinf/workers/actor/fsdp_actor_worker.py` — replay buffer integration, budget mechanism
+- `rlinf/models/embodiment/openpi/openpi_action_model.py` — timestep-conditioned Q-head (Phase 2)
+- `rlinf/data/replay_buffer.py` — reward-version tagging, staleness filtering
+- `rlinf/data/embodied_io_struct.py` — reward-version field if not already present
+- `examples/embodiment/config/` — new YAML config for cooldown-RL experiments
+
 Recommendation:
 - For the actual shipped `π₀.5` / OpenPI VLA, the best-fit direct path is no longer generic `RLPD`. The first methods worth prioritizing are the ones that preserve a PPO/diffusion-style actor:
   1. `BPPO` if we want the smallest conceptual change from the current PPO value-head training
@@ -63,7 +89,15 @@ Repo-specific caveats:
 - A SAC-style branch would also duplicate optimization state and model structure: PPO currently has a value head, while SAC/RLPD would introduce twin Q heads, target critics, and alpha tuning. That increases code surface, checkpoint complexity, and the risk of maintaining two incompatible training paths for the same deployed policy.
 - If the deployment policy remains PPO/OpenPI, we need to verify whether we can add an offline critic cleanly, whether the current saved `forward_inputs` are sufficient for offline policy improvement, and whether behavior-policy snapshots are needed for BPPO-style updates.
 - `TODO(agent)`: verify whether the current OpenPI/YAM actor exposes enough saved behavior-policy information for BPPO-style updates, or whether we would need an explicit behavior policy model / BC warm start.
+  - **Verdict: sufficient.** The actor already saves `prev_logprobs` ([B, action_dim]), `prev_values` ([B, 1]), model `versions` ([B, 1]), and the full denoising trajectory in `forward_inputs` (`chains` [B, num_steps+1, action_horizon, action_dim], `denoise_inds` [B, num_steps]) along with all observation tensors. The `get_log_prob_value()` method (`openpi_action_model.py:987`) can recompute logprobs from saved chains, and `compute_proximal_logprobs()` (`async_ppo_fsdp_worker.py:101`) already demonstrates multi-version ratio computation. No explicit behavior policy model or BC warm start is needed.
+  - **What IS missing for BPPO:** (1) off-policy importance-ratio clipping in the loss function, (2) a code path that retains cooldown-period rollout data for replay instead of discarding it in `_has_trainable_rollout_batch()`, (3) a budget mechanism (max minibatches or wall-clock cap) to prevent overfitting on stale cooldown replay data.
+
 - `TODO(agent)`: verify whether a diffusion-policy offline objective can reuse the existing OpenPI `forward_inputs` / denoising state instead of introducing a second policy implementation just for cooldown training.
+  - **Verdict: yes, no second policy needed.** The saved `forward_inputs` already contain the full denoising trajectory (`chains`), step indices (`denoise_inds`), and all observation context. Per-step log-probs are computed via Gaussian transition densities (`get_logprob_norm`, `openpi_action_model.py:966`). The DSRL mode already has a Q-head (`sac_q_forward`, `openpi_action_model.py:1241`) with `CompactMultiQHead` that takes (state, image, action) — this can be extended for Diffusion-QL/EDP.
+  - **Two viable implementation paths:**
+    1. **Post-hoc trajectory reweighting** (simpler, recommended first): access `forward_inputs["chains"]` during training, compute Q-values at chain points, apply loss `log π(chain_t) − α·Q(s, chain_t)`. No changes to rollout or denoising code.
+    2. **Q-guided denoising** (more expressive): modify `sample_mean_var_val()` to accept a Q-network and shift the denoising mean/variance toward high-Q regions during sampling.
+  - **Caveats:** (1) the DSRL Q-head is trained on noise actions, not trajectory points — it needs retraining or a parallel Q-net on trajectory data; (2) the Q-network currently lacks timestep conditioning (needed for proper Diffusion-QL); (3) start with post-hoc reweighting to avoid destabilizing the denoising loop.
 
 Background survey:
 - `Offline Reinforcement Learning: Tutorial, Review, and Perspectives on Open Problems` (Levine et al., 2020, arXiv: https://arxiv.org/abs/2005.01643)
@@ -80,3 +114,15 @@ Recently resolved:
 Context:
 - Temporary rollout-batch validation was added in the actor workers while debugging the cooldown / collection-pause path.
 - Once the cooldown path is validated end to end, that defensive validation should be removed so the actor code returns to the minimal guard needed for empty cooldown batches.
+
+Plan:
+- **Keep** `_has_trainable_rollout_batch()` (`fsdp_actor_worker.py:1147-1162`) — this is the minimal guard that skips processing for empty cooldown batches and is still needed.
+- **Remove** `_validate_trainable_rollout_batch()` (`fsdp_actor_worker.py:1164-1199`) — this is the temporary defensive validation (shape checks on rewards, prev_logprobs, dones, forward_inputs) added for debugging.
+- **Remove all call sites** of `_validate_trainable_rollout_batch()`:
+  - `async_ppo_fsdp_worker.py:67` (in `compute_advantages_and_returns`)
+  - `async_ppo_fsdp_worker.py:105` (in `compute_proximal_logprobs`)
+  - `async_ppo_fsdp_worker.py:169` (in `run_training`)
+  - `fsdp_actor_worker.py:1290` (in `EmbodiedFSDPActor.compute_advantages_and_returns`)
+  - `fsdp_actor_worker.py:1468` (in `EmbodiedFSDPActor.run_training`)
+- Verify the cooldown path end-to-end before removing (run e2e tests with a config that exercises cooldown).
+

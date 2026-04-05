@@ -123,7 +123,14 @@ class VLMPlannerClient:
 
         self._log_info = log_info or _noop_log
         self._worker_timer = worker_timer or (lambda *_args, **_kwargs: nullcontext())
+        self._vlm_planner: "VLMPlannerWorker | None" = None
 
+        self._init_subtask_params(train_cfg, slot_count)
+        self._init_top_reward_params(train_cfg, slot_count)
+        self._validate_params(slot_count)
+
+    def _init_subtask_params(self, train_cfg, slot_count: int) -> None:
+        """Initialize subtask planning parameters from config."""
         self._subtask_interval: int = int(train_cfg.get("subtask_interval", 0))
         self._subtask_adaptive: bool = bool(train_cfg.get("subtask_adaptive", True))
         self._subtask_min_interval: int = int(train_cfg.get("subtask_min_interval", 2))
@@ -141,8 +148,17 @@ class VLMPlannerClient:
         self._recent_top_deltas: deque[float] = deque(
             maxlen=self._subtask_plateau_window
         )
-        self._vlm_planner = None
+        self._pending_subtasks: dict[int, _PendingSubtask] = {}
+        self._subtask_request_counter: list[int] = [0 for _ in range(slot_count)]
+        self._last_applied_subtask_request_id: list[int] = [
+            0 for _ in range(slot_count)
+        ]
+        self._initial_task_descriptions: list[str] = [
+            str(train_cfg.get("task_description", "")) for _ in range(slot_count)
+        ]
 
+    def _init_top_reward_params(self, train_cfg, slot_count: int) -> None:
+        """Initialize TOPReward parameters from config."""
         self._top_reward_enabled: bool = bool(
             train_cfg.get("top_reward_enabled", False)
         )
@@ -153,18 +169,12 @@ class VLMPlannerClient:
         self._prev_top_score: float = 0.0
         self._top_reward_has_prev_score: bool = False
         self._pending_top_rewards: dict[int, _PendingTopReward] = {}
-        self._pending_subtasks: dict[int, _PendingSubtask] = {}
-        self._subtask_request_counter: list[int] = [0 for _ in range(slot_count)]
-        self._last_applied_subtask_request_id: list[int] = [
-            0 for _ in range(slot_count)
-        ]
         self._episode_done_waiting_for_top_reward_reset: list[bool] = [
             False for _ in range(slot_count)
         ]
-        self._initial_task_descriptions: list[str] = [
-            str(train_cfg.get("task_description", "")) for _ in range(slot_count)
-        ]
 
+    def _validate_params(self, slot_count: int) -> None:
+        """Validate parameter combinations."""
         if self._top_reward_enabled and slot_count != 1:
             raise ValueError(
                 "TOPReward currently supports exactly one pipeline slot. "
@@ -268,6 +278,19 @@ class VLMPlannerClient:
         )
         return True
 
+    def _get_baseline_obs(
+        self,
+        slot_id: int,
+        env_list: list[Any],
+        obs: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Resolve baseline observation for TOPReward seeding."""
+        baseline_obs = obs
+        if baseline_obs is None:
+            env = self._get_env(env_list, slot_id)
+            baseline_obs = getattr(env, "last_obs", None)
+        return baseline_obs
+
     def _seed_top_reward_baseline_sync(
         self,
         slot_id: int,
@@ -278,10 +301,7 @@ class VLMPlannerClient:
         if not self._top_reward_enabled or self._vlm_planner is None:
             return False
 
-        baseline_obs = obs
-        if baseline_obs is None:
-            env = self._get_env(env_list, slot_id)
-            baseline_obs = getattr(env, "last_obs", None)
+        baseline_obs = self._get_baseline_obs(slot_id, env_list, obs)
         if baseline_obs is None:
             return False
 
@@ -307,10 +327,7 @@ class VLMPlannerClient:
         if not self._top_reward_enabled or self._vlm_planner is None:
             return False
 
-        baseline_obs = obs
-        if baseline_obs is None:
-            env = self._get_env(env_list, slot_id)
-            baseline_obs = getattr(env, "last_obs", None)
+        baseline_obs = self._get_baseline_obs(slot_id, env_list, obs)
         if baseline_obs is None:
             return False
 

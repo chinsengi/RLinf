@@ -90,40 +90,6 @@ def _apply_action_chunk_smoothing(
 
 
 class EnvWorker(Worker):
-    _PLANNER_CLIENT_STATE_FIELDS = {
-        "_episode_frames",
-        "_episode_done_waiting_for_top_reward_reset",
-        "_initial_task_descriptions",
-        "_last_applied_subtask_request_id",
-        "_pending_subtasks",
-        "_pending_top_rewards",
-        "_prev_top_score",
-        "_recent_top_deltas",
-        "_steps_since_subtask_update",
-        "_subtask_adaptive",
-        "_subtask_interval",
-        "_subtask_min_interval",
-        "_subtask_plateau_threshold",
-        "_subtask_plateau_window",
-        "_subtask_request_counter",
-        "_subtask_score_threshold",
-        "_top_reward_enabled",
-        "_top_reward_has_prev_score",
-        "_top_reward_max_frames",
-        "_vlm_planner",
-    }
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name in self._PLANNER_CLIENT_STATE_FIELDS:
-            setattr(self._ensure_planner_client(), name, value)
-            return
-        super().__setattr__(name, value)
-
-    def __getattr__(self, name: str) -> Any:
-        if name in self._PLANNER_CLIENT_STATE_FIELDS:
-            return getattr(self._ensure_planner_client(), name)
-        raise AttributeError(name)
-
     def __init__(self, cfg: DictConfig):
         Worker.__init__(self)
 
@@ -250,15 +216,6 @@ class EnvWorker(Worker):
             except Exception:
                 pass
 
-    def _ensure_planner_client(self) -> VLMPlannerClient:
-        planner_client = self.__dict__.get("_planner_client")
-        if planner_client is None:
-            planner_client = VLMPlannerClient(
-                log_info=getattr(self, "log_info", None),
-                worker_timer=getattr(self, "worker_timer", None),
-            )
-            self.__dict__["_planner_client"] = planner_client
-        return planner_client
 
     @staticmethod
     def _should_collect_env_output(env_output: EnvOutput | None) -> bool:
@@ -267,10 +224,6 @@ class EnvWorker(Worker):
     def set_planner_handle(self, planner_handle) -> None:
         """Set the VLM planner handle used by this env worker."""
         self._planner_client.set_planner_handle(planner_handle)
-
-    def set_vlm_planner(self, planner_handle) -> None:
-        """Backward-compatible alias for ``set_planner_handle``."""
-        self.set_planner_handle(planner_handle)
 
     def _get_current_task_description(self, slot_id: int) -> str:
         return self._planner_client.get_current_task_description(slot_id, self.env_list)

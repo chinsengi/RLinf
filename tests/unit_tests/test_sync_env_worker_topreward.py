@@ -125,26 +125,26 @@ def _make_adaptive_worker(
     worker = EnvWorker.__new__(EnvWorker)
     _attach_planner_client(worker)
     worker.env_list = [env]
-    worker._initial_task_descriptions = ["fold the towel"]
-    worker._subtask_interval = subtask_interval
-    worker._subtask_adaptive = subtask_adaptive
-    worker._subtask_min_interval = subtask_min_interval
-    worker._subtask_plateau_window = plateau_window
-    worker._subtask_plateau_threshold = plateau_threshold
-    worker._subtask_score_threshold = score_threshold
-    worker._top_reward_enabled = True
-    worker._prev_top_score = prev_top_score
-    worker._top_reward_has_prev_score = True
-    worker._steps_since_subtask_update = steps_since_update
-    worker._recent_top_deltas = deque(
+    worker._planner_client._initial_task_descriptions = ["fold the towel"]
+    worker._planner_client._subtask_interval = subtask_interval
+    worker._planner_client._subtask_adaptive = subtask_adaptive
+    worker._planner_client._subtask_min_interval = subtask_min_interval
+    worker._planner_client._subtask_plateau_window = plateau_window
+    worker._planner_client._subtask_plateau_threshold = plateau_threshold
+    worker._planner_client._subtask_score_threshold = score_threshold
+    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._prev_top_score = prev_top_score
+    worker._planner_client._top_reward_has_prev_score = True
+    worker._planner_client._steps_since_subtask_update = steps_since_update
+    worker._planner_client._recent_top_deltas = deque(
         recent_deltas or [],
         maxlen=plateau_window,
     )
-    worker._episode_frames = []
-    worker._pending_subtasks = {}
-    worker._last_applied_subtask_request_id = [0]
-    worker._subtask_request_counter = [0]
-    worker._vlm_planner = _PlannerStub()
+    worker._planner_client._episode_frames = []
+    worker._planner_client._pending_subtasks = {}
+    worker._planner_client._last_applied_subtask_request_id = [0]
+    worker._planner_client._subtask_request_counter = [0]
+    worker._planner_client._vlm_planner = _PlannerStub()
     worker.log_info = lambda *_args, **_kwargs: None
     return worker
 
@@ -158,16 +158,16 @@ def _make_top_reward_worker(scores, *, subtask_interval=0):
             last_obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
         )
     ]
-    worker._initial_task_descriptions = ["fold the towel"]
-    worker._top_reward_enabled = True
-    worker._subtask_interval = subtask_interval
-    worker._top_reward_max_frames = 16
-    worker._episode_frames = []
-    worker._prev_top_score = 0.0
-    worker._top_reward_has_prev_score = False
-    worker._recent_top_deltas = deque(maxlen=3)
-    worker._pending_top_rewards = {}
-    worker._vlm_planner = _TopRewardPlannerStub(scores)
+    worker._planner_client._initial_task_descriptions = ["fold the towel"]
+    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._subtask_interval = subtask_interval
+    worker._planner_client._top_reward_max_frames = 16
+    worker._planner_client._episode_frames = []
+    worker._planner_client._prev_top_score = 0.0
+    worker._planner_client._top_reward_has_prev_score = False
+    worker._planner_client._recent_top_deltas = deque(maxlen=3)
+    worker._planner_client._pending_top_rewards = {}
+    worker._planner_client._vlm_planner = _TopRewardPlannerStub(scores)
     worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
     worker.log_info = lambda *_args, **_kwargs: None
     return worker
@@ -184,10 +184,10 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     worker = EnvWorker.__new__(EnvWorker)
     _attach_planner_client(worker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
-    worker._top_reward_enabled = True
-    worker._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
-    worker._prev_top_score = 1.5
-    worker._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
+    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
+    worker._planner_client._prev_top_score = 1.5
+    worker._planner_client._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
     worker.log_info = lambda *_args, **_kwargs: None
 
     # Should not raise TypeError (the old bug passed slot_id to a no-arg method).
@@ -195,10 +195,10 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     assert result is True
     assert inner_env.task_description == "grasp the left corner"
     # Reward state should be reset.
-    assert worker._episode_frames == []
-    assert worker._prev_top_score == 0.0
-    assert worker._top_reward_has_prev_score is False
-    assert list(worker._recent_top_deltas) == []
+    assert worker._planner_client._episode_frames == []
+    assert worker._planner_client._prev_top_score == 0.0
+    assert worker._planner_client._top_reward_has_prev_score is False
+    assert list(worker._planner_client._recent_top_deltas) == []
 
 
 def test_apply_subtask_update_resets_when_subtask_changes():
@@ -207,21 +207,21 @@ def test_apply_subtask_update_resets_when_subtask_changes():
     worker = EnvWorker.__new__(EnvWorker)
     _attach_planner_client(worker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
-    worker._top_reward_enabled = True
-    worker._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
-    worker._prev_top_score = 1.5
-    worker._top_reward_has_prev_score = True
-    worker._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
+    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
+    worker._planner_client._prev_top_score = 1.5
+    worker._planner_client._top_reward_has_prev_score = True
+    worker._planner_client._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
     worker.log_info = lambda *_args, **_kwargs: None
 
     result = worker._apply_subtask_update(0, "grasp the left corner")
     assert result is True
     assert inner_env.task_description == "grasp the left corner"
     # Reward state should be reset.
-    assert worker._episode_frames == []
-    assert worker._prev_top_score == 0.0
-    assert worker._top_reward_has_prev_score is False
-    assert list(worker._recent_top_deltas) == []
+    assert worker._planner_client._episode_frames == []
+    assert worker._planner_client._prev_top_score == 0.0
+    assert worker._planner_client._top_reward_has_prev_score is False
+    assert list(worker._planner_client._recent_top_deltas) == []
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +277,8 @@ def test_get_next_subtask_prompt_includes_main_task():
 def test_top_reward_uses_initial_task_when_subtask_planning_disabled():
     worker = EnvWorker.__new__(EnvWorker)
     _attach_planner_client(worker)
-    worker._subtask_interval = 0
-    worker._initial_task_descriptions = ["fold the towel"]
+    worker._planner_client._subtask_interval = 0
+    worker._planner_client._initial_task_descriptions = ["fold the towel"]
     worker.env_list = [
         SimpleNamespace(unwrapped=SimpleNamespace(task_description="grasp the corner"))
     ]
@@ -288,8 +288,8 @@ def test_top_reward_uses_initial_task_when_subtask_planning_disabled():
 def test_top_reward_uses_current_task_when_subtask_planning_enabled():
     worker = EnvWorker.__new__(EnvWorker)
     _attach_planner_client(worker)
-    worker._subtask_interval = 10
-    worker._initial_task_descriptions = ["fold the towel"]
+    worker._planner_client._subtask_interval = 10
+    worker._planner_client._initial_task_descriptions = ["fold the towel"]
     worker.env_list = [
         SimpleNamespace(unwrapped=SimpleNamespace(task_description="grasp the corner"))
     ]
@@ -315,9 +315,9 @@ def test_compute_top_reward_seeds_episode_with_zero_delta(monkeypatch):
 
     assert first_output.rewards[:, -1].item() == pytest.approx(0.0)
     assert second_output.rewards[:, -1].item() == pytest.approx(0.5)
-    assert worker._prev_top_score == pytest.approx(1.75)
-    assert worker._top_reward_has_prev_score is True
-    assert list(worker._recent_top_deltas) == [0.0, 0.5]
+    assert worker._planner_client._prev_top_score == pytest.approx(1.75)
+    assert worker._planner_client._top_reward_has_prev_score is True
+    assert list(worker._planner_client._recent_top_deltas) == [0.0, 0.5]
 
 
 def test_compute_top_reward_uses_baseline_after_subtask_reset(monkeypatch):
@@ -325,19 +325,19 @@ def test_compute_top_reward_uses_baseline_after_subtask_reset(monkeypatch):
 
     monkeypatch.setattr(ray, "get", lambda ref: ref)
     worker = _make_top_reward_worker([2.0, 2.5], subtask_interval=10)
-    worker._episode_frames = [np.zeros((8, 8, 3), dtype=np.uint8)]
-    worker._prev_top_score = 1.5
-    worker._top_reward_has_prev_score = True
-    worker._recent_top_deltas.append(0.25)
+    worker._planner_client._episode_frames = [np.zeros((8, 8, 3), dtype=np.uint8)]
+    worker._planner_client._prev_top_score = 1.5
+    worker._planner_client._top_reward_has_prev_score = True
+    worker._planner_client._recent_top_deltas.append(0.25)
 
     assert worker._apply_subtask_update(0, "grasp the left corner") is True
     assert (
         worker._planner_client._seed_top_reward_baseline_sync(0, worker.env_list)
         is True
     )
-    assert worker._prev_top_score == pytest.approx(2.0)
-    assert worker._top_reward_has_prev_score is True
-    assert list(worker._recent_top_deltas) == []
+    assert worker._planner_client._prev_top_score == pytest.approx(2.0)
+    assert worker._planner_client._top_reward_has_prev_score is True
+    assert list(worker._planner_client._recent_top_deltas) == []
 
     env_output = SimpleNamespace(
         obs={"main_images": torch.zeros((1, 8, 8, 3), dtype=torch.uint8)},
@@ -346,9 +346,9 @@ def test_compute_top_reward_uses_baseline_after_subtask_reset(monkeypatch):
     updated_output = worker._compute_top_reward(env_output, 0)
 
     assert updated_output.rewards[:, -1].item() == pytest.approx(0.5)
-    assert worker._prev_top_score == pytest.approx(2.5)
-    assert worker._top_reward_has_prev_score is True
-    assert list(worker._recent_top_deltas) == [0.5]
+    assert worker._planner_client._prev_top_score == pytest.approx(2.5)
+    assert worker._planner_client._top_reward_has_prev_score is True
+    assert list(worker._planner_client._recent_top_deltas) == [0.5]
 
 
 def test_submit_top_reward_is_nonblocking_until_resolve(monkeypatch):
@@ -365,13 +365,13 @@ def test_submit_top_reward_is_nonblocking_until_resolve(monkeypatch):
     worker._submit_top_reward(env_output, 0)
 
     assert env_output.rewards[0, 0].item() == 0.0
-    assert 0 in worker._pending_top_rewards
+    assert 0 in worker._planner_client._pending_top_rewards
 
     worker._resolve_pending_top_reward(0)
 
     assert env_output.rewards[0, 0].item() == 0.0
-    assert worker._prev_top_score == 1.25
-    assert worker._top_reward_has_prev_score is True
+    assert worker._planner_client._prev_top_score == 1.25
+    assert worker._planner_client._top_reward_has_prev_score is True
 
 
 def test_resolve_top_reward_updates_delta_after_previous_score(monkeypatch):
@@ -379,8 +379,8 @@ def test_resolve_top_reward_updates_delta_after_previous_score(monkeypatch):
 
     monkeypatch.setattr(ray, "get", lambda ref: ref)
     worker = _make_top_reward_worker([2.25])
-    worker._prev_top_score = 1.5
-    worker._top_reward_has_prev_score = True
+    worker._planner_client._prev_top_score = 1.5
+    worker._planner_client._top_reward_has_prev_score = True
     env_output = SimpleNamespace(
         obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
         rewards=torch.zeros((1, 1), dtype=torch.float32),
@@ -407,15 +407,15 @@ def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
             "actor": {"model": {"num_action_chunks": 1}},
         }
     )
-    worker._top_reward_enabled = True
-    worker._prev_top_score = 1.25
-    worker._top_reward_has_prev_score = True
-    worker._recent_top_deltas = deque([0.5], maxlen=3)
+    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._prev_top_score = 1.25
+    worker._planner_client._top_reward_has_prev_score = True
+    worker._planner_client._recent_top_deltas = deque([0.5], maxlen=3)
     worker.slot_count = 1
     worker.train_num_envs_per_stage = 1
     worker.last_obs_list = [{"states": "previous"}]
     worker.last_intervened_info_list = [(torch.tensor([1]), torch.tensor([0]))]
-    worker._steps_since_subtask_update = 7
+    worker._planner_client._steps_since_subtask_update = 7
 
     reset_calls = []
 
@@ -434,10 +434,10 @@ def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
     assert env_outputs[0].obs == {"states": "previous"}
     assert torch.equal(env_outputs[0].intervene_actions, torch.tensor([1]))
     assert torch.equal(env_outputs[0].intervene_flags, torch.tensor([0]))
-    assert worker._prev_top_score == pytest.approx(1.25)
-    assert worker._top_reward_has_prev_score is True
-    assert list(worker._recent_top_deltas) == [0.5]
-    assert worker._steps_since_subtask_update == 7
+    assert worker._planner_client._prev_top_score == pytest.approx(1.25)
+    assert worker._planner_client._top_reward_has_prev_score is True
+    assert list(worker._planner_client._recent_top_deltas) == [0.5]
+    assert worker._planner_client._steps_since_subtask_update == 7
 
 
 def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled():
@@ -454,16 +454,16 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
             "actor": {"model": {"num_action_chunks": 1}},
         }
     )
-    worker._top_reward_enabled = True
-    worker._prev_top_score = 1.25
-    worker._top_reward_has_prev_score = True
-    worker._recent_top_deltas = deque([0.5], maxlen=3)
-    worker._episode_frames = [np.zeros((8, 8, 3), dtype=np.uint8)]
+    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._prev_top_score = 1.25
+    worker._planner_client._top_reward_has_prev_score = True
+    worker._planner_client._recent_top_deltas = deque([0.5], maxlen=3)
+    worker._planner_client._episode_frames = [np.zeros((8, 8, 3), dtype=np.uint8)]
     worker.slot_count = 1
     worker.train_num_envs_per_stage = 1
     worker.last_obs_list = []
     worker.last_intervened_info_list = []
-    worker._steps_since_subtask_update = 4
+    worker._planner_client._steps_since_subtask_update = 4
 
     reset_calls = []
 
@@ -480,11 +480,11 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
 
     assert reset_calls == [True]
     assert env_outputs[0].obs == {"states": "reset"}
-    assert worker._prev_top_score == 0.0
-    assert worker._top_reward_has_prev_score is False
-    assert worker._episode_frames == []
-    assert list(worker._recent_top_deltas) == []
-    assert worker._steps_since_subtask_update == 0
+    assert worker._planner_client._prev_top_score == 0.0
+    assert worker._planner_client._top_reward_has_prev_score is False
+    assert worker._planner_client._episode_frames == []
+    assert list(worker._planner_client._recent_top_deltas) == []
+    assert worker._planner_client._steps_since_subtask_update == 0
 
 
 def test_run_interact_once_skips_cooldown_chunk_from_training_data():
@@ -641,9 +641,9 @@ def test_env_interact_step_resets_subtask_counter_on_episode_done(monkeypatch):
         }
     )
     worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
-    worker._top_reward_enabled = False
-    worker._vlm_planner = None
-    worker._steps_since_subtask_update = 5
+    worker._planner_client._top_reward_enabled = False
+    worker._planner_client._vlm_planner = None
+    worker._planner_client._steps_since_subtask_update = 5
     worker.env_list = [
         SimpleNamespace(
             chunk_step=lambda _chunk_actions: (
@@ -660,7 +660,7 @@ def test_env_interact_step_resets_subtask_counter_on_episode_done(monkeypatch):
 
     assert env_output.dones[:, -1].item() is True
     assert env_info == {}
-    assert worker._steps_since_subtask_update == 0
+    assert worker._planner_client._steps_since_subtask_update == 0
 
 
 def test_apply_action_chunk_smoothing_ema_numpy():
@@ -696,6 +696,7 @@ def test_env_interact_step_applies_action_chunk_smoothing(monkeypatch):
         )
 
     worker = EnvWorker.__new__(EnvWorker)
+    _attach_planner_client(worker)
     worker.cfg = _cfg_node(
         {
             "env": {
@@ -721,9 +722,9 @@ def test_env_interact_step_applies_action_chunk_smoothing(monkeypatch):
         }
     )
     worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
-    worker._top_reward_enabled = False
-    worker._vlm_planner = None
-    worker._steps_since_subtask_update = 0
+    worker._planner_client._top_reward_enabled = False
+    worker._planner_client._vlm_planner = None
+    worker._planner_client._steps_since_subtask_update = 0
     worker.env_list = [SimpleNamespace(chunk_step=_chunk_step)]
 
     worker.env_interact_step(torch.tensor([[[0.0], [10.0], [10.0]]]), 0)
@@ -745,9 +746,9 @@ def test_maybe_update_subtask_triggers_on_plateau(monkeypatch):
     worker._maybe_update_subtask(0)
     worker._resolve_pending_subtask(0)
 
-    assert len(worker._vlm_planner.calls) == 1
+    assert len(worker._planner_client._vlm_planner.calls) == 1
     assert worker.env_list[0].unwrapped.task_description == "pick up the corner"
-    assert worker._steps_since_subtask_update == 0
+    assert worker._planner_client._steps_since_subtask_update == 0
 
 
 def test_maybe_update_subtask_triggers_on_score_threshold(monkeypatch):
@@ -763,8 +764,8 @@ def test_maybe_update_subtask_triggers_on_score_threshold(monkeypatch):
     worker._maybe_update_subtask(0)
     worker._resolve_pending_subtask(0)
 
-    assert len(worker._vlm_planner.calls) == 1
-    assert worker._steps_since_subtask_update == 0
+    assert len(worker._planner_client._vlm_planner.calls) == 1
+    assert worker._planner_client._steps_since_subtask_update == 0
 
 
 def test_maybe_update_subtask_respects_adaptive_cooldown(monkeypatch):
@@ -780,14 +781,14 @@ def test_maybe_update_subtask_respects_adaptive_cooldown(monkeypatch):
     worker._maybe_update_subtask(0)
     worker._resolve_pending_subtask(0)
 
-    assert len(worker._vlm_planner.calls) == 0
-    assert worker._steps_since_subtask_update == 1
+    assert len(worker._planner_client._vlm_planner.calls) == 0
+    assert worker._planner_client._steps_since_subtask_update == 1
 
     worker._maybe_update_subtask(0)
     worker._resolve_pending_subtask(0)
 
-    assert len(worker._vlm_planner.calls) == 1
-    assert worker._steps_since_subtask_update == 0
+    assert len(worker._planner_client._vlm_planner.calls) == 1
+    assert worker._planner_client._steps_since_subtask_update == 0
 
 
 def test_maybe_update_subtask_falls_back_to_max_interval(monkeypatch):
@@ -805,8 +806,8 @@ def test_maybe_update_subtask_falls_back_to_max_interval(monkeypatch):
     worker._maybe_update_subtask(0)
     worker._resolve_pending_subtask(0)
 
-    assert len(worker._vlm_planner.calls) == 1
-    assert worker._steps_since_subtask_update == 0
+    assert len(worker._planner_client._vlm_planner.calls) == 1
+    assert worker._planner_client._steps_since_subtask_update == 0
 
 
 def test_maybe_update_subtask_fixed_mode_preserves_old_interval_behavior(monkeypatch):
@@ -825,8 +826,8 @@ def test_maybe_update_subtask_fixed_mode_preserves_old_interval_behavior(monkeyp
     worker._maybe_update_subtask(0)
     worker._resolve_pending_subtask(0)
 
-    assert len(worker._vlm_planner.calls) == 1
-    assert worker._steps_since_subtask_update == 0
+    assert len(worker._planner_client._vlm_planner.calls) == 1
+    assert worker._planner_client._steps_since_subtask_update == 0
 
 
 def test_initial_subtask_planning_replaces_parent_task_before_first_send(monkeypatch):
@@ -841,11 +842,11 @@ def test_initial_subtask_planning_replaces_parent_task_before_first_send(monkeyp
         },
     )
     worker.env_list = [env]
-    worker._initial_task_descriptions = ["Pick up the stuffed animals."]
-    worker._subtask_interval = 10
-    worker._steps_since_subtask_update = 0
-    worker._vlm_planner = _PlannerStub(result="pick up the blue one")
-    worker._top_reward_enabled = False
+    worker._planner_client._initial_task_descriptions = ["Pick up the stuffed animals."]
+    worker._planner_client._subtask_interval = 10
+    worker._planner_client._steps_since_subtask_update = 0
+    worker._planner_client._vlm_planner = _PlannerStub(result="pick up the blue one")
+    worker._planner_client._top_reward_enabled = False
     worker.log_info = lambda *_args, **_kwargs: None
 
     env_output = SimpleNamespace(
@@ -858,8 +859,8 @@ def test_initial_subtask_planning_replaces_parent_task_before_first_send(monkeyp
 
     updated = worker._maybe_plan_initial_subtask(0, env_output)
 
-    assert len(worker._vlm_planner.calls) == 1
-    assert worker._vlm_planner.calls[0][1] == "Pick up the stuffed animals."
+    assert len(worker._planner_client._vlm_planner.calls) == 1
+    assert worker._planner_client._vlm_planner.calls[0][1] == "Pick up the stuffed animals."
     assert inner_env.task_description == "pick up the blue one"
     assert updated.obs["task_descriptions"] == ["pick up the blue one"]
 
@@ -870,11 +871,11 @@ def test_initial_subtask_planning_skips_after_progress_has_started(monkeypatch):
     inner_env = SimpleNamespace(task_description="Pick up the stuffed animals.")
     env = SimpleNamespace(unwrapped=inner_env, last_obs={})
     worker.env_list = [env]
-    worker._initial_task_descriptions = ["Pick up the stuffed animals."]
-    worker._subtask_interval = 10
-    worker._steps_since_subtask_update = 3
-    worker._vlm_planner = _PlannerStub(result="pick up the blue one")
-    worker._top_reward_enabled = False
+    worker._planner_client._initial_task_descriptions = ["Pick up the stuffed animals."]
+    worker._planner_client._subtask_interval = 10
+    worker._planner_client._steps_since_subtask_update = 3
+    worker._planner_client._vlm_planner = _PlannerStub(result="pick up the blue one")
+    worker._planner_client._top_reward_enabled = False
     worker.log_info = lambda *_args, **_kwargs: None
 
     updated = worker._maybe_plan_initial_subtask(
@@ -885,6 +886,6 @@ def test_initial_subtask_planning_skips_after_progress_has_started(monkeypatch):
         ),
     )
 
-    assert len(worker._vlm_planner.calls) == 0
+    assert len(worker._planner_client._vlm_planner.calls) == 0
     assert inner_env.task_description == "Pick up the stuffed animals."
     assert updated.obs["task_descriptions"] == ["Pick up the stuffed animals."]
