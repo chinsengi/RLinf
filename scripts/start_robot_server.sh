@@ -107,6 +107,8 @@ Options:
   --dummy               Run without real hardware (zero observations)
   --verbose             Show robot state before serving and log every chunk step
   --sbs                 Step-by-step: wait for Enter before each chunk (implies --verbose)
+  --no-action           Suppress per-step action logs in SBS mode (only with --sbs)
+  --reward-frame-interval N  Capture a camera frame every N steps for TOPReward (default: 5, 0=off)
   --help                Show this help
 
 Examples:
@@ -162,6 +164,8 @@ while [[ $# -gt 0 ]]; do
         --dummy)        DUMMY=true; shift ;;
         --verbose)      VERBOSE=true; shift ;;
         --sbs)          SBS=true; shift ;;
+        --no-action)    NO_ACTION=true; shift ;;
+        --reward-frame-interval) REWARD_FRAME_INTERVAL="$2"; shift 2 ;;
         *)              echo "Unknown option: $1"; usage ;;
     esac
 done
@@ -526,6 +530,8 @@ SERVER_ARGS=(
 [ "$DUMMY" = true ] && SERVER_ARGS+=(--dummy)
 [ "$VERBOSE" = true ] && SERVER_ARGS+=(--verbose)
 [ "$SBS" = true ] && SERVER_ARGS+=(--sbs)
+[ "$NO_ACTION" = true ] && SERVER_ARGS+=(--no-action)
+[ -n "$REWARD_FRAME_INTERVAL" ] && SERVER_ARGS+=(--reward-frame-interval "$REWARD_FRAME_INTERVAL")
 
 if [ "$VERBOSE" = true ]; then
     READY_FLAG=$(mktemp /tmp/rlinf_robot_ready.XXXX)
