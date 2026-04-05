@@ -23,6 +23,10 @@ bash requirements/install.sh embodied --model <model> --env <env>
 pip install pre-commit
 pre-commit install --hook-type commit-msg
 pre-commit run --all-files   # runs Ruff (lint + format) and commit checks
+
+# Quick lint/format without pre-commit:
+ruff check --fix .
+ruff format .
 ```
 
 ### Testing
@@ -87,6 +91,7 @@ RLinf is a distributed RL infrastructure for embodied and agentic AI, built on *
 - YAML configs live under `examples/*/config/`. Copy existing configs as templates.
 - **No dynamic values or calculations in YAML.** Compute derived values in `config.py`.
 - **Config fields are read-only in code.** Never overwrite user-set fields programmatically.
+- **Avoid cross-referencing fields** in YAML; assign derived values in code instead.
 - Key top-level config sections: `cluster`, `task`, `model`, `runner`, `algorithm`, `data`.
 
 ### Backends
@@ -118,7 +123,9 @@ RLinf is a distributed RL infrastructure for embodied and agentic AI, built on *
 ## Code Style
 
 - **Google Python Style Guide.** Ruff enforces lint/format at `line-length: 88`.
+- **Copyright header** required on all new `.py` files (Ruff `CPY001`): `# Copyright 2025 The RLinf Authors.` followed by the Apache 2.0 boilerplate. Copy from any existing file like `rlinf/config.py`.
 - **Docstrings and type hints** required on all public APIs in `rlinf/scheduler/` (Ruff docstring rules `D` are only enforced there via per-file-ignores in `pyproject.toml`); expected elsewhere.
+- **Assertions and exceptions** must include clear, meaningful error messages — never empty or trivially restating the condition.
 - **Logging:** in `Worker` use `self.log_info` / `self.log_warning` / `self.log_error`; elsewhere use `from rlinf.utils.logging import get_logger`.
 - **No `print` statements.**
 - **Commits:** [Conventional Commits](https://www.conventionalcommits.org/) format `<type>(<scope>): <description>`, signed-off (`git commit -s`).

@@ -100,3 +100,57 @@ def test_remote_env_chunk_step_collapses_done_flags_to_chunk_tail() -> None:
     assert chunk_terminations.tolist() == [[False, True]]
     assert chunk_truncations.tolist() == [[False, False]]
     assert env.last_obs["task_descriptions"] == ["fold the towel"]
+
+
+def test_remote_env_chunk_step_marks_server_cooldown_as_collection_pause() -> None:
+    env = object.__new__(RemoteEnv)
+    env._timeout = 3.0
+    env._task_description = "fold the towel"
+    env._elapsed_steps = np.zeros(1, dtype=np.int32)
+    env._num_steps = 0
+    env.num_envs = 1
+    env.last_obs = None
+    env._record_metrics = lambda reward, terminations, intervene, infos: infos
+
+    class _Stub:
+        def ChunkStep(self, request, timeout):
+            assert timeout == 6.0
+            assert request.chunk_size == 2
+            return robot_env_pb2.ChunkStepResponse(
+                step_results=[
+                    robot_env_pb2.StepResult(
+                        observation=robot_env_pb2.Observation(),
+                        reward=0.0,
+                        terminated=False,
+                        truncated=False,
+                    ),
+                    robot_env_pb2.StepResult(
+                        observation=robot_env_pb2.Observation(
+                            states=np.zeros((1, 4), dtype=np.float32).tobytes(),
+                            state_shape=[1, 4],
+                            main_image=np.zeros((2, 2, 3), dtype=np.uint8).tobytes(),
+                            img_height=2,
+                            img_width=2,
+                            is_compressed=False,
+                            task_description="fold the towel",
+                        ),
+                        reward=float("nan"),
+                        terminated=False,
+                        truncated=True,
+                    ),
+                ]
+            )
+
+    env._stub = _Stub()
+
+    obs_list, chunk_rewards, chunk_terminations, chunk_truncations, infos_list = (
+        env.chunk_step(np.zeros((1, 2, 4), dtype=np.float32))
+    )
+
+    assert len(obs_list) == 1
+    assert chunk_rewards.tolist() == [[0.0, 0.0]]
+    assert chunk_terminations.tolist() == [[False, False]]
+    assert chunk_truncations.tolist() == [[False, True]]
+    assert infos_list[-1]["collection_paused"] is True
+    assert env._elapsed_steps.tolist() == [1]
+    assert env._num_steps == 1

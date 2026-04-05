@@ -29,6 +29,7 @@ except Exception:
 
     ray_stub = types.ModuleType("ray")
     ray_stub.get = lambda ref: ref
+    ray = ray_stub
     sys.modules.setdefault("ray", ray_stub)
 
 from rlinf.data.embodied_io_struct import EnvOutput
@@ -142,7 +143,7 @@ def test_adaptive_subtask_update_queues_and_resolves_sync():
     client.maybe_update_subtask(0, [env])
     assert 0 in client._pending_subtasks
 
-    client.resolve_pending_sync(0, [env])
+    client.resolve_pending_vlm_results_sync(0, [env])
 
     assert env.unwrapped.task_description == "grasp the corner"
     assert client._steps_since_subtask_update == 0
@@ -169,8 +170,8 @@ def test_out_of_order_slot_resolution_keeps_both_subtask_updates():
     client.maybe_update_subtask(0, envs)
     client.maybe_update_subtask(1, envs)
 
-    client.resolve_pending_sync(1, envs)
-    client.resolve_pending_sync(0, envs)
+    client.resolve_pending_vlm_results_sync(1, envs)
+    client.resolve_pending_vlm_results_sync(0, envs)
 
     assert envs[0].unwrapped.task_description == "grasp the left corner"
     assert envs[1].unwrapped.task_description == "align the top block"
@@ -198,7 +199,7 @@ def test_subtask_switch_seeds_top_reward_baseline_for_next_chunk():
         dones=torch.zeros((1, 1), dtype=torch.bool),
     )
     client.submit_top_reward(env_output, 0, [env])
-    client.resolve_pending_sync(0, [env])
+    client.resolve_pending_vlm_results_sync(0, [env])
 
     assert env_output.rewards[0, -1].item() == pytest.approx(0.4)
     assert list(client._recent_top_deltas) == [pytest.approx(0.4)]
@@ -222,7 +223,7 @@ def test_submit_top_reward_is_nonblocking_until_sync_resolve():
     assert 0 in client._pending_top_rewards
     assert env_output.rewards[0, -1].item() == pytest.approx(0.0)
 
-    client.resolve_pending_sync(0, [_make_env()])
+    client.resolve_pending_vlm_results_sync(0, [_make_env()])
 
     assert env_output.rewards[0, -1].item() == pytest.approx(0.0)
     assert client._prev_top_score == pytest.approx(1.25)
@@ -258,3 +259,65 @@ def test_async_resolution_awaits_refs_and_updates_state():
     assert subtask_ref.awaited is True
     assert env_output.rewards[0, -1].item() == pytest.approx(0.5)
     assert env.unwrapped.task_description == "grasp the corner"
+
+
+def test_terminal_top_reward_blocks_adaptive_subtask_until_reset_resolves():
+    client = _make_client()
+    client._top_reward_enabled = True
+    client._subtask_interval = 1
+    client._subtask_adaptive = True
+    client._subtask_min_interval = 0
+    client._subtask_score_threshold = -0.5
+    client._initial_task_descriptions = ["fold the towel"]
+    client._vlm_planner = _PlannerStub(score_result=1.25)
+
+    env = _make_env("fold the towel")
+    env_output = EnvOutput(
+        obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+        rewards=torch.zeros((1, 1), dtype=torch.float32),
+        dones=torch.ones((1, 1), dtype=torch.bool),
+    )
+
+    client.on_env_step(0, env_output, [env])
+
+    assert client._episode_done_waiting_for_top_reward_reset == [True]
+    assert 0 in client._pending_top_rewards
+
+    client.maybe_update_subtask(0, [env])
+
+    assert 0 not in client._pending_subtasks
+    assert client._steps_since_subtask_update == 0
+
+    client.resolve_pending_vlm_results_sync(0, [env])
+
+    assert client._episode_done_waiting_for_top_reward_reset == [False]
+    assert client._top_reward_has_prev_score is False
+
+
+def test_cooldown_chunk_does_not_reset_other_slots_subtask_cadence():
+    client = VLMPlannerClient(
+        slot_count=2, worker_timer=lambda *_a, **_k: nullcontext()
+    )
+    client._log_info = lambda *_args, **_kwargs: None
+    client._subtask_interval = 2
+    client._subtask_adaptive = False
+    client._initial_task_descriptions = ["fold the towel", "stack the blocks"]
+    client._vlm_planner = _SequentialPlannerStub(["grasp the left corner"])
+    client._steps_since_subtask_update = 1
+    client._episode_done_waiting_for_top_reward_reset = [False, True]
+
+    envs = [_make_env("fold the towel"), _make_env("stack the blocks")]
+    paused_env_output = EnvOutput(
+        obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+        collect_for_training=False,
+    )
+
+    updated = client.on_env_step(1, paused_env_output, envs)
+
+    assert updated is paused_env_output
+    assert client._steps_since_subtask_update == 1
+    assert client._episode_done_waiting_for_top_reward_reset == [False, False]
+
+    client.maybe_update_subtask(0, envs)
+
+    assert 0 in client._pending_subtasks

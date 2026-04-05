@@ -15,7 +15,7 @@
 from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import ray
@@ -23,6 +23,9 @@ import torch
 from omegaconf import DictConfig
 
 from rlinf.data.embodied_io_struct import EnvOutput
+
+if TYPE_CHECKING:
+    from rlinf.workers.vlm_planner.vlm_planner_worker import VLMPlannerWorker
 
 
 @dataclass
@@ -88,6 +91,10 @@ class VLMPlannerClient:
         _last_applied_subtask_request_id: Per-slot request ids for the latest
             applied subtask result. Used to ignore stale resolutions for that
             same slot only.
+        _episode_done_waiting_for_top_reward_reset: Per-slot guard that blocks
+            adaptive subtask updates after a terminal step until the pending
+            TOPReward result has been resolved and episode-local state has been
+            cleared.
         _top_reward_enabled: Whether TOPReward scoring is enabled.
         _top_reward_max_frames: Maximum number of recent frames retained for a
             TOPReward planner call.
@@ -116,7 +123,14 @@ class VLMPlannerClient:
 
         self._log_info = log_info or _noop_log
         self._worker_timer = worker_timer or (lambda *_args, **_kwargs: nullcontext())
+        self._vlm_planner: "VLMPlannerWorker | None" = None
 
+        self._init_subtask_params(train_cfg, slot_count)
+        self._init_top_reward_params(train_cfg, slot_count)
+        self._validate_params(slot_count)
+
+    def _init_subtask_params(self, train_cfg, slot_count: int) -> None:
+        """Initialize subtask planning parameters from config."""
         self._subtask_interval: int = int(train_cfg.get("subtask_interval", 0))
         self._subtask_adaptive: bool = bool(train_cfg.get("subtask_adaptive", True))
         self._subtask_min_interval: int = int(train_cfg.get("subtask_min_interval", 2))
@@ -134,8 +148,17 @@ class VLMPlannerClient:
         self._recent_top_deltas: deque[float] = deque(
             maxlen=self._subtask_plateau_window
         )
-        self._vlm_planner = None
+        self._pending_subtasks: dict[int, _PendingSubtask] = {}
+        self._subtask_request_counter: list[int] = [0 for _ in range(slot_count)]
+        self._last_applied_subtask_request_id: list[int] = [
+            0 for _ in range(slot_count)
+        ]
+        self._initial_task_descriptions: list[str] = [
+            str(train_cfg.get("task_description", "")) for _ in range(slot_count)
+        ]
 
+    def _init_top_reward_params(self, train_cfg, slot_count: int) -> None:
+        """Initialize TOPReward parameters from config."""
         self._top_reward_enabled: bool = bool(
             train_cfg.get("top_reward_enabled", False)
         )
@@ -146,15 +169,12 @@ class VLMPlannerClient:
         self._prev_top_score: float = 0.0
         self._top_reward_has_prev_score: bool = False
         self._pending_top_rewards: dict[int, _PendingTopReward] = {}
-        self._pending_subtasks: dict[int, _PendingSubtask] = {}
-        self._subtask_request_counter: list[int] = [0 for _ in range(slot_count)]
-        self._last_applied_subtask_request_id: list[int] = [
-            0 for _ in range(slot_count)
-        ]
-        self._initial_task_descriptions: list[str] = [
-            str(train_cfg.get("task_description", "")) for _ in range(slot_count)
+        self._episode_done_waiting_for_top_reward_reset: list[bool] = [
+            False for _ in range(slot_count)
         ]
 
+    def _validate_params(self, slot_count: int) -> None:
+        """Validate parameter combinations."""
         if self._top_reward_enabled and slot_count != 1:
             raise ValueError(
                 "TOPReward currently supports exactly one pipeline slot. "
@@ -197,12 +217,18 @@ class VLMPlannerClient:
         self._top_reward_has_prev_score = False
         self._recent_top_deltas.clear()
 
-    def reset_for_env_reset(self) -> None:
-        self.reset_subtask_update_state()
+    def reset_for_env_reset(self, slot_id: int | None = None) -> None:
+        if slot_id is None:
+            self.reset_subtask_update_state()
+            self._episode_done_waiting_for_top_reward_reset = [
+                False for _ in self._episode_done_waiting_for_top_reward_reset
+            ]
+        else:
+            self._episode_done_waiting_for_top_reward_reset[slot_id] = False
         if self._top_reward_enabled:
             self.reset_top_reward_state()
 
-    def on_episode_done(self) -> None:
+    def reset_subtask_update_state_for_episode_done(self) -> None:
         self.reset_subtask_update_state()
 
     def get_top_reward_instruction(self, slot_id: int, env_list: list[Any]) -> str:
@@ -252,6 +278,19 @@ class VLMPlannerClient:
         )
         return True
 
+    def _get_baseline_obs(
+        self,
+        slot_id: int,
+        env_list: list[Any],
+        obs: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Resolve baseline observation for TOPReward seeding."""
+        baseline_obs = obs
+        if baseline_obs is None:
+            env = self._get_env(env_list, slot_id)
+            baseline_obs = getattr(env, "last_obs", None)
+        return baseline_obs
+
     def _seed_top_reward_baseline_sync(
         self,
         slot_id: int,
@@ -262,10 +301,7 @@ class VLMPlannerClient:
         if not self._top_reward_enabled or self._vlm_planner is None:
             return False
 
-        baseline_obs = obs
-        if baseline_obs is None:
-            env = self._get_env(env_list, slot_id)
-            baseline_obs = getattr(env, "last_obs", None)
+        baseline_obs = self._get_baseline_obs(slot_id, env_list, obs)
         if baseline_obs is None:
             return False
 
@@ -291,10 +327,7 @@ class VLMPlannerClient:
         if not self._top_reward_enabled or self._vlm_planner is None:
             return False
 
-        baseline_obs = obs
-        if baseline_obs is None:
-            env = self._get_env(env_list, slot_id)
-            baseline_obs = getattr(env, "last_obs", None)
+        baseline_obs = self._get_baseline_obs(slot_id, env_list, obs)
         if baseline_obs is None:
             return False
 
@@ -392,6 +425,8 @@ class VLMPlannerClient:
     def maybe_update_subtask(self, slot_id: int, env_list: list[Any]) -> None:
         if self._subtask_interval <= 0 or self._vlm_planner is None:
             return
+        if self._episode_done_waiting_for_top_reward_reset[slot_id]:
+            return
 
         self._steps_since_subtask_update += 1
         if self._subtask_adaptive and (
@@ -421,13 +456,24 @@ class VLMPlannerClient:
         obs = getattr(env, "last_obs", None) or {}
         self.submit_subtask_request(slot_id, obs)
 
-    def finish_pending_subtask(
+    def apply_resolved_subtask(
         self,
         slot_id: int,
         pending: _PendingSubtask,
         new_subtask: str,
         env_list: list[Any],
     ) -> bool:
+        """Apply a resolved subtask request if it is newer than the last one.
+
+        Stale planner replies are ignored by comparing ``pending.request_id``
+        against the last applied request id for this slot. When the update is
+        applied successfully, this method records the request id and resets the
+        subtask-update cadence state.
+
+        Returns:
+            True if ``new_subtask`` was applied and bookkeeping was updated,
+            otherwise False.
+        """
         if pending.request_id <= self._last_applied_subtask_request_id[slot_id]:
             return False
         if self.apply_subtask_update(slot_id, new_subtask, env_list):
@@ -441,7 +487,7 @@ class VLMPlannerClient:
         if pending is None:
             return
         new_subtask = ray.get(pending.ref)
-        if self.finish_pending_subtask(slot_id, pending, new_subtask, env_list):
+        if self.apply_resolved_subtask(slot_id, pending, new_subtask, env_list):
             self._seed_top_reward_baseline_sync(slot_id, env_list)
 
     def submit_top_reward(
@@ -481,7 +527,7 @@ class VLMPlannerClient:
         )
         return env_output
 
-    def finish_pending_top_reward(
+    def apply_resolved_top_reward(
         self, pending: _PendingTopReward, score_t: float
     ) -> None:
         if self._top_reward_has_prev_score:
@@ -501,7 +547,9 @@ class VLMPlannerClient:
         if pending is None:
             return
         score_t = ray.get(pending.score_ref)
-        self.finish_pending_top_reward(pending, score_t)
+        self.apply_resolved_top_reward(pending, score_t)
+        if pending.done_on_step:
+            self._episode_done_waiting_for_top_reward_reset[slot_id] = False
 
     def compute_top_reward_sync(
         self,
@@ -553,12 +601,20 @@ class VLMPlannerClient:
         env_output: EnvOutput,
         env_list: list[Any],
     ) -> EnvOutput:
+        if not env_output.collect_for_training:
+            self.reset_for_env_reset(slot_id)
+            return env_output
+
         env_output = self.submit_top_reward(env_output, slot_id, env_list)
         if env_output.dones[:, -1].any():
-            self.on_episode_done()
+            if self._top_reward_enabled:
+                self._episode_done_waiting_for_top_reward_reset[slot_id] = True
+            self.reset_subtask_update_state_for_episode_done()
         return env_output
 
-    def resolve_pending_sync(self, slot_id: int, env_list: list[Any]) -> None:
+    def resolve_pending_vlm_results_sync(
+        self, slot_id: int, env_list: list[Any]
+    ) -> None:
         self.resolve_pending_top_reward_sync(slot_id)
         self.resolve_pending_subtask_sync(slot_id, env_list)
 
@@ -566,12 +622,14 @@ class VLMPlannerClient:
         pending_top_reward = self._pending_top_rewards.pop(slot_id, None)
         if pending_top_reward is not None:
             score_t = await pending_top_reward.score_ref
-            self.finish_pending_top_reward(pending_top_reward, score_t)
+            self.apply_resolved_top_reward(pending_top_reward, score_t)
+            if pending_top_reward.done_on_step:
+                self._episode_done_waiting_for_top_reward_reset[slot_id] = False
 
         pending_subtask = self._pending_subtasks.pop(slot_id, None)
         if pending_subtask is not None:
             new_subtask = await pending_subtask.ref
-            if self.finish_pending_subtask(
+            if self.apply_resolved_subtask(
                 slot_id, pending_subtask, new_subtask, env_list
             ):
                 await self._seed_top_reward_baseline_async(slot_id, env_list)

@@ -225,7 +225,7 @@ def _run_sync_profiled(cfg, profiler: LatencyProfiler) -> None:
         runner.init_workers()
 
         if vlm_actor is not None:
-            env_group.set_vlm_planner(vlm_actor).wait()
+            env_group.set_planner_handle(vlm_actor).wait()
 
         # --- Profiled training loop (mirrors EmbodiedRunner.run) ---
 
@@ -391,7 +391,7 @@ def _run_async_profiled(cfg, profiler: LatencyProfiler) -> None:
         runner.init_workers()
 
         if vlm_actor is not None:
-            env_group.set_vlm_planner(vlm_actor).wait()
+            env_group.set_planner_handle(vlm_actor).wait()
 
         # --- Profiled async loop (mirrors AsyncPPOEmbodiedRunner.run) ---
 

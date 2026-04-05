@@ -290,7 +290,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             step_results.append(
                 robot_env_pb2.StepResult(
                     observation=obs_proto,
-                    reward=0.0,
+                    reward=float("nan"),
                     terminated=False,
                     truncated=bool(truncated and step_idx == chunk_size - 1),
                 )
@@ -305,7 +305,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         cooldown_s: float,
         prepare_for_reconnection: bool,
     ) -> None:
-        """Return home and arm the next episode/session restart."""
+        """Return home and prepare for the next client connection."""
         logger.info(reason)
         try:
             self._env.return_to_home()
@@ -332,7 +332,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._reset_client_session_state()
 
     def _finish_restart_if_ready_locked(self) -> dict | None:
-        """Reset from home once cooldown has elapsed and return the fresh obs."""
+        """Complete a pending restart once the cooldown has finished."""
         if not self._restart_required:
             return None
 
@@ -481,6 +481,16 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 input()
 
         with self._env_lock:
+            # Re-check after the approval / step-by-step gap: episode_timeout()
+            # may have started the restart flow while the lock was not held.
+            if self._restart_required:
+                obs = self._finish_restart_if_ready_locked()
+                if obs is None:
+                    obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
+                return self._build_idle_chunk_response(
+                    obs, request.chunk_size, truncated=True
+                )
+
             (
                 obs_list,
                 chunk_rewards,
@@ -527,6 +537,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 f"terminated={[bool(chunk_terminations[0, i]) for i in range(chunk_size)]}, "
                 f"truncated={[bool(chunk_truncations[0, i]) for i in range(chunk_size)]}"
             )
+
         return robot_env_pb2.ChunkStepResponse(step_results=step_results)
 
     def SetTaskDescription(self, request, context):
@@ -562,10 +573,13 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         return robot_env_pb2.Empty()
 
     def episode_timeout(self) -> None:
-        """Return arms to home when the episode timer expires.
+        """Start cooldown when the episode timer expires.
 
-        Called by the timer thread.  Acquires ``_env_lock`` and re-checks
-        the timer to avoid acting on a stale reading.
+        Called by the timer thread.  Acquires ``_env_lock`` and directly
+        starts the restart flow (return-to-home, zero-torque, cooldown
+        countdown) so that the robot is made safe even when no further
+        ``ChunkStep`` arrives.  Because the lock is held, no concurrent
+        ``chunk_step()`` can be in progress.
         """
         with self._env_lock:
             start = self._env._episode_start_time
@@ -574,15 +588,17 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             elapsed = time.monotonic() - start
             if elapsed < self._env._episode_duration_s:
                 return
-            self._start_restart_flow_locked(
-                reason=(
-                    "[RobotServer] Episode timer expired — returning home and "
-                    "starting the server-side restart countdown."
-                ),
-                enter_zero_torque=True,
-                cooldown_s=self._episode_cooldown_s,
-                prepare_for_reconnection=False,
-            )
+            if not self._restart_required:
+                self._start_restart_flow_locked(
+                    reason=(
+                        "[RobotServer] Episode timer expired — returning "
+                        "home and starting the server-side restart "
+                        "countdown."
+                    ),
+                    enter_zero_torque=True,
+                    cooldown_s=self._episode_cooldown_s,
+                    prepare_for_reconnection=False,
+                )
 
     def safe_recover(self, idle_timeout_s: float) -> None:
         """Return arms to home, enter zero-torque, and prepare for reconnection.
