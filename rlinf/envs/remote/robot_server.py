@@ -282,9 +282,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         ]
         # Append client-pushed values (TOPReward score/delta, lr, ...).
         if self._client_status_values:
-            client_age_s = time.monotonic() - self._client_status_updated_at
             kv_strs = [f"{k}={v:+.4f}" for k, v in self._client_status_values.items()]
-            parts.append(f"client({client_age_s:.0f}s ago): " + ", ".join(kv_strs))
+            parts.append(", ".join(kv_strs))
         if self._client_status_text:
             parts.append(self._client_status_text)
         return " | ".join(parts)
@@ -486,8 +485,11 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
         )
-        self._print_chunk_task_context()
-        if self._verbose:
+        # In SBS mode, the chunk context is shown inline in the SBS prompt
+        # below. Only print the separate header line for non-SBS verbose mode.
+        if not self._step_by_step:
+            self._print_chunk_task_context()
+        if self._verbose and not self._step_by_step:
             logger.info(
                 f"[ChunkStep] Received chunk: num_envs={request.num_envs}, "
                 f"chunk_size={request.chunk_size}, action_dim={request.action_dim}"
@@ -512,6 +514,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
         if self._step_by_step:
             print(f"[SBS] {self._format_sbs_status()}", flush=True)
+            print(f"[SBS] {self._format_chunk_task_context()}", flush=True)
             print("[SBS] Press Enter to execute this chunk...", flush=True)
             try:
                 with open("/dev/tty", "r") as tty:
@@ -586,7 +589,10 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 )
             )
 
-        if self._verbose:
+        # In SBS mode the YAM env reward is always 0 (dense reward is computed
+        # on the training side via TOPReward), so dumping the zero-filled
+        # rewards/terminated/truncated arrays only adds noise; skip it.
+        if self._verbose and not self._step_by_step:
             logger.info(
                 f"[ChunkStep] Done. rewards={[float(chunk_rewards[0, i]) for i in range(chunk_size)]}, "
                 f"terminated={[bool(chunk_terminations[0, i]) for i in range(chunk_size)]}, "
