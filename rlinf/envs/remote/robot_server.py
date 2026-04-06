@@ -25,6 +25,7 @@ SSH tunnel (Tailscale).
 
 import argparse
 import os
+import select
 import signal
 import sys
 import threading
@@ -193,6 +194,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         step_by_step: bool = False,
         no_action: bool = False,
         request_shutdown=None,
+        stop_event: threading.Event | None = None,
     ):
         self._env = env
         self._compress = compress
@@ -202,6 +204,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._no_action = no_action and step_by_step
         self._first_chunk_approved = not self._verbose
         self._request_shutdown = request_shutdown
+        self._stop_event = stop_event or threading.Event()
 
         # Track last client RPC time for disconnect detection.
         self._last_rpc_time: float = time.monotonic()
@@ -222,6 +225,30 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
         self._env_lock = threading.Lock()
+
+    def _wait_for_enter_or_shutdown(self) -> bool:
+        """Block until the user presses Enter or stop_event is set.
+
+        Returns ``True`` if the user pressed Enter, ``False`` if interrupted
+        by the stop event (shutdown requested).
+        """
+        try:
+            with open("/dev/tty", "r") as tty:
+                fd = tty.fileno()
+                while not self._stop_event.is_set():
+                    ready, _, _ = select.select([fd], [], [], 0.5)
+                    if ready:
+                        tty.readline()
+                        return True
+                return False
+        except OSError:
+            # No /dev/tty (e.g. Docker without -it); fall back to stdin.
+            while not self._stop_event.is_set():
+                ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+                if ready:
+                    sys.stdin.readline()
+                    return True
+            return False
 
     def _read_env_task_description(self) -> str:
         """Return the current task/subtask string from the wrapped env."""
@@ -436,11 +463,9 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         print("  Press Enter to approve, or Ctrl+C the server to abort.", flush=True)
         print("=" * 60 + "\n", flush=True)
 
-        try:
-            with open("/dev/tty", "r") as tty:
-                tty.readline()
-        except OSError:
-            input()
+        if not self._wait_for_enter_or_shutdown():
+            logger.info("[ChunkStep] First chunk aborted by shutdown.")
+            return
 
         self._first_chunk_approved = True
         logger.info("[ChunkStep] First chunk approved. Executing...")
@@ -503,16 +528,24 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
         if not self._first_chunk_approved:
             self._wait_for_first_chunk_approval(actions)
+            if self._stop_event.is_set():
+                with self._env_lock:
+                    obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
+                return self._build_idle_chunk_response(
+                    obs, request.chunk_size, truncated=True
+                )
 
         if self._step_by_step:
             print(f"[SBS] {self._format_sbs_status()}", flush=True)
             print(f"[SBS] {self._format_chunk_task_context()}", flush=True)
             print("[SBS] Press Enter to execute this chunk...", flush=True)
-            try:
-                with open("/dev/tty", "r") as tty:
-                    tty.readline()
-            except OSError:
-                input()
+            if not self._wait_for_enter_or_shutdown():
+                logger.info("[SBS] Chunk aborted by shutdown.")
+                with self._env_lock:
+                    obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
+                return self._build_idle_chunk_response(
+                    obs, request.chunk_size, truncated=True
+                )
 
         with self._env_lock:
             # Re-check after the approval / step-by-step gap: episode_timeout()
@@ -813,6 +846,7 @@ def serve(
         step_by_step=step_by_step,
         no_action=no_action,
         request_shutdown=_request_shutdown,
+        stop_event=stop_event,
     )
     robot_env_pb2_grpc.add_RobotEnvServiceServicer_to_server(servicer, server)
 
