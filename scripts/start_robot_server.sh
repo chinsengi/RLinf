@@ -69,6 +69,8 @@ NO_TUNNEL=false
 DUMMY=false
 VERBOSE=false
 SBS=false
+NO_ACTION=false
+REWARD_FRAME_INTERVAL=""
 FOLLOWER_PID=""
 TUNNEL_PID=""
 TUNNEL_LOG=""
@@ -107,6 +109,8 @@ Options:
   --dummy               Run without real hardware (zero observations)
   --verbose             Show robot state before serving and log every chunk step
   --sbs                 Step-by-step: wait for Enter before each chunk (implies --verbose)
+  --no-action           Suppress per-step action logs in SBS mode (only with --sbs)
+  --reward-frame-interval N  Capture a camera frame every N steps for TOPReward (default: 5, 0=off)
   --help                Show this help
 
 Examples:
@@ -162,6 +166,8 @@ while [[ $# -gt 0 ]]; do
         --dummy)        DUMMY=true; shift ;;
         --verbose)      VERBOSE=true; shift ;;
         --sbs)          SBS=true; shift ;;
+        --no-action)    NO_ACTION=true; shift ;;
+        --reward-frame-interval) REWARD_FRAME_INTERVAL="$2"; shift 2 ;;
         *)              echo "Unknown option: $1"; usage ;;
     esac
 done
@@ -230,7 +236,7 @@ if [ -n "$TRAIN_CONFIG" ] || [ -n "$RETURN_HOME_MINUTES_OVERRIDE" ] || [ -n "$CO
 fi
 
 CLEANING_UP=false
-SERVER_SHUTDOWN_WAIT_S=8
+SERVER_SHUTDOWN_WAIT_S=15
 
 video_devices_exist() {
     compgen -G "/dev/video*" >/dev/null 2>&1
@@ -333,7 +339,9 @@ kill_port_holders() {
 cleanup() {
     if [ "$CLEANING_UP" = true ]; then return; fi
     CLEANING_UP=true
-    echo "Shutting down..."
+    # Ignore further Ctrl+C so the user cannot interrupt return-to-home.
+    trap '' INT
+    echo "Shutting down (Ctrl+C disabled until robot is home)..."
 
     # Stop the RobotServer first so it can return the arms home while the
     # follower servers are still alive.
@@ -345,6 +353,11 @@ cleanup() {
             fi
             sleep 1
         done
+        # Force-kill only if it is still alive after the grace period.
+        if kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "RobotServer still alive after ${SERVER_SHUTDOWN_WAIT_S}s — force killing."
+            kill -9 "$SERVER_PID" 2>/dev/null || true
+        fi
     fi
 
     [ -n "${FOLLOWER_PID:-}" ] && kill "$FOLLOWER_PID" 2>/dev/null || true
@@ -352,7 +365,6 @@ cleanup() {
 
     sleep 2
 
-    [ -n "${SERVER_PID:-}" ] && kill -9 "$SERVER_PID" 2>/dev/null || true
     [ -n "${FOLLOWER_PID:-}" ] && kill -9 "$FOLLOWER_PID" 2>/dev/null || true
     [ -n "${TUNNEL_PID:-}" ] && kill -9 "$TUNNEL_PID" 2>/dev/null || true
 
@@ -526,6 +538,8 @@ SERVER_ARGS=(
 [ "$DUMMY" = true ] && SERVER_ARGS+=(--dummy)
 [ "$VERBOSE" = true ] && SERVER_ARGS+=(--verbose)
 [ "$SBS" = true ] && SERVER_ARGS+=(--sbs)
+[ "$NO_ACTION" = true ] && SERVER_ARGS+=(--no-action)
+[ -n "$REWARD_FRAME_INTERVAL" ] && SERVER_ARGS+=(--reward-frame-interval "$REWARD_FRAME_INTERVAL")
 
 if [ "$VERBOSE" = true ]; then
     READY_FLAG=$(mktemp /tmp/rlinf_robot_ready.XXXX)

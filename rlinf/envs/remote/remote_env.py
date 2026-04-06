@@ -259,6 +259,48 @@ class RemoteEnv(gym.Env):
         # Latest observation dict; read by EnvWorker._maybe_update_subtask()
         # to supply the VLM subtask planner with a current camera frame.
         self.last_obs: Optional[dict] = None
+        # Intermediate reward frames from the last chunk_step, decoded from
+        # JPEG.  Read by vlm_planner_client to feed TOPReward.
+        self._last_reward_frames: list[np.ndarray] = []
+
+        # Push wall-clock episode timing from the training config so that the
+        # desktop server timer can be adjusted without restarting the robot
+        # server. Either field may be omitted; negative/zero sentinel values
+        # tell the server to keep its current setting.
+        duration_minutes = cfg.get("episode_duration_minutes", None)
+        duration_s_cfg = cfg.get("episode_duration_s", None)
+        cooldown_minutes = cfg.get("episode_cooldown_minutes", None)
+        cooldown_s_cfg = cfg.get("episode_cooldown_s", None)
+        if duration_minutes is not None:
+            duration_s_to_send = float(duration_minutes) * 60.0
+        elif duration_s_cfg is not None:
+            duration_s_to_send = float(duration_s_cfg)
+        else:
+            duration_s_to_send = -1.0
+        if cooldown_minutes is not None:
+            cooldown_s_to_send = float(cooldown_minutes) * 60.0
+        elif cooldown_s_cfg is not None:
+            cooldown_s_to_send = float(cooldown_s_cfg)
+        else:
+            cooldown_s_to_send = -1.0
+        if duration_s_to_send > 0 or cooldown_s_to_send >= 0:
+            try:
+                self._stub.SetEpisodeTiming(
+                    robot_env_pb2.EpisodeTimingRequest(
+                        episode_duration_s=duration_s_to_send,
+                        episode_cooldown_s=cooldown_s_to_send,
+                    ),
+                    timeout=self._timeout,
+                )
+                self._logger.info(
+                    f"[RemoteEnv] Pushed episode timing to server: "
+                    f"duration_s={duration_s_to_send}, "
+                    f"cooldown_s={cooldown_s_to_send}"
+                )
+            except grpc.RpcError as exc:
+                self._logger.warning(
+                    f"[RemoteEnv] Failed to push episode timing: {exc}"
+                )
 
         # Sync the initial task description to the server so that the
         # server-side YAMEnv starts with the same instruction as the training
@@ -442,6 +484,19 @@ class RemoteEnv(gym.Env):
         if obs_list:
             self.last_obs = obs_list[-1]
 
+        # Decode intermediate reward frames sent by the server for TOPReward.
+        self._last_reward_frames = []
+        if resp.reward_frames:
+            import cv2
+
+            for jpeg_bytes in resp.reward_frames:
+                buf = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+                bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                if bgr is not None:
+                    self._last_reward_frames.append(
+                        cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    )
+
         return (
             obs_list,
             chunk_rewards,
@@ -456,6 +511,28 @@ class RemoteEnv(gym.Env):
         except grpc.RpcError:
             pass
         self._channel.close()
+
+    def push_status_info(
+        self,
+        values: Optional[dict] = None,
+        text: str = "",
+    ) -> None:
+        """Push status key-values (e.g. TOPReward score) to the desktop server.
+
+        Values show up in the desktop SBS prompt so the operator can see the
+        latest training-side metrics before approving each chunk. Silently
+        ignored if the server is unreachable; status display is best-effort.
+        """
+        try:
+            self._stub.PushStatusInfo(
+                robot_env_pb2.StatusInfoRequest(
+                    values={k: float(v) for k, v in (values or {}).items()},
+                    text=str(text or ""),
+                ),
+                timeout=self._timeout,
+            )
+        except grpc.RpcError:
+            pass
 
     # ------------------------------------------------------------------
     # Metrics (mirrors YAMEnv)

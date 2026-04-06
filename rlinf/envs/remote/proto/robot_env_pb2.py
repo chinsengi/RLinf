@@ -24,29 +24,37 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\'rlinf/envs/remote/proto/robot_env.proto\x12\trobot_env\"\x07\n\x05\x45mpty\"*\n\x0cResetRequest\x12\x11\n\x04seed\x18\x01 \x01(\x05H\x00\x88\x01\x01\x42\x07\n\x05_seed\"2\n\x16TaskDescriptionRequest\x12\x18\n\x10task_description\x18\x01 \x01(\t\"\xcf\x01\n\x0bObservation\x12\x0e\n\x06states\x18\x01 \x01(\x0c\x12\x13\n\x0bstate_shape\x18\x02 \x03(\x05\x12\x12\n\nmain_image\x18\x03 \x01(\x0c\x12\x12\n\nimg_height\x18\x04 \x01(\x05\x12\x11\n\timg_width\x18\x05 \x01(\x05\x12\x15\n\ris_compressed\x18\x06 \x01(\x08\x12\x18\n\x10task_description\x18\x07 \x01(\t\x12\x14\n\x0cwrist_images\x18\x08 \x03(\x0c\x12\x19\n\x11\x65xtra_view_images\x18\t \x03(\x0c\"\xbb\x02\n\x0eSpacesResponse\x12\x11\n\tstate_dim\x18\x01 \x01(\x05\x12\x12\n\naction_dim\x18\x02 \x01(\x05\x12\x12\n\naction_low\x18\x03 \x01(\x02\x12\x13\n\x0b\x61\x63tion_high\x18\x04 \x01(\x02\x12\x12\n\nimg_height\x18\x05 \x01(\x05\x12\x11\n\timg_width\x18\x06 \x01(\x05\x12\x14\n\x0cimg_channels\x18\x07 \x01(\x05\x12\x19\n\x11max_episode_steps\x18\x08 \x01(\x05\x12\x17\n\x0f\x63ontrol_rate_hz\x18\t \x01(\x02\x12\x12\n\nauto_reset\x18\n \x01(\x08\x12\x1b\n\x13ignore_terminations\x18\x0b \x01(\x08\x12\x18\n\x10num_wrist_images\x18\x0c \x01(\x05\x12\x1d\n\x15num_extra_view_images\x18\r \x01(\x05\"p\n\nStepResult\x12+\n\x0bobservation\x18\x01 \x01(\x0b\x32\x16.robot_env.Observation\x12\x0e\n\x06reward\x18\x02 \x01(\x02\x12\x12\n\nterminated\x18\x03 \x01(\x08\x12\x11\n\ttruncated\x18\x04 \x01(\x08\"]\n\x10\x43hunkStepRequest\x12\x0f\n\x07\x61\x63tions\x18\x01 \x01(\x0c\x12\x10\n\x08num_envs\x18\x02 \x01(\x05\x12\x12\n\nchunk_size\x18\x03 \x01(\x05\x12\x12\n\naction_dim\x18\x04 \x01(\x05\"@\n\x11\x43hunkStepResponse\x12+\n\x0cstep_results\x18\x01 \x03(\x0b\x32\x15.robot_env.StepResult2\xbc\x03\n\x0fRobotEnvService\x12\x38\n\tGetSpaces\x12\x10.robot_env.Empty\x1a\x19.robot_env.SpacesResponse\x12:\n\x0eGetObservation\x12\x10.robot_env.Empty\x1a\x16.robot_env.Observation\x12\x38\n\x05Reset\x12\x17.robot_env.ResetRequest\x1a\x16.robot_env.Observation\x12\x46\n\tChunkStep\x12\x1b.robot_env.ChunkStepRequest\x1a\x1c.robot_env.ChunkStepResponse\x12I\n\x12SetTaskDescription\x12!.robot_env.TaskDescriptionRequest\x1a\x10.robot_env.Empty\x12\x39\n\x13\x45nterZeroTorqueMode\x12\x10.robot_env.Empty\x1a\x10.robot_env.Empty\x12+\n\x05\x43lose\x12\x10.robot_env.Empty\x1a\x10.robot_env.Emptyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\'rlinf/envs/remote/proto/robot_env.proto\x12\trobot_env\"\x07\n\x05\x45mpty\"*\n\x0cResetRequest\x12\x11\n\x04seed\x18\x01 \x01(\x05H\x00\x88\x01\x01\x42\x07\n\x05_seed\"2\n\x16TaskDescriptionRequest\x12\x18\n\x10task_description\x18\x01 \x01(\t\"N\n\x14\x45pisodeTimingRequest\x12\x1a\n\x12\x65pisode_duration_s\x18\x01 \x01(\x02\x12\x1a\n\x12\x65pisode_cooldown_s\x18\x02 \x01(\x02\"\x8a\x01\n\x11StatusInfoRequest\x12\x38\n\x06values\x18\x01 \x03(\x0b\x32(.robot_env.StatusInfoRequest.ValuesEntry\x12\x0c\n\x04text\x18\x02 \x01(\t\x1a-\n\x0bValuesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x02:\x02\x38\x01\"\xcf\x01\n\x0bObservation\x12\x0e\n\x06states\x18\x01 \x01(\x0c\x12\x13\n\x0bstate_shape\x18\x02 \x03(\x05\x12\x12\n\nmain_image\x18\x03 \x01(\x0c\x12\x12\n\nimg_height\x18\x04 \x01(\x05\x12\x11\n\timg_width\x18\x05 \x01(\x05\x12\x15\n\ris_compressed\x18\x06 \x01(\x08\x12\x18\n\x10task_description\x18\x07 \x01(\t\x12\x14\n\x0cwrist_images\x18\x08 \x03(\x0c\x12\x19\n\x11\x65xtra_view_images\x18\t \x03(\x0c\"\xbb\x02\n\x0eSpacesResponse\x12\x11\n\tstate_dim\x18\x01 \x01(\x05\x12\x12\n\naction_dim\x18\x02 \x01(\x05\x12\x12\n\naction_low\x18\x03 \x01(\x02\x12\x13\n\x0b\x61\x63tion_high\x18\x04 \x01(\x02\x12\x12\n\nimg_height\x18\x05 \x01(\x05\x12\x11\n\timg_width\x18\x06 \x01(\x05\x12\x14\n\x0cimg_channels\x18\x07 \x01(\x05\x12\x19\n\x11max_episode_steps\x18\x08 \x01(\x05\x12\x17\n\x0f\x63ontrol_rate_hz\x18\t \x01(\x02\x12\x12\n\nauto_reset\x18\n \x01(\x08\x12\x1b\n\x13ignore_terminations\x18\x0b \x01(\x08\x12\x18\n\x10num_wrist_images\x18\x0c \x01(\x05\x12\x1d\n\x15num_extra_view_images\x18\r \x01(\x05\"p\n\nStepResult\x12+\n\x0bobservation\x18\x01 \x01(\x0b\x32\x16.robot_env.Observation\x12\x0e\n\x06reward\x18\x02 \x01(\x02\x12\x12\n\nterminated\x18\x03 \x01(\x08\x12\x11\n\ttruncated\x18\x04 \x01(\x08\"]\n\x10\x43hunkStepRequest\x12\x0f\n\x07\x61\x63tions\x18\x01 \x01(\x0c\x12\x10\n\x08num_envs\x18\x02 \x01(\x05\x12\x12\n\nchunk_size\x18\x03 \x01(\x05\x12\x12\n\naction_dim\x18\x04 \x01(\x05\"W\n\x11\x43hunkStepResponse\x12+\n\x0cstep_results\x18\x01 \x03(\x0b\x32\x15.robot_env.StepResult\x12\x15\n\rreward_frames\x18\x02 \x03(\x0c\x32\xc5\x04\n\x0fRobotEnvService\x12\x38\n\tGetSpaces\x12\x10.robot_env.Empty\x1a\x19.robot_env.SpacesResponse\x12:\n\x0eGetObservation\x12\x10.robot_env.Empty\x1a\x16.robot_env.Observation\x12\x38\n\x05Reset\x12\x17.robot_env.ResetRequest\x1a\x16.robot_env.Observation\x12\x46\n\tChunkStep\x12\x1b.robot_env.ChunkStepRequest\x1a\x1c.robot_env.ChunkStepResponse\x12I\n\x12SetTaskDescription\x12!.robot_env.TaskDescriptionRequest\x1a\x10.robot_env.Empty\x12\x39\n\x13\x45nterZeroTorqueMode\x12\x10.robot_env.Empty\x1a\x10.robot_env.Empty\x12\x45\n\x10SetEpisodeTiming\x12\x1f.robot_env.EpisodeTimingRequest\x1a\x10.robot_env.Empty\x12@\n\x0ePushStatusInfo\x12\x1c.robot_env.StatusInfoRequest\x1a\x10.robot_env.Empty\x12+\n\x05\x43lose\x12\x10.robot_env.Empty\x1a\x10.robot_env.Emptyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'rlinf.envs.remote.proto.robot_env_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
+  _globals['_STATUSINFOREQUEST_VALUESENTRY']._loaded_options = None
+  _globals['_STATUSINFOREQUEST_VALUESENTRY']._serialized_options = b'8\001'
   _globals['_EMPTY']._serialized_start=54
   _globals['_EMPTY']._serialized_end=61
   _globals['_RESETREQUEST']._serialized_start=63
   _globals['_RESETREQUEST']._serialized_end=105
   _globals['_TASKDESCRIPTIONREQUEST']._serialized_start=107
   _globals['_TASKDESCRIPTIONREQUEST']._serialized_end=157
-  _globals['_OBSERVATION']._serialized_start=160
-  _globals['_OBSERVATION']._serialized_end=367
-  _globals['_SPACESRESPONSE']._serialized_start=370
-  _globals['_SPACESRESPONSE']._serialized_end=685
-  _globals['_STEPRESULT']._serialized_start=687
-  _globals['_STEPRESULT']._serialized_end=799
-  _globals['_CHUNKSTEPREQUEST']._serialized_start=801
-  _globals['_CHUNKSTEPREQUEST']._serialized_end=894
-  _globals['_CHUNKSTEPRESPONSE']._serialized_start=896
-  _globals['_CHUNKSTEPRESPONSE']._serialized_end=960
-  _globals['_ROBOTENVSERVICE']._serialized_start=963
-  _globals['_ROBOTENVSERVICE']._serialized_end=1407
+  _globals['_EPISODETIMINGREQUEST']._serialized_start=159
+  _globals['_EPISODETIMINGREQUEST']._serialized_end=237
+  _globals['_STATUSINFOREQUEST']._serialized_start=240
+  _globals['_STATUSINFOREQUEST']._serialized_end=378
+  _globals['_STATUSINFOREQUEST_VALUESENTRY']._serialized_start=333
+  _globals['_STATUSINFOREQUEST_VALUESENTRY']._serialized_end=378
+  _globals['_OBSERVATION']._serialized_start=381
+  _globals['_OBSERVATION']._serialized_end=588
+  _globals['_SPACESRESPONSE']._serialized_start=591
+  _globals['_SPACESRESPONSE']._serialized_end=906
+  _globals['_STEPRESULT']._serialized_start=908
+  _globals['_STEPRESULT']._serialized_end=1020
+  _globals['_CHUNKSTEPREQUEST']._serialized_start=1022
+  _globals['_CHUNKSTEPREQUEST']._serialized_end=1115
+  _globals['_CHUNKSTEPRESPONSE']._serialized_start=1117
+  _globals['_CHUNKSTEPRESPONSE']._serialized_end=1204
+  _globals['_ROBOTENVSERVICE']._serialized_start=1207
+  _globals['_ROBOTENVSERVICE']._serialized_end=1788
 # @@protoc_insertion_point(module_scope)

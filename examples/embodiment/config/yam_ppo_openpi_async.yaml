@@ -129,7 +129,7 @@ algorithm:
 env:
   # Desktop-side hardware timer: how often the robot should return to startup
   # home and rest. This does NOT define the training rollout horizon.
-  return_home_minutes: 2
+  return_home_minutes: 20
   # Training-side rollout horizon in action chunks. With
   # actor.model.num_action_chunks=30, two chunks means 60 low-level steps.
   rollout_horizon_chunks: 2
@@ -160,6 +160,11 @@ env:
     rollout_horizon_steps: 60
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
+
+    action_chunk_smoothing:
+      enabled: False
+      method: ema
+      alpha: 0.75
     # Do not return home when a new rollout epoch starts.
     reset_on_rollout_epoch: False
     # Keep training epoch boundaries purely for bookkeeping. Real robot
@@ -279,11 +284,7 @@ actor:
       reduce_dtype: ${actor.model.precision}
       buffer_dtype: ${actor.model.precision}
 
-# reward section is metadata only when use_reward_model: False.
-# TOPReward is computed inline by VLMPlannerWorker (see vlm_planner.reward_scale above).
-# reward_scale here is NOT read by TOPReward — configure it under vlm_planner instead.
 reward:
-  use_reward_model: False
   reward_type: top_reward
 
 critic:

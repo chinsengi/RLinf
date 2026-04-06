@@ -27,6 +27,10 @@ from rlinf.data.embodied_io_struct import EnvOutput
 if TYPE_CHECKING:
     from rlinf.workers.vlm_planner.vlm_planner_worker import VLMPlannerWorker
 
+# Must stay in sync with
+# rlinf.workers.vlm_planner.vlm_planner_worker.NEW_TASK_PREFIX.
+NEW_TASK_PREFIX = "NEW_TASK:"
+
 
 @dataclass
 class _PendingTopReward:
@@ -163,7 +167,7 @@ class VLMPlannerClient:
             train_cfg.get("top_reward_enabled", False)
         )
         self._top_reward_max_frames: int = int(
-            train_cfg.get("top_reward_max_frames", 16)
+            train_cfg.get("top_reward_max_frames", 1000)
         )
         self._episode_frames: list[np.ndarray] = []
         self._prev_top_score: float = 0.0
@@ -245,6 +249,16 @@ class VLMPlannerClient:
         inner_env = self._get_inner_env(env_list, slot_id)
         if not new_subtask or not hasattr(inner_env, "task_description"):
             return False
+
+        if new_subtask.startswith(NEW_TASK_PREFIX):
+            new_task_name = new_subtask[len(NEW_TASK_PREFIX) :].strip()
+            if not new_task_name:
+                return False
+            self._initial_task_descriptions[slot_id] = new_task_name
+            new_subtask = new_task_name
+            self._log_info(
+                f"[EnvWorker] Main task rotated for slot {slot_id}: '{new_task_name}'"
+            )
 
         inner_env.task_description = new_subtask
         if self._top_reward_enabled:
@@ -415,9 +429,8 @@ class VLMPlannerClient:
 
         new_subtask = self.request_subtask_sync(slot_id, env_output.obs)
         if self.apply_subtask_update(slot_id, new_subtask, env_list):
-            self.sync_subtask_into_env_output(
-                slot_id, env_output, new_subtask, env_list
-            )
+            task_desc = self.get_current_task_description(slot_id, env_list)
+            self.sync_subtask_into_env_output(slot_id, env_output, task_desc, env_list)
             self.reset_subtask_update_state()
             self._seed_top_reward_baseline_sync(slot_id, env_list, env_output.obs)
         return env_output
@@ -500,13 +513,24 @@ class VLMPlannerClient:
             return env_output
 
         with self._worker_timer("top_reward"):
-            main_images = env_output.obs.get("main_images", None)
-            if main_images is not None:
-                if isinstance(main_images, torch.Tensor):
-                    frame = main_images[0].cpu().numpy()
-                else:
-                    frame = np.asarray(main_images[0])
-                self._episode_frames.append(frame)
+            # Collect lossless reward frames captured by the server during
+            # chunk execution.  When present, the server already includes
+            # the final-step image as the last element, so we skip the
+            # JPEG-compressed obs to avoid feeding lossy images to the VLM.
+            env = env_list[slot_id]
+            reward_frames = getattr(env, "_last_reward_frames", [])
+            if reward_frames:
+                for rf in reward_frames:
+                    self._episode_frames.append(np.asarray(rf))
+            else:
+                # Fallback: no lossless frames available — use obs image.
+                main_images = env_output.obs.get("main_images", None)
+                if main_images is not None:
+                    if isinstance(main_images, torch.Tensor):
+                        frame = main_images[0].cpu().numpy()
+                    else:
+                        frame = np.asarray(main_images[0])
+                    self._episode_frames.append(frame)
 
             if len(self._episode_frames) > self._top_reward_max_frames:
                 self._episode_frames = self._episode_frames[
@@ -527,8 +551,24 @@ class VLMPlannerClient:
         )
         return env_output
 
+    def _push_top_reward_to_env(self, env: Any, score_t: float, reward: float) -> None:
+        push = getattr(env, "push_status_info", None)
+        if callable(push):
+            try:
+                push(
+                    values={
+                        "top_reward_score": float(score_t),
+                        "top_reward_delta": float(reward),
+                    }
+                )
+            except Exception:
+                pass
+
     def apply_resolved_top_reward(
-        self, pending: _PendingTopReward, score_t: float
+        self,
+        pending: _PendingTopReward,
+        score_t: float,
+        env: Any = None,
     ) -> None:
         if self._top_reward_has_prev_score:
             reward = float(score_t) - self._prev_top_score
@@ -539,15 +579,20 @@ class VLMPlannerClient:
         self._recent_top_deltas.append(reward)
         if pending.env_output.rewards is not None:
             pending.env_output.rewards[:, -1] = reward
+        if env is not None:
+            self._push_top_reward_to_env(env, score_t, reward)
         if pending.done_on_step:
             self.reset_top_reward_state()
 
-    def resolve_pending_top_reward_sync(self, slot_id: int) -> None:
+    def resolve_pending_top_reward_sync(
+        self, slot_id: int, env_list: list[Any] | None = None
+    ) -> None:
         pending = self._pending_top_rewards.pop(slot_id, None)
         if pending is None:
             return
         score_t = ray.get(pending.score_ref)
-        self.apply_resolved_top_reward(pending, score_t)
+        env = env_list[slot_id] if env_list is not None else None
+        self.apply_resolved_top_reward(pending, score_t, env=env)
         if pending.done_on_step:
             self._episode_done_waiting_for_top_reward_reset[slot_id] = False
 
@@ -561,13 +606,22 @@ class VLMPlannerClient:
             return env_output
 
         with self._worker_timer("top_reward"):
-            main_images = env_output.obs.get("main_images", None)
-            if main_images is not None:
-                if isinstance(main_images, torch.Tensor):
-                    frame = main_images[0].cpu().numpy()
-                else:
-                    frame = np.asarray(main_images[0])
-                self._episode_frames.append(frame)
+            # Collect lossless reward frames from the server (includes
+            # the final-step image when available).
+            env = env_list[slot_id]
+            reward_frames = getattr(env, "_last_reward_frames", [])
+            if reward_frames:
+                for rf in reward_frames:
+                    self._episode_frames.append(np.asarray(rf))
+            else:
+                # Fallback: no lossless frames — use obs image.
+                main_images = env_output.obs.get("main_images", None)
+                if main_images is not None:
+                    if isinstance(main_images, torch.Tensor):
+                        frame = main_images[0].cpu().numpy()
+                    else:
+                        frame = np.asarray(main_images[0])
+                    self._episode_frames.append(frame)
 
             if len(self._episode_frames) > self._top_reward_max_frames:
                 self._episode_frames = self._episode_frames[
@@ -593,6 +647,8 @@ class VLMPlannerClient:
         self._log_info(
             f"[EnvWorker] TOPReward: score={score_t:.4f}, delta={reward:.4f}"
         )
+        if 0 <= slot_id < len(env_list):
+            self._push_top_reward_to_env(env_list[slot_id], score_t, reward)
         return env_output
 
     def on_env_step(
@@ -615,14 +671,15 @@ class VLMPlannerClient:
     def resolve_pending_vlm_results_sync(
         self, slot_id: int, env_list: list[Any]
     ) -> None:
-        self.resolve_pending_top_reward_sync(slot_id)
+        self.resolve_pending_top_reward_sync(slot_id, env_list)
         self.resolve_pending_subtask_sync(slot_id, env_list)
 
     async def resolve_pending_async(self, slot_id: int, env_list: list[Any]) -> None:
         pending_top_reward = self._pending_top_rewards.pop(slot_id, None)
         if pending_top_reward is not None:
             score_t = await pending_top_reward.score_ref
-            self.apply_resolved_top_reward(pending_top_reward, score_t)
+            env = env_list[slot_id] if 0 <= slot_id < len(env_list) else None
+            self.apply_resolved_top_reward(pending_top_reward, score_t, env=env)
             if pending_top_reward.done_on_step:
                 self._episode_done_waiting_for_top_reward_reset[slot_id] = False
 

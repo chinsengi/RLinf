@@ -233,6 +233,12 @@ class YAMEnv(gym.Env):
         # Mutable task description — can be updated mid-episode by a VLM planner.
         self._task_description: str = str(cfg.get("task_description", ""))
 
+        # Interval (in low-level steps) at which chunk_step captures
+        # intermediate camera frames for TOPReward scoring.  0 = disabled.
+        self._reward_frame_interval: int = int(cfg.get("reward_frame_interval", 0))
+        # Populated by chunk_step; read by the RobotServer after each chunk.
+        self._last_chunk_reward_frames: list[np.ndarray] = []
+
         # Episode tracking
         self._is_start = True
 
@@ -755,6 +761,8 @@ class YAMEnv(gym.Env):
         raw_chunk_terminations = []
         raw_chunk_truncations = []
         last_idx = chunk_size - 1
+        reward_interval = self._reward_frame_interval
+        self._last_chunk_reward_frames = []
 
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
@@ -770,6 +778,20 @@ class YAMEnv(gym.Env):
                 step_reward, terminations, truncations, infos = self._step_lightweight(
                     actions
                 )
+
+            # Capture an intermediate camera frame for TOPReward scoring.
+            # The last step already has a full obs, so skip it here.
+            if (
+                reward_interval > 0
+                and i != last_idx
+                and i % reward_interval == 0
+                and not self._is_dummy
+                and not (np.any(terminations) or np.any(truncations))
+            ):
+                raw_obs = self._robot_env.get_obs()
+                img = self._extract_main_image(raw_obs)
+                if img is not None:
+                    self._last_chunk_reward_frames.append(img)
 
             infos_list.append(infos)
             raw_chunk_rewards.append(step_reward)
@@ -1064,6 +1086,18 @@ class YAMEnv(gym.Env):
             if image is not None:
                 camera_images[cam_key] = self._normalize_image(image)
         return camera_images
+
+    def _extract_main_image(self, raw_obs: dict) -> np.ndarray | None:
+        """Return the main camera image from a raw observation, or None."""
+        camera_images = self._extract_camera_images(raw_obs)
+        img = (
+            camera_images.get(self._main_camera_name)
+            if self._main_camera_name is not None
+            else None
+        )
+        if img is None and camera_images:
+            img = next(iter(camera_images.values()))
+        return img
 
     def _wrap_obs(self, raw_obs: dict) -> dict:
         """Convert raw yam_realtime observation dict to RLinf-compatible format.
