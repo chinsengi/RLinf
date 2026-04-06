@@ -339,7 +339,9 @@ kill_port_holders() {
 cleanup() {
     if [ "$CLEANING_UP" = true ]; then return; fi
     CLEANING_UP=true
-    echo "Shutting down..."
+    # Ignore further Ctrl+C so the user cannot interrupt return-to-home.
+    trap '' INT
+    echo "Shutting down (Ctrl+C disabled until robot is home)..."
 
     # Stop the RobotServer first so it can return the arms home while the
     # follower servers are still alive.
@@ -351,6 +353,11 @@ cleanup() {
             fi
             sleep 1
         done
+        # Force-kill only if it is still alive after the grace period.
+        if kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "RobotServer still alive after ${SERVER_SHUTDOWN_WAIT_S}s — force killing."
+            kill -9 "$SERVER_PID" 2>/dev/null || true
+        fi
     fi
 
     [ -n "${FOLLOWER_PID:-}" ] && kill "$FOLLOWER_PID" 2>/dev/null || true
@@ -358,7 +365,6 @@ cleanup() {
 
     sleep 2
 
-    [ -n "${SERVER_PID:-}" ] && kill -9 "$SERVER_PID" 2>/dev/null || true
     [ -n "${FOLLOWER_PID:-}" ] && kill -9 "$FOLLOWER_PID" 2>/dev/null || true
     [ -n "${TUNNEL_PID:-}" ] && kill -9 "$TUNNEL_PID" 2>/dev/null || true
 
