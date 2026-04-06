@@ -227,6 +227,19 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
         self._env_lock = threading.Lock()
+        # SBS preview: save reward frames locally so the user can inspect
+        # exactly what the VLM receives.
+        self._sbs_preview_dir: str | None = None
+        if self._step_by_step:
+            import tempfile
+
+            self._sbs_preview_dir = os.path.join(
+                tempfile.gettempdir(), "rlinf_sbs_reward_frames"
+            )
+            os.makedirs(self._sbs_preview_dir, exist_ok=True)
+            logger.info(
+                f"[SBS] Reward frame preview directory: {self._sbs_preview_dir}"
+            )
 
     def _wait_for_enter_or_shutdown(self) -> bool:
         """Block until the user presses Enter or stop_event is set.
@@ -286,6 +299,20 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             flush=True,
         )
 
+    def _save_reward_frames_for_preview(
+        self, frames: list[np.ndarray], chunk_num: int
+    ) -> None:
+        """Save reward frames as PNGs under the SBS preview directory."""
+        if not self._sbs_preview_dir:
+            return
+        import cv2
+
+        chunk_dir = os.path.join(self._sbs_preview_dir, f"chunk_{chunk_num:04d}")
+        os.makedirs(chunk_dir, exist_ok=True)
+        for i, frame in enumerate(frames):
+            path = os.path.join(chunk_dir, f"frame_{i:02d}.png")
+            cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
     def _format_sbs_status(self) -> str:
         """Return a one-line status summary for the SBS prompt."""
         # Episode wall-clock timing from the wrapped env.
@@ -301,9 +328,9 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             m, s = divmod(int(sec), 60)
             return f"{m}:{s:02d}"
 
-        chunk_num = self._chunk_count
+        next_chunk = self._chunk_count + 1
         parts = [
-            f"chunk#{chunk_num}",
+            f"chunk#{next_chunk}",
             f"ep_time={_fmt(elapsed_s)}/{_fmt(duration_s)} (left={_fmt(remaining_s)})",
         ]
         # Append client-pushed values (TOPReward score/delta, lr, ...).
@@ -319,7 +346,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # Skip chunk#1 — subtask is already set before the first chunk
         # arrives, so comparing against base task would be a false positive.
         current_subtask = self._read_env_task_description()
-        if self._chunk_count > 1 and current_subtask != self._prev_subtask:
+        if self._chunk_count > 0 and current_subtask != self._prev_subtask:
             parts.append("(baseline reset)")
         self._prev_subtask = current_subtask
         if self._client_status_text:
@@ -516,6 +543,14 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
     def ChunkStep(self, request, context):
         self._touch()
+        # If shutdown is in progress, return idle immediately so the gRPC
+        # thread does not block on SBS prompts or env operations.
+        if self._stop_event.is_set():
+            with self._env_lock:
+                obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
+            return self._build_idle_chunk_response(
+                obs, request.chunk_size, truncated=True
+            )
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
         )
@@ -549,9 +584,10 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                     obs, request.chunk_size, truncated=True
                 )
 
-        if self._step_by_step:
-            next_chunk = self._chunk_count + 1
-            print(f"[SBS] Press Enter to execute chunk#{next_chunk}...", flush=True)
+        if self._step_by_step and not self._stop_event.is_set():
+            print(f"[SBS] {self._format_sbs_status()}", flush=True)
+            print(f"[SBS] {self._format_chunk_task_context()}", flush=True)
+            print("[SBS] Press Enter to execute this chunk...", flush=True)
             if not self._wait_for_enter_or_shutdown():
                 logger.info("[SBS] Chunk aborted by shutdown.")
                 with self._env_lock:
@@ -579,10 +615,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 infos_list,
             ) = self._env.chunk_step(actions)
         self._chunk_count += 1
-
-        if self._step_by_step:
-            print(f"[SBS] {self._format_sbs_status()}", flush=True)
-            print(f"[SBS] {self._format_chunk_task_context()}", flush=True)
 
         step_results = []
         chunk_size = request.chunk_size
@@ -625,19 +657,35 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 f"truncated={[bool(chunk_truncations[0, i]) for i in range(chunk_size)]}"
             )
 
-        # JPEG-compress intermediate reward frames captured by YAMEnv.
+        # Encode reward frames as lossless PNG so that TOPReward sees
+        # full-quality images (JPEG artifacts degrade VLM scores).
+        # Includes both intermediate frames (every N steps) AND the
+        # final-step observation so the client can skip the lossy JPEG obs.
         reward_frames_bytes = []
         raw_reward_frames = getattr(self._env, "_last_chunk_reward_frames", [])
+        # Append the final-step image from the wrapped observation.
+        if last_obs is not None:
+            final_img = last_obs.get("main_images")
+            if final_img is not None:
+                final_img = np.asarray(final_img)
+                if final_img.ndim == 4:
+                    final_img = final_img[0]
+                raw_reward_frames = list(raw_reward_frames) + [final_img]
         if raw_reward_frames:
             import cv2
 
             for frame in raw_reward_frames:
                 _, buf = cv2.imencode(
-                    ".jpg",
+                    ".png",
                     cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
-                    [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality],
                 )
                 reward_frames_bytes.append(bytes(buf))
+
+            # Save reward frames locally for preview when SBS is active.
+            if self._step_by_step:
+                self._save_reward_frames_for_preview(
+                    raw_reward_frames, self._chunk_count
+                )
 
         return robot_env_pb2.ChunkStepResponse(
             step_results=step_results,

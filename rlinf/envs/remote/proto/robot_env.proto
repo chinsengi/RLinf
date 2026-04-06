@@ -123,7 +123,7 @@ message ChunkStepRequest {
 
 message ChunkStepResponse {
   repeated StepResult step_results = 1;
-  // Intermediate JPEG-compressed frames captured every N steps during the
-  // chunk, used for TOPReward scoring.  Empty when reward_frame_interval is 0.
+  // Intermediate PNG-encoded (lossless) frames captured every N steps during
+  // the chunk, used for TOPReward scoring.  Empty when reward_frame_interval=0.
   repeated bytes reward_frames = 2;
 }
