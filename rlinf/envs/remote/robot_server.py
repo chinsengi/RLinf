@@ -316,10 +316,12 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             parts.append("top_reward_delta=+0.0000, top_reward_score=--")
         # Detect subtask change: the displayed delta/score may use a
         # freshly seeded baseline, so annotate the discontinuity.
+        # Skip chunk#1 — subtask is already set before the first chunk
+        # arrives, so comparing against base task would be a false positive.
         current_subtask = self._read_env_task_description()
-        if current_subtask and current_subtask != self._prev_subtask:
+        if self._chunk_count > 0 and current_subtask != self._prev_subtask:
             parts.append("(baseline reset)")
-            self._prev_subtask = current_subtask
+        self._prev_subtask = current_subtask
         if self._client_status_text:
             parts.append(self._client_status_text)
         return " | ".join(parts)
