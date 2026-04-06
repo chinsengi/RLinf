@@ -221,6 +221,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._client_status_values: dict[str, float] = {}
         self._client_status_text: str = ""
         self._client_status_updated_at: float = 0.0
+        # Track subtask changes to annotate SBS when baseline resets.
+        self._prev_subtask: str = self._base_task_description
         # Protects all env operations so that safe_recover() and gRPC
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
@@ -305,9 +307,19 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             f"ep_time={_fmt(elapsed_s)}/{_fmt(duration_s)} (left={_fmt(remaining_s)})",
         ]
         # Append client-pushed values (TOPReward score/delta, lr, ...).
+        # For chunk#1 (no values pushed yet), show delta=0 with score
+        # pending, since the first async reward hasn't resolved yet.
         if self._client_status_values:
             kv_strs = [f"{k}={v:+.4f}" for k, v in self._client_status_values.items()]
             parts.append(", ".join(kv_strs))
+        else:
+            parts.append("top_reward_delta=+0.0000, top_reward_score=--")
+        # Detect subtask change: the displayed delta/score may use a
+        # freshly seeded baseline, so annotate the discontinuity.
+        current_subtask = self._read_env_task_description()
+        if current_subtask and current_subtask != self._prev_subtask:
+            parts.append("(baseline reset)")
+            self._prev_subtask = current_subtask
         if self._client_status_text:
             parts.append(self._client_status_text)
         return " | ".join(parts)
