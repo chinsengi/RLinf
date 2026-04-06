@@ -303,16 +303,28 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
     def _save_reward_frames_for_preview(
         self, frames: list[np.ndarray], chunk_num: int
     ) -> None:
-        """Save reward frames as PNGs under the SBS preview directory."""
+        """Save reward frames as PNGs and an MP4 video for SBS preview."""
         if not self._sbs_preview_dir:
             return
         import cv2
 
         chunk_dir = os.path.join(self._sbs_preview_dir, f"chunk_{chunk_num:04d}")
         os.makedirs(chunk_dir, exist_ok=True)
+
+        # Save individual PNG frames.
         for i, frame in enumerate(frames):
             path = os.path.join(chunk_dir, f"frame_{i:02d}.png")
             cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+        # Synthesize an MP4 video from the frames (2 fps matches VLM config).
+        if len(frames) >= 2:
+            h, w = frames[0].shape[:2]
+            video_path = os.path.join(chunk_dir, "chunk.mp4")
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(video_path, fourcc, 2.0, (w, h))
+            for frame in frames:
+                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            writer.release()
 
     def _format_sbs_status(self) -> str:
         """Return a one-line status summary for the SBS prompt."""
