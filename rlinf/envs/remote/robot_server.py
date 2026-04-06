@@ -231,11 +231,12 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # exactly what the VLM receives.
         self._sbs_preview_dir: str | None = None
         if self._step_by_step:
-            import tempfile
-
-            self._sbs_preview_dir = os.path.join(
-                tempfile.gettempdir(), "rlinf_sbs_reward_frames"
+            # Place preview frames inside the project root so they are easy
+            # to browse from the IDE.
+            _project_root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             )
+            self._sbs_preview_dir = os.path.join(_project_root, "sbs_reward_frames")
             os.makedirs(self._sbs_preview_dir, exist_ok=True)
             logger.info(
                 f"[SBS] Reward frame preview directory: {self._sbs_preview_dir}"
