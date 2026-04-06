@@ -183,7 +183,49 @@ def _print_robot_state(env) -> None:
 
 
 class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
-    """gRPC servicer wrapping a YAMEnv instance."""
+    """gRPC servicer that exposes a ``YAMEnv`` to a remote ``RemoteEnv`` client.
+
+    The servicer runs on the robot desktop and translates gRPC RPCs into
+    ``YAMEnv`` calls (``reset``, ``chunk_step``, etc.).  A ``RemoteEnv``
+    client on a Beaker GPU node connects through a reverse SSH tunnel.
+
+    Lifecycle:
+        1. Client calls ``GetSpaces`` / ``Reset`` to start an episode.
+        2. Client sends ``ChunkStep`` RPCs with action chunks; the servicer
+           executes them on the robot, encodes observations (JPEG for images,
+           lossless PNG for reward frames), and streams results back.
+        3. Episode ends via ``Reset`` (normal) or via ``Close`` /
+           ``episode_timeout`` / ``safe_recover`` (recovery).
+        4. Recovery paths call ``_start_restart_flow_locked`` which returns
+           the robot home, optionally enters zero-torque, starts a cooldown
+           countdown, and resets session state.  The next ``Reset`` from the
+           client completes the restart via ``_finish_restart_if_ready_locked``.
+
+    Modes:
+        - **verbose** (``--verbose``): prints per-chunk info to the terminal.
+        - **step-by-step** (``--sbs``): implies verbose; pauses before each
+          chunk for user approval, saves cumulative TOPReward input video
+          (``topreward_input.mp4``), per-chunk PNG frames, and the
+          reconstructed prompt (``prompt.txt``) to ``sbs_reward_frames/``.
+        - **no-action** (``--no-action``, requires ``--sbs``): sends zero
+          actions instead of the policy output.
+
+    Thread safety:
+        All ``YAMEnv`` operations are guarded by ``_env_lock``.  The watchdog
+        (``safe_recover``) and episode timer (``episode_timeout``) acquire the
+        same lock, so they never race with in-flight gRPC handlers.
+
+    Args:
+        env: A ``YAMEnv`` (or dummy) instance.
+        compress: Whether to JPEG-compress camera images in observations.
+        jpeg_quality: JPEG quality (0-100) when ``compress`` is True.
+        verbose: Print per-chunk diagnostics.
+        step_by_step: Pause before each chunk and save reward frame previews.
+        no_action: Replace policy actions with zeros (requires ``step_by_step``).
+        request_shutdown: Callable invoked when the server should exit.
+        stop_event: ``threading.Event`` signalled on shutdown to unblock
+            blocking waits (SBS approval prompts, cooldown sleeps, etc.).
+    """
 
     def __init__(
         self,
@@ -210,6 +252,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._last_rpc_time: float = time.monotonic()
         self._client_connected: bool = False
         self._chunk_count: int = 0
+        self._episode_count: int = 0
         self._initial_task_description: str = self._read_env_task_description()
         self._episode_cooldown_s: float = float(
             getattr(self._env, "_episode_cooldown_s", 0.0)
@@ -227,6 +270,9 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
         self._env_lock = threading.Lock()
+        # Cumulative episode frames mirroring what TOPReward accumulates
+        # on the training side.  Used to write topreward_input.mp4 in SBS.
+        self._episode_reward_frames: list[np.ndarray] = []
         # SBS preview: save reward frames locally so the user can inspect
         # exactly what the VLM receives.
         self._sbs_preview_dir: str | None = None
@@ -320,28 +366,102 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
     def _save_reward_frames_for_preview(
         self, frames: list[np.ndarray], chunk_num: int
     ) -> None:
-        """Save reward frames as PNGs and an MP4 video for SBS preview."""
+        """Save the cumulative TOPReward input video, prompt, and per-chunk PNGs.
+
+        Each chunk's new frames are appended to ``_episode_reward_frames`` so
+        that the resulting ``topreward_input.mp4`` mirrors the full frame
+        history that ``VLMPlannerClient._episode_frames`` accumulates on the
+        Beaker side for each TOPReward scoring call.
+
+        A ``prompt.txt`` is written alongside the video containing the
+        reconstructed TOPReward prompt text and metadata so users can compare
+        with the official TOPReward implementation.
+        """
         if not self._sbs_preview_dir:
             return
         import cv2
 
-        chunk_dir = os.path.join(self._sbs_preview_dir, f"chunk_{chunk_num:04d}")
-        os.makedirs(chunk_dir, exist_ok=True)
+        self._episode_reward_frames.extend(frames)
 
-        # Save individual PNG frames.
+        ep_dir = os.path.join(
+            self._sbs_preview_dir, f"episode_{self._episode_count:04d}"
+        )
+        os.makedirs(ep_dir, exist_ok=True)
+
+        # Write the cumulative video that matches what TOPReward receives.
+        if len(self._episode_reward_frames) >= 2:
+            h, w = self._episode_reward_frames[0].shape[:2]
+            cumulative_path = os.path.join(ep_dir, "topreward_input.mp4")
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(cumulative_path, fourcc, 2.0, (w, h))
+            for frame in self._episode_reward_frames:
+                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            writer.release()
+
+        self._save_topreward_prompt(ep_dir, chunk_num, len(frames))
+
+        # Save per-chunk PNGs for detailed inspection.
+        chunk_dir = os.path.join(ep_dir, f"chunk_{chunk_num:04d}")
+        os.makedirs(chunk_dir, exist_ok=True)
         for i, frame in enumerate(frames):
             path = os.path.join(chunk_dir, f"frame_{i:02d}.png")
             cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
 
-        # Synthesize an MP4 video from the frames (2 fps matches VLM config).
-        if len(frames) >= 2:
-            h, w = frames[0].shape[:2]
-            video_path = os.path.join(chunk_dir, "chunk.mp4")
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(video_path, fourcc, 2.0, (w, h))
-            for frame in frames:
-                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-            writer.release()
+    # Matches _TOPREWARD_PROMPT_PREFIX in vlm_planner_worker.py and
+    # _PROMPT_PREFIX in rlinf/algorithms/rewards/top_reward/top_reward.py,
+    # which both mirror the official TOPReward/TOPReward prompt.
+    _TOPREWARD_PROMPT_PREFIX = (
+        "The above video shows a robot manipulation trajectory that "
+        "completes the following task: "
+    )
+
+    def _save_topreward_prompt(
+        self, ep_dir: str, chunk_num: int, new_frame_count: int
+    ) -> None:
+        """Write the reconstructed TOPReward prompt and metadata to disk.
+
+        The text mirrors what ``VLMPlannerWorker._prepare_top_reward_request``
+        assembles on the Beaker side (without the Qwen chat-template wrapper,
+        which only adds special tokens around the content).
+        """
+        instruction = self._read_env_task_description()
+        num_frames = len(self._episode_reward_frames)
+        fps = 2.0
+
+        prompt_text = self._TOPREWARD_PROMPT_PREFIX
+        instruction_suffix = (
+            f"{instruction} Decide whether the above statement is True "
+            "or not. The answer is: True"
+        )
+        full_user_text = f"{prompt_text}{instruction_suffix}"
+
+        prompt_path = os.path.join(ep_dir, "prompt.txt")
+        with open(prompt_path, "w") as f:
+            f.write(
+                f"TOPReward Prompt  (chunk {chunk_num}, "
+                f"episode {self._episode_count})\n"
+            )
+            f.write("=" * 72 + "\n\n")
+            f.write(f"Instruction : {instruction}\n")
+            f.write(f"Num frames  : {num_frames}  "
+                    f"(+{new_frame_count} this chunk)\n")
+            f.write(f"FPS         : {fps}\n\n")
+            f.write("--- user message content (video + text) ---\n\n")
+            f.write(f"[VIDEO: {num_frames} RGB frames at {fps} fps]\n\n")
+            f.write(f"{full_user_text}\n\n")
+            f.write("--- label target (last token only) ---\n\n")
+            f.write(
+                'Only the final token of "True" is unmasked; '
+                "log P(True_token | everything_before) is the reward.\n\n"
+            )
+            f.write("--- comparison with official TOPReward ---\n\n")
+            f.write(
+                "Prompt prefix, instruction suffix, label masking, and\n"
+                "video input format are identical to the default path in\n"
+                "TOPReward/TOPReward (add_chat_template=false).\n"
+                "See: github.com/TOPReward/TOPReward/blob/main/"
+                "topreward/clients/qwen.py\n"
+            )
 
     def _format_sbs_status(self) -> str:
         """Return a one-line status summary for the SBS prompt."""
@@ -396,6 +516,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._client_status_values = {}
         self._client_status_text = ""
         self._client_status_updated_at = 0.0
+        self._episode_reward_frames = []
+        self._episode_count += 1
 
     def _get_current_raw_obs_locked(self) -> dict:
         """Return the latest raw observation without commanding the robot."""
@@ -543,6 +665,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
     def Reset(self, request, context):
         self._touch()
+        self._episode_reward_frames = []
         with self._env_lock:
             seed = request.seed if request.HasField("seed") else None
             if self._restart_required:
@@ -550,6 +673,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 if obs is None:
                     obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
             else:
+                self._episode_count += 1
                 obs, _ = self._env.reset(seed=seed)
         return _obs_to_proto(
             obs,
@@ -615,8 +739,11 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 )
 
         if self._step_by_step and not self._stop_event.is_set():
-            print(f"[SBS] {self._format_sbs_status()}", flush=True)
-            print(f"[SBS] {self._format_chunk_task_context()}", flush=True)
+            with self._env_lock:
+                sbs_status = self._format_sbs_status()
+                task_ctx = self._format_chunk_task_context()
+            print(f"[SBS] {sbs_status}", flush=True)
+            print(f"[SBS] {task_ctx}", flush=True)
             print("[SBS] Press Enter to execute this chunk...", flush=True)
             if not self._wait_for_enter_or_shutdown():
                 logger.info("[SBS] Chunk aborted by shutdown.")
@@ -711,7 +838,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 )
                 reward_frames_bytes.append(bytes(buf))
 
-            # Save reward frames locally for preview when SBS is active.
             if self._step_by_step:
                 self._save_reward_frames_for_preview(
                     raw_reward_frames, self._chunk_count
