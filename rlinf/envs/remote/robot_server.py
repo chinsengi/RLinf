@@ -210,7 +210,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._last_rpc_time: float = time.monotonic()
         self._client_connected: bool = False
         self._chunk_count: int = 0
-        self._base_task_description: str = self._read_env_task_description()
+        self._initial_task_description: str = self._read_env_task_description()
         self._episode_cooldown_s: float = float(
             getattr(self._env, "_episode_cooldown_s", 0.0)
         )
@@ -222,7 +222,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._client_status_text: str = ""
         self._client_status_updated_at: float = 0.0
         # Track subtask changes to annotate SBS when baseline resets.
-        self._prev_subtask: str = self._base_task_description
+        self._prev_subtask: str = self._initial_task_description
         # Protects all env operations so that safe_recover() and gRPC
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
@@ -237,10 +237,43 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             )
             self._sbs_preview_dir = os.path.join(_project_root, "sbs_reward_frames")
+            self._maybe_clean_preview_dir()
             os.makedirs(self._sbs_preview_dir, exist_ok=True)
             logger.info(
                 f"[SBS] Reward frame preview directory: {self._sbs_preview_dir}"
             )
+
+    def _maybe_clean_preview_dir(self) -> None:
+        """Prompt the user to delete old SBS preview frames on restart."""
+        if self._sbs_preview_dir is None:
+            return
+        if not os.path.isdir(self._sbs_preview_dir):
+            return
+        # Check if the directory has any content.
+        try:
+            entries = os.listdir(self._sbs_preview_dir)
+        except OSError:
+            return
+        if not entries:
+            return
+        print(
+            f"[SBS] Found existing reward frames in {self._sbs_preview_dir}/ "
+            f"({len(entries)} items).",
+            flush=True,
+        )
+        print("[SBS] Delete old frames? [Y/n] ", end="", flush=True)
+        try:
+            with open("/dev/tty", "r") as tty:
+                answer = tty.readline().strip().lower()
+        except OSError:
+            answer = input().strip().lower()
+        if answer in ("", "y", "yes"):
+            import shutil
+
+            shutil.rmtree(self._sbs_preview_dir)
+            print("[SBS] Old frames deleted.", flush=True)
+        else:
+            print("[SBS] Keeping old frames.", flush=True)
 
     def _wait_for_enter_or_shutdown(self) -> bool:
         """Block until the user presses Enter or stop_event is set.
@@ -272,25 +305,9 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         return str(task_description or "").strip()
 
     def _format_chunk_task_context(self) -> str:
-        """Return a compact terminal string for the live task/subtask state."""
+        """Return a compact terminal string showing the current task."""
         current_task = self._read_env_task_description()
-        if current_task and not self._base_task_description:
-            self._base_task_description = current_task
-
-        if self._base_task_description and current_task:
-            if current_task != self._base_task_description:
-                return (
-                    f'task="{self._base_task_description}" | subtask="{current_task}"'
-                )
-            return f'task="{current_task}"'
-
-        if current_task:
-            return f'task="{current_task}"'
-
-        if self._base_task_description:
-            return f'task="{self._base_task_description}"'
-
-        return 'task=""'
+        return f'task="{current_task}"' if current_task else 'task=""'
 
     def _print_chunk_task_context(self) -> None:
         """Print the current task/subtask context for each received chunk."""
@@ -708,9 +725,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
     def SetTaskDescription(self, request, context):
         self._touch()
         self._env.task_description = request.task_description
-        task_description = str(request.task_description or "").strip()
-        if task_description and not self._base_task_description:
-            self._base_task_description = task_description
         return robot_env_pb2.Empty()
 
     def EnterZeroTorqueMode(self, request, context):
