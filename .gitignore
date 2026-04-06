@@ -28,3 +28,4 @@ YAM/
 .pytest_cache/
 .ruff_cache/
 plans/
+sbs_reward_frames/

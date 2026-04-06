@@ -513,13 +513,24 @@ class VLMPlannerClient:
             return env_output
 
         with self._worker_timer("top_reward"):
-            main_images = env_output.obs.get("main_images", None)
-            if main_images is not None:
-                if isinstance(main_images, torch.Tensor):
-                    frame = main_images[0].cpu().numpy()
-                else:
-                    frame = np.asarray(main_images[0])
-                self._episode_frames.append(frame)
+            # Collect lossless reward frames captured by the server during
+            # chunk execution.  When present, the server already includes
+            # the final-step image as the last element, so we skip the
+            # JPEG-compressed obs to avoid feeding lossy images to the VLM.
+            env = env_list[slot_id]
+            reward_frames = getattr(env, "_last_reward_frames", [])
+            if reward_frames:
+                for rf in reward_frames:
+                    self._episode_frames.append(np.asarray(rf))
+            else:
+                # Fallback: no lossless frames available — use obs image.
+                main_images = env_output.obs.get("main_images", None)
+                if main_images is not None:
+                    if isinstance(main_images, torch.Tensor):
+                        frame = main_images[0].cpu().numpy()
+                    else:
+                        frame = np.asarray(main_images[0])
+                    self._episode_frames.append(frame)
 
             if len(self._episode_frames) > self._top_reward_max_frames:
                 self._episode_frames = self._episode_frames[
@@ -595,13 +606,22 @@ class VLMPlannerClient:
             return env_output
 
         with self._worker_timer("top_reward"):
-            main_images = env_output.obs.get("main_images", None)
-            if main_images is not None:
-                if isinstance(main_images, torch.Tensor):
-                    frame = main_images[0].cpu().numpy()
-                else:
-                    frame = np.asarray(main_images[0])
-                self._episode_frames.append(frame)
+            # Collect lossless reward frames from the server (includes
+            # the final-step image when available).
+            env = env_list[slot_id]
+            reward_frames = getattr(env, "_last_reward_frames", [])
+            if reward_frames:
+                for rf in reward_frames:
+                    self._episode_frames.append(np.asarray(rf))
+            else:
+                # Fallback: no lossless frames — use obs image.
+                main_images = env_output.obs.get("main_images", None)
+                if main_images is not None:
+                    if isinstance(main_images, torch.Tensor):
+                        frame = main_images[0].cpu().numpy()
+                    else:
+                        frame = np.asarray(main_images[0])
+                    self._episode_frames.append(frame)
 
             if len(self._episode_frames) > self._top_reward_max_frames:
                 self._episode_frames = self._episode_frames[

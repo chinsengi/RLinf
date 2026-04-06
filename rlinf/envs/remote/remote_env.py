@@ -259,6 +259,9 @@ class RemoteEnv(gym.Env):
         # Latest observation dict; read by EnvWorker._maybe_update_subtask()
         # to supply the VLM subtask planner with a current camera frame.
         self.last_obs: Optional[dict] = None
+        # Intermediate reward frames from the last chunk_step, decoded from
+        # JPEG.  Read by vlm_planner_client to feed TOPReward.
+        self._last_reward_frames: list[np.ndarray] = []
 
         # Push wall-clock episode timing from the training config so that the
         # desktop server timer can be adjusted without restarting the robot
@@ -480,6 +483,19 @@ class RemoteEnv(gym.Env):
         # Track latest obs for VLM subtask planner image context.
         if obs_list:
             self.last_obs = obs_list[-1]
+
+        # Decode intermediate reward frames sent by the server for TOPReward.
+        self._last_reward_frames = []
+        if resp.reward_frames:
+            import cv2
+
+            for jpeg_bytes in resp.reward_frames:
+                buf = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+                bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                if bgr is not None:
+                    self._last_reward_frames.append(
+                        cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    )
 
         return (
             obs_list,

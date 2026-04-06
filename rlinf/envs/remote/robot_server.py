@@ -25,6 +25,7 @@ SSH tunnel (Tailscale).
 
 import argparse
 import os
+import select
 import signal
 import sys
 import threading
@@ -191,21 +192,25 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         jpeg_quality: int = _JPEG_QUALITY,
         verbose: bool = False,
         step_by_step: bool = False,
+        no_action: bool = False,
         request_shutdown=None,
+        stop_event: threading.Event | None = None,
     ):
         self._env = env
         self._compress = compress
         self._jpeg_quality = jpeg_quality
         self._verbose = verbose or step_by_step
         self._step_by_step = step_by_step
+        self._no_action = no_action and step_by_step
         self._first_chunk_approved = not self._verbose
         self._request_shutdown = request_shutdown
+        self._stop_event = stop_event or threading.Event()
 
         # Track last client RPC time for disconnect detection.
         self._last_rpc_time: float = time.monotonic()
         self._client_connected: bool = False
         self._chunk_count: int = 0
-        self._base_task_description: str = self._read_env_task_description()
+        self._initial_task_description: str = self._read_env_task_description()
         self._episode_cooldown_s: float = float(
             getattr(self._env, "_episode_cooldown_s", 0.0)
         )
@@ -216,10 +221,83 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._client_status_values: dict[str, float] = {}
         self._client_status_text: str = ""
         self._client_status_updated_at: float = 0.0
+        # Track subtask changes to annotate SBS when baseline resets.
+        self._prev_subtask: str = self._initial_task_description
         # Protects all env operations so that safe_recover() and gRPC
         # handlers never touch the robot concurrently (the portal clients'
         # use_future flag is not thread-safe).
         self._env_lock = threading.Lock()
+        # SBS preview: save reward frames locally so the user can inspect
+        # exactly what the VLM receives.
+        self._sbs_preview_dir: str | None = None
+        if self._step_by_step:
+            # Place preview frames inside the project root so they are easy
+            # to browse from the IDE.
+            _project_root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            )
+            self._sbs_preview_dir = os.path.join(_project_root, "sbs_reward_frames")
+            self._maybe_clean_preview_dir()
+            os.makedirs(self._sbs_preview_dir, exist_ok=True)
+            logger.info(
+                f"[SBS] Reward frame preview directory: {self._sbs_preview_dir}"
+            )
+
+    def _maybe_clean_preview_dir(self) -> None:
+        """Prompt the user to delete old SBS preview frames on restart."""
+        if self._sbs_preview_dir is None:
+            return
+        if not os.path.isdir(self._sbs_preview_dir):
+            return
+        # Check if the directory has any content.
+        try:
+            entries = os.listdir(self._sbs_preview_dir)
+        except OSError:
+            return
+        if not entries:
+            return
+        print(
+            f"[SBS] Found existing reward frames in {self._sbs_preview_dir}/ "
+            f"({len(entries)} items).",
+            flush=True,
+        )
+        print("[SBS] Delete old frames? [Y/n] ", end="", flush=True)
+        try:
+            with open("/dev/tty", "r") as tty:
+                answer = tty.readline().strip().lower()
+        except OSError:
+            answer = input().strip().lower()
+        if answer in ("", "y", "yes"):
+            import shutil
+
+            shutil.rmtree(self._sbs_preview_dir)
+            print("[SBS] Old frames deleted.", flush=True)
+        else:
+            print("[SBS] Keeping old frames.", flush=True)
+
+    def _wait_for_enter_or_shutdown(self) -> bool:
+        """Block until the user presses Enter or stop_event is set.
+
+        Returns ``True`` if the user pressed Enter, ``False`` if interrupted
+        by the stop event (shutdown requested).
+        """
+        try:
+            with open("/dev/tty", "r") as tty:
+                fd = tty.fileno()
+                while not self._stop_event.is_set():
+                    ready, _, _ = select.select([fd], [], [], 0.5)
+                    if ready:
+                        tty.readline()
+                        return True
+                return False
+        except OSError:
+            # No /dev/tty (e.g. Docker without -it); fall back to stdin.
+            while not self._stop_event.is_set():
+                ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+                if ready:
+                    sys.stdin.readline()
+                    return True
+            return False
 
     def _read_env_task_description(self) -> str:
         """Return the current task/subtask string from the wrapped env."""
@@ -227,25 +305,9 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         return str(task_description or "").strip()
 
     def _format_chunk_task_context(self) -> str:
-        """Return a compact terminal string for the live task/subtask state."""
+        """Return a compact terminal string showing the current task."""
         current_task = self._read_env_task_description()
-        if current_task and not self._base_task_description:
-            self._base_task_description = current_task
-
-        if self._base_task_description and current_task:
-            if current_task != self._base_task_description:
-                return (
-                    f'task="{self._base_task_description}" | subtask="{current_task}"'
-                )
-            return f'task="{current_task}"'
-
-        if current_task:
-            return f'task="{current_task}"'
-
-        if self._base_task_description:
-            return f'task="{self._base_task_description}"'
-
-        return 'task=""'
+        return f'task="{current_task}"' if current_task else 'task=""'
 
     def _print_chunk_task_context(self) -> None:
         """Print the current task/subtask context for each received chunk."""
@@ -254,6 +316,32 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             f"[RobotServer][ChunkStep {chunk_index}] {self._format_chunk_task_context()}",
             flush=True,
         )
+
+    def _save_reward_frames_for_preview(
+        self, frames: list[np.ndarray], chunk_num: int
+    ) -> None:
+        """Save reward frames as PNGs and an MP4 video for SBS preview."""
+        if not self._sbs_preview_dir:
+            return
+        import cv2
+
+        chunk_dir = os.path.join(self._sbs_preview_dir, f"chunk_{chunk_num:04d}")
+        os.makedirs(chunk_dir, exist_ok=True)
+
+        # Save individual PNG frames.
+        for i, frame in enumerate(frames):
+            path = os.path.join(chunk_dir, f"frame_{i:02d}.png")
+            cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+        # Synthesize an MP4 video from the frames (2 fps matches VLM config).
+        if len(frames) >= 2:
+            h, w = frames[0].shape[:2]
+            video_path = os.path.join(chunk_dir, "chunk.mp4")
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(video_path, fourcc, 2.0, (w, h))
+            for frame in frames:
+                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            writer.release()
 
     def _format_sbs_status(self) -> str:
         """Return a one-line status summary for the SBS prompt."""
@@ -276,9 +364,21 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             f"ep_time={_fmt(elapsed_s)}/{_fmt(duration_s)} (left={_fmt(remaining_s)})",
         ]
         # Append client-pushed values (TOPReward score/delta, lr, ...).
+        # For chunk#1 (no values pushed yet), show delta=0 with score
+        # pending, since the first async reward hasn't resolved yet.
         if self._client_status_values:
             kv_strs = [f"{k}={v:+.4f}" for k, v in self._client_status_values.items()]
             parts.append(", ".join(kv_strs))
+        else:
+            parts.append("top_reward_delta=+0.0000, top_reward_score=--")
+        # Detect subtask change: the displayed delta/score may use a
+        # freshly seeded baseline, so annotate the discontinuity.
+        # Skip chunk#1 — subtask is already set before the first chunk
+        # arrives, so comparing against base task would be a false positive.
+        current_subtask = self._read_env_task_description()
+        if self._chunk_count > 0 and current_subtask != self._prev_subtask:
+            parts.append("(baseline reset)")
+        self._prev_subtask = current_subtask
         if self._client_status_text:
             parts.append(self._client_status_text)
         return " | ".join(parts)
@@ -420,24 +520,23 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         print("\n" + "=" * 60, flush=True)
         print("  FIRST CHUNK — waiting for approval before executing", flush=True)
         print("=" * 60, flush=True)
-        print(
-            f"  chunk_size={actions.shape[1]}, action_dim={actions.shape[2]}",
-            flush=True,
-        )
-        for i in range(actions.shape[1]):
+        if not self._no_action:
             print(
-                f"  step {i}: {np.array2string(actions[0, i], precision=4, suppress_small=True)}",
+                f"  chunk_size={actions.shape[1]}, action_dim={actions.shape[2]}",
                 flush=True,
             )
+            for i in range(actions.shape[1]):
+                print(
+                    f"  step {i}: {np.array2string(actions[0, i], precision=4, suppress_small=True)}",
+                    flush=True,
+                )
         print("=" * 60, flush=True)
         print("  Press Enter to approve, or Ctrl+C the server to abort.", flush=True)
         print("=" * 60 + "\n", flush=True)
 
-        try:
-            with open("/dev/tty", "r") as tty:
-                tty.readline()
-        except OSError:
-            input()
+        if not self._wait_for_enter_or_shutdown():
+            logger.info("[ChunkStep] First chunk aborted by shutdown.")
+            return
 
         self._first_chunk_approved = True
         logger.info("[ChunkStep] First chunk approved. Executing...")
@@ -474,11 +573,19 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
     def ChunkStep(self, request, context):
         self._touch()
+        # If shutdown is in progress, return idle immediately so the gRPC
+        # thread does not block on SBS prompts or env operations.
+        if self._stop_event.is_set():
+            with self._env_lock:
+                obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
+            return self._build_idle_chunk_response(
+                obs, request.chunk_size, truncated=True
+            )
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
         )
         self._print_chunk_task_context()
-        if self._verbose:
+        if self._verbose and not self._no_action:
             logger.info(
                 f"[ChunkStep] Received chunk: num_envs={request.num_envs}, "
                 f"chunk_size={request.chunk_size}, action_dim={request.action_dim}"
@@ -500,16 +607,24 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
         if not self._first_chunk_approved:
             self._wait_for_first_chunk_approval(actions)
+            if self._stop_event.is_set():
+                with self._env_lock:
+                    obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
+                return self._build_idle_chunk_response(
+                    obs, request.chunk_size, truncated=True
+                )
 
-        if self._step_by_step:
+        if self._step_by_step and not self._stop_event.is_set():
             print(f"[SBS] {self._format_sbs_status()}", flush=True)
             print(f"[SBS] {self._format_chunk_task_context()}", flush=True)
             print("[SBS] Press Enter to execute this chunk...", flush=True)
-            try:
-                with open("/dev/tty", "r") as tty:
-                    tty.readline()
-            except OSError:
-                input()
+            if not self._wait_for_enter_or_shutdown():
+                logger.info("[SBS] Chunk aborted by shutdown.")
+                with self._env_lock:
+                    obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
+                return self._build_idle_chunk_response(
+                    obs, request.chunk_size, truncated=True
+                )
 
         with self._env_lock:
             # Re-check after the approval / step-by-step gap: episode_timeout()
@@ -572,14 +687,44 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 f"truncated={[bool(chunk_truncations[0, i]) for i in range(chunk_size)]}"
             )
 
-        return robot_env_pb2.ChunkStepResponse(step_results=step_results)
+        # Encode reward frames as lossless PNG so that TOPReward sees
+        # full-quality images (JPEG artifacts degrade VLM scores).
+        # Includes both intermediate frames (every N steps) AND the
+        # final-step observation so the client can skip the lossy JPEG obs.
+        reward_frames_bytes = []
+        raw_reward_frames = getattr(self._env, "_last_chunk_reward_frames", [])
+        # Append the final-step image from the wrapped observation.
+        if last_obs is not None:
+            final_img = last_obs.get("main_images")
+            if final_img is not None:
+                final_img = np.asarray(final_img)
+                if final_img.ndim == 4:
+                    final_img = final_img[0]
+                raw_reward_frames = list(raw_reward_frames) + [final_img]
+        if raw_reward_frames:
+            import cv2
+
+            for frame in raw_reward_frames:
+                _, buf = cv2.imencode(
+                    ".png",
+                    cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+                )
+                reward_frames_bytes.append(bytes(buf))
+
+            # Save reward frames locally for preview when SBS is active.
+            if self._step_by_step:
+                self._save_reward_frames_for_preview(
+                    raw_reward_frames, self._chunk_count
+                )
+
+        return robot_env_pb2.ChunkStepResponse(
+            step_results=step_results,
+            reward_frames=reward_frames_bytes,
+        )
 
     def SetTaskDescription(self, request, context):
         self._touch()
         self._env.task_description = request.task_description
-        task_description = str(request.task_description or "").strip()
-        if task_description and not self._base_task_description:
-            self._base_task_description = task_description
         return robot_env_pb2.Empty()
 
     def EnterZeroTorqueMode(self, request, context):
@@ -725,6 +870,8 @@ def serve(
     dummy: bool = False,
     verbose: bool = False,
     step_by_step: bool = False,
+    no_action: bool = False,
+    reward_frame_interval: int = 5,
 ):
     """Start the gRPC server with a YAMEnv instance.
 
@@ -757,6 +904,13 @@ def serve(
         worker_info=None,
     )
 
+    # Enable intermediate frame capture for TOPReward scoring.
+    env._reward_frame_interval = int(reward_frame_interval)
+    if reward_frame_interval > 0:
+        logger.info(
+            f"[RobotServer] Reward frame capture enabled: every {reward_frame_interval} steps"
+        )
+
     if verbose:
         _print_robot_state(env)
         ready_flag = os.environ.get("RLINF_ROBOT_SERVER_READY_FLAG")
@@ -782,7 +936,9 @@ def serve(
         jpeg_quality=jpeg_quality,
         verbose=verbose,
         step_by_step=step_by_step,
+        no_action=no_action,
         request_shutdown=_request_shutdown,
+        stop_event=stop_event,
     )
     robot_env_pb2_grpc.add_RobotEnvServiceServicer_to_server(servicer, server)
 
@@ -939,6 +1095,18 @@ def main():
         action="store_true",
         help="Step-by-step mode: wait for Enter before executing each chunk",
     )
+    parser.add_argument(
+        "--no-action",
+        action="store_true",
+        help="Suppress per-step action logging in SBS mode. Only effective with --sbs.",
+    )
+    parser.add_argument(
+        "--reward-frame-interval",
+        type=int,
+        default=5,
+        help="Capture a camera frame every N low-level steps during chunk_step "
+        "for TOPReward scoring. 0 to disable. Default: 5 (6 frames per 30-step chunk).",
+    )
     args = parser.parse_args()
     serve(
         args.config_path,
@@ -947,6 +1115,8 @@ def main():
         dummy=args.dummy,
         verbose=args.verbose,
         step_by_step=args.sbs,
+        no_action=args.no_action,
+        reward_frame_interval=args.reward_frame_interval,
     )
 
 
