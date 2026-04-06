@@ -27,6 +27,10 @@ from rlinf.data.embodied_io_struct import EnvOutput
 if TYPE_CHECKING:
     from rlinf.workers.vlm_planner.vlm_planner_worker import VLMPlannerWorker
 
+# Must stay in sync with
+# rlinf.workers.vlm_planner.vlm_planner_worker.NEW_TASK_PREFIX.
+NEW_TASK_PREFIX = "NEW_TASK:"
+
 
 @dataclass
 class _PendingTopReward:
@@ -246,6 +250,16 @@ class VLMPlannerClient:
         if not new_subtask or not hasattr(inner_env, "task_description"):
             return False
 
+        if new_subtask.startswith(NEW_TASK_PREFIX):
+            new_task_name = new_subtask[len(NEW_TASK_PREFIX) :].strip()
+            if not new_task_name:
+                return False
+            self._initial_task_descriptions[slot_id] = new_task_name
+            new_subtask = new_task_name
+            self._log_info(
+                f"[EnvWorker] Main task rotated for slot {slot_id}: '{new_task_name}'"
+            )
+
         inner_env.task_description = new_subtask
         if self._top_reward_enabled:
             self.reset_top_reward_state()
@@ -415,9 +429,8 @@ class VLMPlannerClient:
 
         new_subtask = self.request_subtask_sync(slot_id, env_output.obs)
         if self.apply_subtask_update(slot_id, new_subtask, env_list):
-            self.sync_subtask_into_env_output(
-                slot_id, env_output, new_subtask, env_list
-            )
+            task_desc = self.get_current_task_description(slot_id, env_list)
+            self.sync_subtask_into_env_output(slot_id, env_output, task_desc, env_list)
             self.reset_subtask_update_state()
             self._seed_top_reward_baseline_sync(slot_id, env_list, env_output.obs)
         return env_output

@@ -110,12 +110,26 @@ from PIL import Image
 
 from rlinf.utils.logging import get_logger
 
+NEW_TASK_PREFIX = "NEW_TASK:"
+"""Prefix returned by :meth:`get_next_subtask` when the VLM judges the
+current goal achieved and proposes a new one.
+
+The :class:`~rlinf.workers.env.vlm_planner_client.VLMPlannerClient` detects
+this prefix, strips it, and rotates ``_initial_task_descriptions`` so that
+subsequent planning calls use the creative task as the new main goal.
+"""
+
 _SUBTASK_SYSTEM_PROMPT = """\
 You are an AI assistant controlling a bimanual robot arm. \
 You will be shown images from the robot's cameras and the overall episode goal. \
 Your job is to identify the single most appropriate next subtask for the robot to execute. \
-Reply with ONLY the subtask instruction as a short imperative sentence (5-15 words). \
-Do not add any explanation or formatting."""
+If the overall episode goal has NOT been fully achieved yet, reply with ONLY the subtask \
+instruction as a short imperative sentence (5-15 words). \
+If the overall episode goal appears to be fully achieved based on the current observation, \
+reply with "NEW TASK:" followed by a creative new task the robot can attempt next, \
+given what you see in the scene (e.g. tidying up, rearranging objects, \
+or practicing a related manipulation skill). \
+Do not add any other explanation or formatting."""
 
 _REWARD_SYSTEM_PROMPT = """\
 You are an AI evaluator for a bimanual robot arm. \
@@ -404,7 +418,9 @@ class VLMPlannerWorker:
                 Required for meaningful subtask planning.
 
         Returns:
-            Subtask instruction string, e.g. "pick up the red block".
+            Subtask instruction string, e.g. ``"pick up the red block"``.
+            If the VLM judges the current goal achieved it proposes a new
+            task, returned as ``"NEW_TASK: <creative task>"``.
 
         Raises:
             ValueError: If *main_task* is empty.
@@ -430,6 +446,15 @@ class VLMPlannerWorker:
                 "Returning empty subtask."
             )
             subtask = ""
+
+        stripped = subtask.strip()
+        if stripped.upper().startswith("NEW TASK:"):
+            creative_task = stripped.split(":", 1)[1].strip()
+            if creative_task:
+                self._logger.info(
+                    f"[VLMPlannerWorker] Goal achieved, new task: '{creative_task}'"
+                )
+                return f"{NEW_TASK_PREFIX} {creative_task}"
 
         self._logger.info(f"[VLMPlannerWorker] Next subtask: '{subtask}'")
         return subtask

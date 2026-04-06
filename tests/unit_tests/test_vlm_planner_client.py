@@ -34,6 +34,7 @@ except Exception:
 
 from rlinf.data.embodied_io_struct import EnvOutput
 from rlinf.workers.env.vlm_planner_client import (
+    NEW_TASK_PREFIX,
     VLMPlannerClient,
     _PendingSubtask,
     _PendingTopReward,
@@ -321,3 +322,78 @@ def test_cooldown_chunk_does_not_reset_other_slots_subtask_cadence():
     client.maybe_update_subtask(0, envs)
 
     assert 0 in client._pending_subtasks
+
+
+# ---------------------------------------------------------------------------
+# Main-task rotation on creative task proposal
+# ---------------------------------------------------------------------------
+
+
+def test_new_task_prefix_rotates_main_task_and_applies_subtask():
+    """apply_subtask_update with NEW_TASK_PREFIX rotates the main task."""
+    client = _make_client()
+    client._subtask_interval = 10
+    client._initial_task_descriptions = ["fold the towel"]
+
+    env = _make_env("fold the towel")
+    new_subtask = f"{NEW_TASK_PREFIX} tidy up the scattered items"
+
+    applied = client.apply_subtask_update(0, new_subtask, [env])
+
+    assert applied is True
+    assert client._initial_task_descriptions == ["tidy up the scattered items"]
+    assert env.unwrapped.task_description == "tidy up the scattered items"
+
+
+def test_new_task_prefix_propagates_through_initial_subtask_planning():
+    """maybe_plan_initial_subtask rotates main task when planner returns NEW_TASK."""
+    creative_subtask = f"{NEW_TASK_PREFIX} rearrange the cups"
+    client = _make_client()
+    client._subtask_interval = 10
+    client._initial_task_descriptions = ["fold the towel"]
+    client._vlm_planner = _PlannerStub(subtask_result=creative_subtask)
+
+    env = _make_env("fold the towel")
+    env_output = EnvOutput(
+        obs={"main_images": np.zeros((1, 8, 8, 3), dtype=np.uint8)},
+        final_obs={"states": torch.zeros((1, 4))},
+    )
+
+    updated = client.maybe_plan_initial_subtask(0, env_output, [env])
+
+    assert client._initial_task_descriptions == ["rearrange the cups"]
+    assert env.unwrapped.task_description == "rearrange the cups"
+    assert updated.obs["task_descriptions"] == ["rearrange the cups"]
+
+
+def test_new_task_prefix_propagates_through_async_resolution():
+    """Async subtask resolution rotates main task for NEW_TASK prefix."""
+    creative_subtask = f"{NEW_TASK_PREFIX} stack the blocks neatly"
+    client = _make_client()
+    client._subtask_interval = 10
+    client._initial_task_descriptions = ["fold the towel"]
+    client._vlm_planner = _PlannerStub(subtask_result=creative_subtask)
+
+    env = _make_env("fold the towel")
+    subtask_ref = _AwaitableRef(creative_subtask)
+    client._pending_subtasks[0] = _PendingSubtask(ref=subtask_ref, request_id=1)
+
+    asyncio.run(client.resolve_pending_async(0, [env]))
+
+    assert subtask_ref.awaited is True
+    assert client._initial_task_descriptions == ["stack the blocks neatly"]
+    assert env.unwrapped.task_description == "stack the blocks neatly"
+
+
+def test_normal_subtask_does_not_rotate_main_task():
+    """A regular subtask does not change _initial_task_descriptions."""
+    client = _make_client()
+    client._subtask_interval = 10
+    client._initial_task_descriptions = ["fold the towel"]
+
+    env = _make_env("fold the towel")
+    applied = client.apply_subtask_update(0, "grasp the left corner", [env])
+
+    assert applied is True
+    assert client._initial_task_descriptions == ["fold the towel"]
+    assert env.unwrapped.task_description == "grasp the left corner"
