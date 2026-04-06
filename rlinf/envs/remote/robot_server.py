@@ -443,8 +443,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             )
             f.write("=" * 72 + "\n\n")
             f.write(f"Instruction : {instruction}\n")
-            f.write(f"Num frames  : {num_frames}  "
-                    f"(+{new_frame_count} this chunk)\n")
+            f.write(f"Num frames  : {num_frames}  (+{new_frame_count} this chunk)\n")
             f.write(f"FPS         : {fps}\n\n")
             f.write("--- user message content (video + text) ---\n\n")
             f.write(f"[VIDEO: {num_frames} RGB frames at {fps} fps]\n\n")

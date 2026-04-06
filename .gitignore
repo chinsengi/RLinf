@@ -24,6 +24,7 @@ PKG-INFO
 YAM/
 *.egg-info/
 .claude/
+.cursor/
 .ralph/
 .pytest_cache/
 .ruff_cache/
