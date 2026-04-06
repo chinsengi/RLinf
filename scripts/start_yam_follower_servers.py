@@ -160,11 +160,44 @@ def wait_for_port(
     raise TimeoutError(f"Timed out waiting for follower server on {host}:{port}.")
 
 
+def kill_process_on_port(port: int, host: str = DEFAULT_SERVER_HOST) -> bool:
+    """Kill any process listening on the given port. Returns True if killed."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}", "-s", "tcp:listen"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        pids = result.stdout.strip().split()
+        if not pids:
+            return False
+        for pid in pids:
+            pid = pid.strip()
+            if pid:
+                print(
+                    f"[FollowerServers] Killing stale process on port {port} "
+                    f"(pid={pid})",
+                    flush=True,
+                )
+                os.kill(int(pid), signal.SIGTERM)
+        # Give processes a moment to exit.
+        time.sleep(0.5)
+        return True
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
 def ensure_port_is_free(port: int, host: str = DEFAULT_SERVER_HOST) -> None:
     if port_is_open(port, host):
-        raise RuntimeError(
-            f"Port {host}:{port} is already in use. Stop the stale follower server first."
-        )
+        kill_process_on_port(port, host)
+        # Re-check after killing.
+        time.sleep(0.5)
+        if port_is_open(port, host):
+            raise RuntimeError(
+                f"Port {host}:{port} is still in use after attempting to "
+                f"kill the stale process."
+            )
 
 
 def build_server_command(
