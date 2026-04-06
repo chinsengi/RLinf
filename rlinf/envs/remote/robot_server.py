@@ -301,9 +301,9 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             m, s = divmod(int(sec), 60)
             return f"{m}:{s:02d}"
 
-        next_chunk = self._chunk_count + 1
+        chunk_num = self._chunk_count
         parts = [
-            f"chunk#{next_chunk}",
+            f"chunk#{chunk_num}",
             f"ep_time={_fmt(elapsed_s)}/{_fmt(duration_s)} (left={_fmt(remaining_s)})",
         ]
         # Append client-pushed values (TOPReward score/delta, lr, ...).
@@ -319,7 +319,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # Skip chunk#1 — subtask is already set before the first chunk
         # arrives, so comparing against base task would be a false positive.
         current_subtask = self._read_env_task_description()
-        if self._chunk_count > 0 and current_subtask != self._prev_subtask:
+        if self._chunk_count > 1 and current_subtask != self._prev_subtask:
             parts.append("(baseline reset)")
         self._prev_subtask = current_subtask
         if self._client_status_text:
@@ -550,9 +550,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 )
 
         if self._step_by_step:
-            print(f"[SBS] {self._format_sbs_status()}", flush=True)
-            print(f"[SBS] {self._format_chunk_task_context()}", flush=True)
-            print("[SBS] Press Enter to execute this chunk...", flush=True)
+            next_chunk = self._chunk_count + 1
+            print(f"[SBS] Press Enter to execute chunk#{next_chunk}...", flush=True)
             if not self._wait_for_enter_or_shutdown():
                 logger.info("[SBS] Chunk aborted by shutdown.")
                 with self._env_lock:
@@ -580,6 +579,10 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 infos_list,
             ) = self._env.chunk_step(actions)
         self._chunk_count += 1
+
+        if self._step_by_step:
+            print(f"[SBS] {self._format_sbs_status()}", flush=True)
+            print(f"[SBS] {self._format_chunk_task_context()}", flush=True)
 
         step_results = []
         chunk_size = request.chunk_size
