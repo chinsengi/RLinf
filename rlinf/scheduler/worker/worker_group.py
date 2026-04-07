@@ -541,8 +541,10 @@ class WorkerGroupFuncResult:
 
     def wait(self):
         """Wait for all remote results to complete and return the results."""
-        if not self._wait_done:
-            self._wait_thread.join()
+        while not self._wait_done:
+            # Use a timeout so the main thread can handle KeyboardInterrupt
+            # between iterations instead of blocking indefinitely in join().
+            self._wait_thread.join(timeout=1.0)
         return self._local_results
 
     async def async_wait(self):
