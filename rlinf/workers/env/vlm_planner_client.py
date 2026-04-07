@@ -157,6 +157,11 @@ class VLMPlannerClient:
         self._last_applied_subtask_request_id: list[int] = [
             0 for _ in range(slot_count)
         ]
+        # Force one synchronous re-prime right after collection resumes from
+        # cooldown/restart, so VLA does not run on the main task placeholder.
+        self._needs_subtask_reprime_after_resume: list[bool] = [
+            False for _ in range(slot_count)
+        ]
         self._initial_task_descriptions: list[str] = [
             str(train_cfg.get("task_description", "")) for _ in range(slot_count)
         ]
@@ -231,6 +236,9 @@ class VLMPlannerClient:
             self._episode_done_waiting_for_top_reward_reset = [
                 False for _ in self._episode_done_waiting_for_top_reward_reset
             ]
+            self._needs_subtask_reprime_after_resume = [
+                True for _ in self._needs_subtask_reprime_after_resume
+            ]
             # Restore the beaker-side task_description to the initial value
             # so that maybe_plan_initial_subtask's should_prime condition
             # (current_task == main_task) is satisfied.  We intentionally
@@ -248,6 +256,7 @@ class VLMPlannerClient:
         else:
             self._episode_done_waiting_for_top_reward_reset[slot_id] = False
             self.reset_subtask_update_state()
+            self._needs_subtask_reprime_after_resume[slot_id] = True
             if env_list is not None and slot_id < len(env_list):
                 inner_env = self._get_inner_env(env_list, slot_id)
                 if hasattr(inner_env, "_task_description"):
@@ -459,10 +468,42 @@ class VLMPlannerClient:
         new_subtask = self.request_subtask_sync(slot_id, env_output.obs)
         self._log_info(f"[EnvWorker] VLM returned initial subtask: '{new_subtask}'")
         if self.apply_subtask_update(slot_id, new_subtask, env_list):
+            self._needs_subtask_reprime_after_resume[slot_id] = False
             task_desc = self.get_current_task_description(slot_id, env_list)
             self.sync_subtask_into_env_output(slot_id, env_output, task_desc, env_list)
             self.reset_subtask_update_state()
             self._seed_top_reward_baseline_sync(slot_id, env_list, env_output.obs)
+        return env_output
+
+    def maybe_reprime_subtask_after_resume(
+        self,
+        slot_id: int,
+        env_output: EnvOutput,
+        env_list: list[Any],
+    ) -> EnvOutput:
+        """Synchronously re-prime subtask when collection resumes post-cooldown."""
+        if (
+            not self._needs_subtask_reprime_after_resume[slot_id]
+            or self._subtask_interval <= 0
+            or self._vlm_planner is None
+        ):
+            return env_output
+        if not isinstance(env_output.obs, dict):
+            # Keep the flag to retry once an actual observation arrives.
+            return env_output
+
+        main_task = self._initial_task_descriptions[slot_id]
+        self._log_info(
+            f"[EnvWorker] Re-priming subtask after collection resume for slot "
+            f"{slot_id}: main_task='{main_task}'"
+        )
+        new_subtask = self.request_subtask_sync(slot_id, env_output.obs)
+        if self.apply_subtask_update(slot_id, new_subtask, env_list):
+            task_desc = self.get_current_task_description(slot_id, env_list)
+            self.sync_subtask_into_env_output(slot_id, env_output, task_desc, env_list)
+            self.reset_subtask_update_state()
+            self._seed_top_reward_baseline_sync(slot_id, env_list, env_output.obs)
+            self._needs_subtask_reprime_after_resume[slot_id] = False
         return env_output
 
     def maybe_update_subtask(self, slot_id: int, env_list: list[Any]) -> None:
@@ -699,6 +740,9 @@ class VLMPlannerClient:
             self.reset_for_env_reset(slot_id, env_list=env_list)
             return env_output
 
+        env_output = self.maybe_reprime_subtask_after_resume(
+            slot_id, env_output, env_list
+        )
         env_output = self.submit_top_reward(env_output, slot_id, env_list)
         if env_output.dones[:, -1].any():
             if self._top_reward_enabled:
