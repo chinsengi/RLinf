@@ -88,6 +88,11 @@ def _decode_image_stack(
     return np.stack(images, axis=0)[np.newaxis, :]
 
 
+_MAX_OBS_BYTES = (
+    256 * 1024 * 1024
+)  # 256 MB — any single obs field above this is corrupted
+
+
 def _proto_to_obs(proto_obs: robot_env_pb2.Observation) -> dict | None:
     """Convert a protobuf Observation to a YAMEnv-compatible dict.
 
@@ -99,10 +104,23 @@ def _proto_to_obs(proto_obs: robot_env_pb2.Observation) -> dict | None:
 
     # States
     state_shape = tuple(proto_obs.state_shape)
+    state_nbytes = int(np.prod(state_shape)) * 4 if state_shape else 0
+    if state_nbytes > _MAX_OBS_BYTES or state_nbytes < 0:
+        raise ValueError(
+            f"[RemoteEnv] Corrupted observation: state_shape={state_shape} "
+            f"would require {state_nbytes} bytes. Likely data corruption "
+            f"in the gRPC response."
+        )
     states = np.frombuffer(proto_obs.states, dtype=np.float32).reshape(state_shape)
 
     # Image
     h, w = proto_obs.img_height, proto_obs.img_width
+    if h * w * 3 > _MAX_OBS_BYTES or h <= 0 or w <= 0:
+        raise ValueError(
+            f"[RemoteEnv] Corrupted observation: img_height={h}, img_width={w} "
+            f"would require {h * w * 3} bytes. Likely data corruption "
+            f"in the gRPC response."
+        )
     img = _decode_image(proto_obs.main_image, h, w, proto_obs.is_compressed)
 
     # Add batch dim: (H,W,3) → (1,H,W,3)
