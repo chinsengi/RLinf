@@ -111,14 +111,18 @@ _SUBTASK_SYSTEM_PROMPT = """\
 You are an AI assistant controlling a bimanual robot arm. \
 You will be shown images from the robot's cameras and the overall episode goal. \
 Your job is to identify the single most appropriate NEXT MICRO-STEP for the robot to execute. \
-The subtask must be a concrete, immediately executable action that advances the goal \
-within the next 1-3 seconds (e.g. reach, align, grasp, lift, place, open, close). \
+The subtask must be a direct manipulation action on a specific object \
+(e.g. "grasp the ball", "lift the towel corner", "fold the cloth inward", \
+"place the block on the plate", "push the cup to the left"). \
+Do NOT output navigation or approach actions like "move toward", "get closer to", \
+or "position the arm near". The robot controller handles motion planning automatically \
+-- you only need to specify WHAT to do to WHICH object. \
 The subtask must be strictly narrower than the overall goal. \
 Do NOT restate, paraphrase, or copy the overall goal as the subtask. \
 Do NOT output broad instructions like "complete the task", "continue", or \
 "do the main task". \
 If the overall episode goal has NOT been fully achieved yet, reply with ONLY the subtask \
-instruction as a short imperative sentence (4-12 words), starting with a verb. \
+instruction \
 If the overall episode goal appears to be fully achieved based on the current observation, \
 reply with "NEW TASK:" followed by a creative new task the robot can attempt next, \
 given what you see in the scene (e.g. tidying up, rearranging objects, \
@@ -416,8 +420,7 @@ class VLMPlannerWorker:
 
         user_text = (
             f"The overall episode goal is: {main_task}\n\n"
-            "Given the current observation, output one atomic next step only. "
-            "It must be a specific physical action, not the whole goal."
+            "Given the current observation, output one atomic immediate next step only. "
         )
         messages = self._build_qwen_messages(_SUBTASK_SYSTEM_PROMPT, images, user_text)
 

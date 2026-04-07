@@ -279,7 +279,7 @@ actor:
       joint_logprob: True
 
   optim:
-    lr: 0
+    lr: 5e-6
     value_lr: 1.55e-4
     adam_beta1: 0.9
     adam_beta2: 0.95
