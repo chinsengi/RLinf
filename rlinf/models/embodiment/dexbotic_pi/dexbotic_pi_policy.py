@@ -28,19 +28,10 @@ from PIL import Image
 from transformers import DynamicCache
 
 from rlinf.models.embodiment.base_policy import BasePolicy
+from rlinf.models.embodiment.denoise_utils import (
+    get_num_scored_denoise_steps as _get_num_scored_denoise_steps,
+)
 from rlinf.utils.logging import get_logger
-
-
-def _get_num_scored_denoise_steps(num_steps: int, noise_method: str) -> int:
-    """Return how many denoising transitions should contribute PPO log-probs."""
-    if noise_method == "flow_cps":
-        if num_steps <= 1:
-            raise ValueError(
-                "noise_method='flow_cps' requires num_steps > 1 because "
-                "its last denoising step is deterministic."
-            )
-        return num_steps - 1
-    return num_steps
 
 
 class DexboticPi0ForRLActionPrediction(BasePolicy, Pi0ForCausalLM):

@@ -28,40 +28,16 @@ from openpi.models.pi0_config import Pi0Config
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch, make_att_2d_masks
 
 from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
+from rlinf.models.embodiment.denoise_utils import (
+    get_num_scored_denoise_steps as _get_num_scored_denoise_steps,
+)
+from rlinf.models.embodiment.denoise_utils import (
+    get_num_single_step_candidates as _get_num_single_step_candidates,
+)
 from rlinf.models.embodiment.modules.explore_noise_net import ExploreNoiseNet
 from rlinf.models.embodiment.modules.value_head import ValueHead
 from rlinf.utils.logging import get_logger
 from rlinf.utils.nested_dict_process import copy_dict_tensor
-
-
-def _get_num_scored_denoise_steps(num_steps: int, noise_method: str) -> int:
-    """Return how many denoising transitions should contribute PPO log-probs."""
-    if noise_method == "flow_cps":
-        if num_steps <= 1:
-            raise ValueError(
-                "noise_method='flow_cps' requires num_steps > 1 because "
-                "its last denoising step is deterministic."
-            )
-        return num_steps - 1
-    return num_steps
-
-
-def _get_num_single_step_candidates(
-    num_steps: int,
-    noise_method: str,
-    *,
-    ignore_last: bool,
-) -> int:
-    """Return how many denoising steps can be sampled in single-step PPO mode."""
-    candidates = _get_num_scored_denoise_steps(num_steps, noise_method)
-    if ignore_last:
-        candidates -= 1
-    if candidates <= 0:
-        raise ValueError(
-            "No stochastic denoising steps are available for PPO. "
-            f"Got {num_steps=}, {noise_method=}, {ignore_last=}."
-        )
-    return candidates
 
 
 @dataclass(frozen=True)
@@ -1090,6 +1066,8 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             prefix_mask = [True] * 1 + [False] * (all_token_length - 1)
         prefix_out_value = prefix_output[:, prefix_mask, :]
         prefix_out_value = prefix_out_value.mean(dim=1, keepdim=False)
+        if self.config.detach_critic_input:
+            prefix_out_value = prefix_out_value.detach()
         prefix_out_value = prefix_out_value.to(dtype=torch.float32)
         prefix_out_value = self._sanitize_tensor(
             prefix_out_value, nan=0.0, posinf=1e4, neginf=-1e4

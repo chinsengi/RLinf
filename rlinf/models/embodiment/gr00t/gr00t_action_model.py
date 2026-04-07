@@ -32,6 +32,12 @@ from torch.distributions import Normal
 from transformers.feature_extraction_utils import BatchFeature
 
 from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
+from rlinf.models.embodiment.denoise_utils import (
+    get_num_scored_denoise_steps as _get_num_scored_denoise_steps,
+)
+from rlinf.models.embodiment.denoise_utils import (
+    get_num_single_step_candidates as _get_num_single_step_candidates,
+)
 from rlinf.models.embodiment.gr00t.simulation_io import (
     ACTION_CONVERSION,
     OBS_CONVERSION,
@@ -42,36 +48,6 @@ from rlinf.models.embodiment.gr00t.utils import (
 )
 from rlinf.models.embodiment.modules.explore_noise_net import ExploreNoiseNet
 from rlinf.models.embodiment.modules.value_head import ValueHead
-
-
-def _get_num_scored_denoise_steps(num_steps: int, noise_method: str) -> int:
-    """Return how many denoising transitions should contribute PPO log-probs."""
-    if noise_method == "flow_cps":
-        if num_steps <= 1:
-            raise ValueError(
-                "noise_method='flow_cps' requires num_steps > 1 because "
-                "its last denoising step is deterministic."
-            )
-        return num_steps - 1
-    return num_steps
-
-
-def _get_num_single_step_candidates(
-    num_steps: int,
-    noise_method: str,
-    *,
-    ignore_last: bool,
-) -> int:
-    """Return how many denoising steps can be sampled in single-step PPO mode."""
-    candidates = _get_num_scored_denoise_steps(num_steps, noise_method)
-    if ignore_last:
-        candidates -= 1
-    if candidates <= 0:
-        raise ValueError(
-            "No stochastic denoising steps are available for PPO. "
-            f"Got {num_steps=}, {noise_method=}, {ignore_last=}."
-        )
-    return candidates
 
 
 class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
@@ -417,7 +393,6 @@ class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
         )
 
     def get_value(self, vl_embs, state_features):
-        # TODO: add value vlm mode param
         bsize = vl_embs.shape[0]
         mask_length = vl_embs.shape[1]
         if self.rl_config.value_vlm_mode == "mean_token":
@@ -428,12 +403,13 @@ class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
             prefix_mask = [True] * 1 + [False] * (mask_length - 1)
         vl_embs_value = vl_embs[:, prefix_mask, :]
         vl_embs_value = vl_embs_value.mean(dim=1, keepdim=False)
-        # vl_embs_value = vl_embs_value.to(dtype=torch.float32)
         state_features_value = state_features.reshape(bsize, -1)
         if self.rl_config.use_vlm_value:
             value_embs = vl_embs_value
         else:
             value_embs = torch.cat((vl_embs_value, state_features_value), dim=1)
+        if self.rl_config.detach_critic_input:
+            value_embs = value_embs.detach()
         values_vlm = self.value_head(value_embs)[:, 0]
         return values_vlm
 

@@ -31,9 +31,11 @@ openpi:
   add_value_head: ${actor.model.add_value_head}
   value_after_vlm: False
   value_vlm_mode: "mean_token"
-  detach_critic_input: null
+  detach_critic_input: True
 
-  # DSRL specific configurations (disabled by default)
+  # DSRL specific configurations (disabled by default).
+  # NOTE(pi05): DSRL is only implemented in the OpenPI (pi0) model, not in the
+  # pi05 adapter. These fields are silently ignored when config_name starts with "pi05_".
   use_dsrl: False
   dsrl_state_dim: 8
   dsrl_action_noise_dim: 32

@@ -29,6 +29,12 @@ from safetensors.torch import load_file
 from transformers import AutoTokenizer
 
 from rlinf.models.embodiment.base_policy import BasePolicy
+from rlinf.models.embodiment.denoise_utils import (
+    get_num_scored_denoise_steps as _get_num_scored_denoise_steps,
+)
+from rlinf.models.embodiment.denoise_utils import (
+    get_num_single_step_candidates as _get_num_single_step_candidates,
+)
 from rlinf.models.embodiment.modules.explore_noise_net import ExploreNoiseNet
 from rlinf.models.embodiment.modules.value_head import ValueHead
 from rlinf.models.embodiment.pi05.configuration_pi05 import (
@@ -176,18 +182,6 @@ def _get_scheduled_noise_level(
     return torch.tensor(noise_level, device=device, dtype=torch.float32)
 
 
-def _get_num_scored_denoise_steps(num_steps: int, noise_method: str) -> int:
-    """Return how many denoising transitions should contribute PPO log-probs."""
-    if noise_method == "flow_cps":
-        if num_steps <= 1:
-            raise ValueError(
-                "noise_method='flow_cps' requires num_steps > 1 because "
-                "its last denoising step is deterministic."
-            )
-        return num_steps - 1
-    return num_steps
-
-
 def _pad_vector(vector: torch.Tensor, new_dim: int) -> torch.Tensor:
     if vector.shape[-1] >= new_dim:
         return vector
@@ -240,6 +234,10 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         add_value_head: bool = False,
         value_after_vlm: bool = False,
         value_vlm_mode: str = "mean_token",
+        detach_critic_input: bool = False,
+        chunk_critic_input: bool = False,
+        ignore_last: bool = False,
+        num_images_in_input: int = 3,
         precision: str | None = None,
     ):
         super().__init__()
@@ -265,6 +263,10 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         self.add_value_head = add_value_head
         self.value_after_vlm = value_after_vlm and add_value_head
         self.value_vlm_mode = value_vlm_mode
+        self.detach_critic_input = detach_critic_input
+        self.chunk_critic_input = chunk_critic_input
+        self.ignore_last = ignore_last
+        self.num_images_in_input = num_images_in_input
         self.global_step = 0
         self.preprocessor_stats = _load_stats(
             Path(checkpoint_dir)
@@ -482,7 +484,11 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
             suffix_out = suffix_out.to(dtype=target_dtype)
         return suffix_out
 
-    def _get_value_from_vlm(self, prefix_output: torch.Tensor) -> torch.Tensor:
+    def _get_value_from_vlm(
+        self,
+        prefix_output: torch.Tensor,
+        prefix_pad_masks: torch.Tensor,
+    ) -> torch.Tensor:
         if not self.add_value_head:
             return torch.zeros(prefix_output.shape[0], device=prefix_output.device)
         if self.value_vlm_mode == "last_token":
@@ -490,7 +496,16 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         elif self.value_vlm_mode == "first_token":
             prefix_out_value = prefix_output[:, 0]
         else:
-            prefix_out_value = prefix_output.mean(dim=1)
+            # Masked mean: only average over non-padding tokens (real images + language).
+            # prefix_pad_masks is [B, seq_len] with True for real tokens, False for
+            # padding image tokens. This replaces the hardcoded num_images_in_input
+            # mask used in the OpenPI model with a more robust approach.
+            mask = prefix_pad_masks.unsqueeze(-1)  # [B, seq_len, 1]
+            prefix_out_value = (prefix_output * mask).sum(dim=1) / mask.sum(
+                dim=1
+            ).clamp(min=1)
+        if self.detach_critic_input:
+            prefix_out_value = prefix_out_value.detach()
         target_dtype = self.value_head.mlp[0].weight.dtype
         if prefix_out_value.dtype != target_dtype:
             prefix_out_value = prefix_out_value.to(dtype=target_dtype)
@@ -551,7 +566,14 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         v_t = self.model.action_out_proj(suffix_out)
 
         if self.add_value_head and compute_values and not self.value_after_vlm:
-            suffix_out_value = torch.mean(suffix_out, dim=1)
+            if self.chunk_critic_input:
+                suffix_out_value = torch.mean(
+                    suffix_out[:, : self.runtime_action_chunk], dim=1
+                )
+            else:
+                suffix_out_value = torch.mean(suffix_out, dim=1)
+            if self.detach_critic_input:
+                suffix_out_value = suffix_out_value.detach()
             target_dtype = self.value_head.mlp[0].weight.dtype
             if suffix_out_value.dtype != target_dtype:
                 suffix_out_value = suffix_out_value.to(dtype=target_dtype)
@@ -605,7 +627,7 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
             raise ValueError(f"Unsupported mode: {mode}")
         x_t_mean = x0_pred * x0_weight + x1_pred * x1_weight
         if self.value_after_vlm and compute_values:
-            value_t = self._get_value_from_vlm(prefix_output)
+            value_t = self._get_value_from_vlm(prefix_output, prefix_pad_masks)
         return x_t_mean, x_t_std, value_t
 
     def _get_log_prob_value(
@@ -664,7 +686,9 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
                 chains_values.append(value_t)
 
         if self.value_after_vlm:
-            chains_values.append(self._get_value_from_vlm(prefix_output))
+            chains_values.append(
+                self._get_value_from_vlm(prefix_output, prefix_pad_masks)
+            )
 
         chains_log_probs = torch.stack(chains_log_probs, dim=1)
         chains_values = torch.stack(chains_values, dim=1)
@@ -698,20 +722,25 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
         log_probs = []
         values = []
 
-        if self.joint_logprob:
-            log_probs.append(
-                self._get_logprob_norm(x_t, torch.zeros_like(x_t), torch.ones_like(x_t))
-            )
         num_scored_steps = _get_num_scored_denoise_steps(
             self.runtime_num_steps,
             self.noise_method,
         )
+        if self.joint_logprob:
+            log_probs.append(
+                self._get_logprob_norm(x_t, torch.zeros_like(x_t), torch.ones_like(x_t))
+            )
         if mode == "train":
             if self.joint_logprob:
                 denoise_inds = torch.arange(self.runtime_num_steps, device=device)
             else:
+                num_candidates = _get_num_single_step_candidates(
+                    self.runtime_num_steps,
+                    self.noise_method,
+                    ignore_last=self.ignore_last,
+                )
                 denoise_inds = torch.tensor(
-                    [random.randint(0, num_scored_steps - 1)] * self.runtime_num_steps,
+                    [random.randint(0, num_candidates - 1)] * self.runtime_num_steps,
                     device=device,
                 )
         else:
@@ -749,7 +778,9 @@ class PI05PolicyAdapter(torch.nn.Module, BasePolicy):
                 denoise_inds[:, 0],
             ]
         if self.value_after_vlm:
-            prev_values = self._get_value_from_vlm(prefix_output)[:, None]
+            prev_values = self._get_value_from_vlm(prefix_output, prefix_pad_masks)[
+                :, None
+            ]
         else:
             prev_values = torch.stack(values, dim=1).mean(dim=-1)
 
@@ -823,11 +854,15 @@ def get_model(cfg, torch_dtype=None):
     noise_level = getattr(openpi_cfg, "noise_level", 0.5)
     noise_anneal = getattr(openpi_cfg, "noise_anneal", False)
     noise_params = getattr(openpi_cfg, "noise_params", (0.16, 0.12, 200.0))
-    noise_logvar_range = getattr(cfg, "noise_logvar_range", (0.1, 1.0))
+    noise_logvar_range = getattr(openpi_cfg, "noise_logvar_range", (0.1, 1.0))
     joint_logprob = getattr(openpi_cfg, "joint_logprob", False)
     safe_get_logprob = getattr(openpi_cfg, "safe_get_logprob", False)
     value_after_vlm = getattr(openpi_cfg, "value_after_vlm", False)
     value_vlm_mode = getattr(openpi_cfg, "value_vlm_mode", "mean_token")
+    detach_critic_input = getattr(openpi_cfg, "detach_critic_input", False)
+    chunk_critic_input = getattr(openpi_cfg, "chunk_critic_input", False)
+    ignore_last = getattr(openpi_cfg, "ignore_last", False)
+    num_images_in_input = getattr(openpi_cfg, "num_images_in_input", 2)
     train_expert_only = getattr(openpi_cfg, "train_expert_only", False)
     precision = getattr(cfg, "precision", None)
     if precision is None and torch_dtype is not None:
@@ -848,6 +883,10 @@ def get_model(cfg, torch_dtype=None):
         add_value_head=getattr(cfg, "add_value_head", False),
         value_after_vlm=value_after_vlm,
         value_vlm_mode=value_vlm_mode,
+        detach_critic_input=detach_critic_input,
+        chunk_critic_input=chunk_critic_input,
+        ignore_last=ignore_last,
+        num_images_in_input=num_images_in_input,
         precision=precision,
     )
     if train_expert_only:
