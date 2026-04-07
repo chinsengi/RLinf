@@ -464,9 +464,15 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
     def _format_sbs_status(self) -> str:
         """Return a one-line status summary for the SBS prompt."""
-        # Episode wall-clock timing from the wrapped env.
-        duration_s = float(getattr(self._env, "_episode_duration_s", 0.0))
-        start = getattr(self._env, "_episode_start_time", None)
+        with self._env_lock:
+            # Snapshot mutable state under the lock so that concurrent
+            # PushStatusInfo / SetEpisodeTiming RPCs cannot mutate values
+            # mid-read (dict iteration race, torn timing reads).
+            duration_s = float(getattr(self._env, "_episode_duration_s", 0.0))
+            start = getattr(self._env, "_episode_start_time", None)
+            status_values = dict(self._client_status_values)
+            status_text = self._client_status_text
+
         if start is not None:
             elapsed_s = max(0.0, time.monotonic() - start)
         else:
@@ -485,8 +491,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # Append client-pushed values (TOPReward score/delta, lr, ...).
         # For chunk#1 (no values pushed yet), show delta=0 with score
         # pending, since the first async reward hasn't resolved yet.
-        if self._client_status_values:
-            kv_strs = [f"{k}={v:+.4f}" for k, v in self._client_status_values.items()]
+        if status_values:
+            kv_strs = [f"{k}={v:+.4f}" for k, v in status_values.items()]
             parts.append(", ".join(kv_strs))
         else:
             parts.append("top_reward_delta=+0.0000, top_reward_score=--")
@@ -498,8 +504,8 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         if self._chunk_count > 0 and current_subtask != self._prev_subtask:
             parts.append("(baseline reset)")
         self._prev_subtask = current_subtask
-        if self._client_status_text:
-            parts.append(self._client_status_text)
+        if status_text:
+            parts.append(status_text)
         return " | ".join(parts)
 
     def _touch(self) -> None:
@@ -699,10 +705,10 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         # If shutdown is in progress, return idle immediately so the gRPC
         # thread does not block on SBS prompts or env operations.
         if self._stop_event.is_set():
-            with self._env_lock:
-                obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
             return self._build_idle_chunk_response(
-                obs, request.chunk_size, truncated=True
+                self._env._wrap_obs(self._env._dummy_obs()),
+                request.chunk_size,
+                truncated=True,
             )
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
@@ -731,25 +737,24 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         if not self._first_chunk_approved:
             self._wait_for_first_chunk_approval(actions)
             if self._stop_event.is_set():
-                with self._env_lock:
-                    obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
                 return self._build_idle_chunk_response(
-                    obs, request.chunk_size, truncated=True
+                    self._env._wrap_obs(self._env._dummy_obs()),
+                    request.chunk_size,
+                    truncated=True,
                 )
 
         if self._step_by_step and not self._stop_event.is_set():
-            with self._env_lock:
-                sbs_status = self._format_sbs_status()
-                task_ctx = self._format_chunk_task_context()
+            sbs_status = self._format_sbs_status()
+            task_ctx = self._format_chunk_task_context()
             print(f"[SBS] {sbs_status}", flush=True)
             print(f"[SBS] {task_ctx}", flush=True)
             print("[SBS] Press Enter to execute this chunk...", flush=True)
             if not self._wait_for_enter_or_shutdown():
                 logger.info("[SBS] Chunk aborted by shutdown.")
-                with self._env_lock:
-                    obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
                 return self._build_idle_chunk_response(
-                    obs, request.chunk_size, truncated=True
+                    self._env._wrap_obs(self._env._dummy_obs()),
+                    request.chunk_size,
+                    truncated=True,
                 )
 
         with self._env_lock:
@@ -862,18 +867,19 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._touch()
         duration_s = float(request.episode_duration_s)
         cooldown_s = float(request.episode_cooldown_s)
-        changes = []
-        if duration_s > 0:
-            old = float(getattr(self._env, "_episode_duration_s", 0.0))
-            self._env._episode_duration_s = duration_s
-            changes.append(f"episode_duration_s: {old:.1f} -> {duration_s:.1f}")
-        if cooldown_s >= 0:
-            old = self._episode_cooldown_s
-            self._episode_cooldown_s = cooldown_s
-            # Keep env-side value in sync for any code that reads it directly.
-            if hasattr(self._env, "_episode_cooldown_s"):
-                self._env._episode_cooldown_s = cooldown_s
-            changes.append(f"episode_cooldown_s: {old:.1f} -> {cooldown_s:.1f}")
+        with self._env_lock:
+            changes = []
+            if duration_s > 0:
+                old = float(getattr(self._env, "_episode_duration_s", 0.0))
+                self._env._episode_duration_s = duration_s
+                changes.append(f"episode_duration_s: {old:.1f} -> {duration_s:.1f}")
+            if cooldown_s >= 0:
+                old = self._episode_cooldown_s
+                self._episode_cooldown_s = cooldown_s
+                # Keep env-side value in sync for any code that reads it directly.
+                if hasattr(self._env, "_episode_cooldown_s"):
+                    self._env._episode_cooldown_s = cooldown_s
+                changes.append(f"episode_cooldown_s: {old:.1f} -> {cooldown_s:.1f}")
         if changes:
             logger.info(
                 "[RobotServer] Episode timing updated from client: %s",
@@ -883,9 +889,12 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
     def PushStatusInfo(self, request, context):
         self._touch()
-        self._client_status_values = {k: float(v) for k, v in request.values.items()}
-        self._client_status_text = str(request.text or "")
-        self._client_status_updated_at = time.monotonic()
+        with self._env_lock:
+            self._client_status_values = {
+                k: float(v) for k, v in request.values.items()
+            }
+            self._client_status_text = str(request.text or "")
+            self._client_status_updated_at = time.monotonic()
         return robot_env_pb2.Empty()
 
     def Close(self, request, context):
@@ -1166,11 +1175,12 @@ def serve(
     server.stop(grace=2)
 
     logger.info("[RobotServer] Returning arms to home...")
-    try:
-        env.return_to_home()
-        logger.info("[RobotServer] Arms at home.")
-    except Exception as exc:
-        logger.error(f"[RobotServer] Failed to return home: {exc}")
+    with servicer._env_lock:
+        try:
+            env.return_to_home()
+            logger.info("[RobotServer] Arms at home.")
+        except Exception as exc:
+            logger.error(f"[RobotServer] Failed to return home: {exc}")
 
     logger.info("[RobotServer] Local shutdown requested — skipping zero-torque mode.")
 
