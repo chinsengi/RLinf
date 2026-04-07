@@ -221,14 +221,34 @@ class VLMPlannerClient:
         self._top_reward_has_prev_score = False
         self._recent_top_deltas.clear()
 
-    def reset_for_env_reset(self, slot_id: int | None = None) -> None:
+    def reset_for_env_reset(
+        self,
+        slot_id: int | None = None,
+        env_list: list[Any] | None = None,
+    ) -> None:
         if slot_id is None:
             self.reset_subtask_update_state()
             self._episode_done_waiting_for_top_reward_reset = [
                 False for _ in self._episode_done_waiting_for_top_reward_reset
             ]
+            # Restore task_description to the initial value for all slots so
+            # the next maybe_plan_initial_subtask can re-prime the subtask.
+            if env_list is not None:
+                for sid in range(len(self._initial_task_descriptions)):
+                    if sid < len(env_list):
+                        inner_env = self._get_inner_env(env_list, sid)
+                        if hasattr(inner_env, "task_description"):
+                            inner_env.task_description = (
+                                self._initial_task_descriptions[sid]
+                            )
         else:
             self._episode_done_waiting_for_top_reward_reset[slot_id] = False
+            if env_list is not None and slot_id < len(env_list):
+                inner_env = self._get_inner_env(env_list, slot_id)
+                if hasattr(inner_env, "task_description"):
+                    inner_env.task_description = self._initial_task_descriptions[
+                        slot_id
+                    ]
         if self._top_reward_enabled:
             self.reset_top_reward_state()
 
@@ -658,7 +678,7 @@ class VLMPlannerClient:
         env_list: list[Any],
     ) -> EnvOutput:
         if not env_output.collect_for_training:
-            self.reset_for_env_reset(slot_id)
+            self.reset_for_env_reset(slot_id, env_list=env_list)
             return env_output
 
         env_output = self.submit_top_reward(env_output, slot_id, env_list)

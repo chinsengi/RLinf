@@ -713,6 +713,16 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         actions = np.frombuffer(request.actions, dtype=np.float32).reshape(
             request.num_envs, request.chunk_size, request.action_dim
         )
+
+        with self._env_lock:
+            if self._restart_required:
+                obs = self._finish_restart_if_ready_locked()
+                if obs is None:
+                    obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
+                return self._build_idle_chunk_response(
+                    obs, request.chunk_size, truncated=True
+                )
+
         self._print_chunk_task_context()
         if self._verbose and not self._no_action:
             logger.info(
@@ -723,15 +733,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
                 logger.info(
                     f"[ChunkStep]   step {i}/{request.chunk_size}: "
                     f"action={np.array2string(actions[0, i], precision=4, suppress_small=True)}"
-                )
-
-        with self._env_lock:
-            if self._restart_required:
-                obs = self._finish_restart_if_ready_locked()
-                if obs is None:
-                    obs = self._env._wrap_obs(self._get_current_raw_obs_locked())
-                return self._build_idle_chunk_response(
-                    obs, request.chunk_size, truncated=True
                 )
 
         if not self._first_chunk_approved:

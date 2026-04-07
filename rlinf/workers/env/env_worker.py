@@ -795,7 +795,7 @@ class EnvWorker(Worker):
                     reset_on_rollout_epoch or len(self.last_obs_list) <= slot_id
                 )
                 if should_reset:
-                    self._planner_client.reset_for_env_reset()
+                    self._planner_client.reset_for_env_reset(env_list=self.env_list)
                     self.env_list[slot_id].is_start = True
                     extracted_obs, infos = self.env_list[slot_id].reset()
                     intervene_actions = None
@@ -849,7 +849,7 @@ class EnvWorker(Worker):
 
     def _reset_envs_for_next_rollout_epoch(self) -> list[EnvOutput]:
         env_outputs: list[EnvOutput] = []
-        self._planner_client.reset_for_env_reset()
+        self._planner_client.reset_for_env_reset(env_list=self.env_list)
         dones = self._get_zero_dones()
         terminations = dones.clone()
         truncations = dones.clone()
