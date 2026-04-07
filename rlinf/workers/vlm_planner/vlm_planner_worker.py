@@ -78,7 +78,7 @@ Configuration (under ``vlm_planner`` in the top-level YAML):
         ``compute_top_reward()`` scores each step via log P("True" | frames,
         instruction).  Should match ``env.train.top_reward_enabled``.
     top_reward_max_frames: int
-        Maximum trajectory frames to pass to the TOPReward VLM (default: 16).
+        Maximum trajectory frames to pass to the TOPReward VLM (default: 1000).
         Older frames are dropped when the buffer exceeds this limit.
 
 Example YAML::
@@ -259,7 +259,7 @@ class VLMPlannerWorker:
             planner_cfg.get("top_reward_enabled", False)
         )
         self._top_reward_max_frames: int = int(
-            planner_cfg.get("top_reward_max_frames", 16)
+            planner_cfg.get("top_reward_max_frames", 1000)
         )
         self._top_reward_reward_scale: float = float(
             planner_cfg.get("reward_scale", 1.0)
