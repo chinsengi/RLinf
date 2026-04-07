@@ -893,6 +893,11 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
     def PushStatusInfo(self, request, context):
         self._touch()
+        if request.values:
+            logger.info(
+                "[RobotServer] Reward update: %s",
+                ", ".join(f"{k}={v:+.4f}" for k, v in request.values.items()),
+            )
         with self._env_lock:
             self._client_status_values = {
                 k: float(v) for k, v in request.values.items()
