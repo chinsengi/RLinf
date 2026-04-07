@@ -243,6 +243,7 @@ class VLMPlannerClient:
                             )
         else:
             self._episode_done_waiting_for_top_reward_reset[slot_id] = False
+            self.reset_subtask_update_state()
             if env_list is not None and slot_id < len(env_list):
                 inner_env = self._get_inner_env(env_list, slot_id)
                 if hasattr(inner_env, "task_description"):
