@@ -231,14 +231,18 @@ class VLMPlannerClient:
             self._episode_done_waiting_for_top_reward_reset = [
                 False for _ in self._episode_done_waiting_for_top_reward_reset
             ]
-            # Restore task_description to the initial value for all slots so
-            # the next maybe_plan_initial_subtask can re-prime the subtask.
+            # Restore the beaker-side task_description to the initial value
+            # so that maybe_plan_initial_subtask's should_prime condition
+            # (current_task == main_task) is satisfied.  We intentionally
+            # bypass the property setter to avoid sending a gRPC
+            # SetTaskDescription that would overwrite the robot server's
+            # task with the main task right before VLM re-plans.
             if env_list is not None:
                 for sid in range(len(self._initial_task_descriptions)):
                     if sid < len(env_list):
                         inner_env = self._get_inner_env(env_list, sid)
-                        if hasattr(inner_env, "task_description"):
-                            inner_env.task_description = (
+                        if hasattr(inner_env, "_task_description"):
+                            inner_env._task_description = (
                                 self._initial_task_descriptions[sid]
                             )
         else:
@@ -246,8 +250,8 @@ class VLMPlannerClient:
             self.reset_subtask_update_state()
             if env_list is not None and slot_id < len(env_list):
                 inner_env = self._get_inner_env(env_list, slot_id)
-                if hasattr(inner_env, "task_description"):
-                    inner_env.task_description = self._initial_task_descriptions[
+                if hasattr(inner_env, "_task_description"):
+                    inner_env._task_description = self._initial_task_descriptions[
                         slot_id
                     ]
         if self._top_reward_enabled:
