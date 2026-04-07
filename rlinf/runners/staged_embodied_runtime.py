@@ -369,11 +369,7 @@ def run_with_runtime(cfg, *, use_async_runtime: bool) -> None:
         runner.run()
     except KeyboardInterrupt:
         fast_shutdown = True
-        print(
-            "\nKeyboardInterrupt received. Shutting down...",
-            file=sys.stderr,
-            flush=True,
-        )
+        raise
     except Exception as error:
         if REMOTE_DISCONNECT_EVENT.is_set() or _is_expected_remote_disconnect_error(
             error
@@ -417,5 +413,12 @@ def run_with_runtime(cfg, *, use_async_runtime: bool) -> None:
                 except Exception:
                     pass
         stop_process(simulated_desktop_server)
+        if fast_shutdown:
+            print(
+                "\nKeyboardInterrupt received. Shutting down...",
+                file=sys.stderr,
+                flush=True,
+            )
+            sys.exit(0)
     if remote_disconnect_exit:
         raise SystemExit(1)
