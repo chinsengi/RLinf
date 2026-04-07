@@ -132,7 +132,7 @@ algorithm:
 
 env:
   # Desktop-side hardware timer for the YAM home-return cycle.
-  return_home_minutes: 0.1
+  return_home_minutes: 20
   # Training-side rollout horizon in action chunks. With
   # actor.model.num_action_chunks=30, two chunks means 60 low-level steps.
   rollout_horizon_chunks: 2
@@ -161,6 +161,11 @@ env:
     rollout_horizon_steps: 60
     max_steps_per_rollout_epoch: 60
     control_rate_hz: 10.0
+
+    action_chunk_smoothing:
+      enabled: False
+      method: ema
+      alpha: 0.75
 
     # Task description must be a concrete episode goal, not a generic capability
     # label. Examples: "fold the towel", "pick up the red block and place it in
@@ -268,13 +273,13 @@ actor:
       noise_level: 0.2
       noise_anneal: False
       discrete_state_input: True
-      noise_method: "flow_sde"
+      noise_method: "flow_cps"
       action_horizon: 30
       noise_params: [0.16, 0.12, 200]
       joint_logprob: True
 
   optim:
-    lr: 5.0e-6
+    lr: 0
     value_lr: 1.55e-4
     adam_beta1: 0.9
     adam_beta2: 0.95

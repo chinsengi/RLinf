@@ -26,6 +26,7 @@ YAM/
 .claude/
 .cursor/
 .ralph/
+.qwen3_runtime/
 .pytest_cache/
 .ruff_cache/
 plans/

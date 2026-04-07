@@ -1194,11 +1194,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 f"{rewards.shape[:2]=} vs {prev_logprobs.shape[:2]=}."
             )
 
-        if dones.shape[1:] != prev_logprobs.shape[1:]:
+        if dones.shape[1:] != prev_logprobs.shape[1:3]:
             raise ValueError(
                 "Embodied rollout batch has misaligned dones and prev_logprobs "
-                f"batch/action dimensions: {dones.shape[1:]=} vs "
-                f"{prev_logprobs.shape[1:]=}."
+                f"batch/action-chunk dimensions: {dones.shape[1:]=} vs "
+                f"{prev_logprobs.shape[1:3]=}."
             )
         if dones.shape[0] not in (prev_logprobs.shape[0], prev_logprobs.shape[0] + 1):
             raise ValueError(
