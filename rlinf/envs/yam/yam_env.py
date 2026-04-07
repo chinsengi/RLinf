@@ -931,11 +931,13 @@ class YAMEnv(gym.Env):
         """Reset internal state so the next client gets a fresh session.
 
         Called by the robot server after a client disconnect + safe recovery.
-        The next ``reset()`` call will re-capture the current pose as startup
-        home (same as the very first reset after server boot).
+        The robot is already at home after ``return_to_home()``, so we keep
+        ``_has_reset_once = True`` so the next ``reset()`` goes through the
+        normal path (restore PD gains + interpolate to home) instead of the
+        skip-home initial-reset path which would only capture the current pose
+        without sending motor commands.
         """
-        self._has_reset_once = False
-        self._restore_pd_on_next_reset = True
+        self._restore_pd_on_next_reset = False
         self._num_steps = 0
         self._elapsed_steps[:] = 0
         self._episode_start_time = None
