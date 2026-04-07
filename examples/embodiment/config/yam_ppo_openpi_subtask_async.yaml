@@ -133,7 +133,7 @@ algorithm:
 
 env:
   # Desktop-side hardware timer for the YAM home-return cycle.
-  return_home_minutes: 20
+  return_home_minutes: 1
   # Training-side rollout horizon in action chunks. With
   # actor.model.num_action_chunks=30, two chunks means 60 low-level steps.
   rollout_horizon_chunks: 2
@@ -194,8 +194,8 @@ env:
     subtask_adaptive: True
     subtask_min_interval: 2
     subtask_plateau_window: 3
-    subtask_plateau_threshold: 0.01
-    subtask_score_threshold: -0.5
+    subtask_plateau_threshold: 1.0
+    subtask_score_threshold: -10.0
 
     # Dummy mode: controlled at the ROBOT SERVER, not here.
     # RemoteEnv does not read is_dummy — it proxies calls over gRPC to the server.
@@ -271,7 +271,7 @@ actor:
       value_vlm_mode: mean_token
       config_name: "pi05_yam_follower"
       num_images_in_input: 3
-      noise_level: 0.2
+      noise_level: 0
       noise_anneal: False
       discrete_state_input: True
       noise_method: "flow_cps"

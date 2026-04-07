@@ -634,8 +634,11 @@ class RemoteEnv(gym.Env):
                 ),
                 timeout=self._timeout,
             )
-        except grpc.RpcError:
-            pass
+        except grpc.RpcError as e:
+            self._logger.warning(
+                "[RemoteEnv] SetTaskDescription gRPC failed "
+                f"({e.code().name}): {e.details()}"
+            )
 
     @property
     def task_descriptions(self) -> list[str]:
