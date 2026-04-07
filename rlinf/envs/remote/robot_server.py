@@ -363,6 +363,19 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
             flush=True,
         )
 
+    def _compute_topreward_fps(self) -> float:
+        """Derive the approximate TOPReward frame rate from env parameters.
+
+        When the reward-frame capture interval and control rate are known,
+        fps equals ``control_rate_hz / reward_frame_interval``.  Falls back
+        to the Qwen VL default of 2.0 when either parameter is unavailable.
+        """
+        interval = getattr(self._env, "_reward_frame_interval", 0)
+        rate_hz = getattr(self._env, "_control_rate_hz", 0.0)
+        if interval > 0 and rate_hz > 0:
+            return rate_hz / interval
+        return 2.0
+
     def _save_reward_frames_for_preview(
         self, frames: list[np.ndarray], chunk_num: int
     ) -> None:
@@ -388,12 +401,14 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         )
         os.makedirs(ep_dir, exist_ok=True)
 
+        fps = self._compute_topreward_fps()
+
         # Write the cumulative video that matches what TOPReward receives.
         if len(self._episode_reward_frames) >= 2:
             h, w = self._episode_reward_frames[0].shape[:2]
             cumulative_path = os.path.join(ep_dir, "topreward_input.mp4")
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(cumulative_path, fourcc, 2.0, (w, h))
+            writer = cv2.VideoWriter(cumulative_path, fourcc, fps, (w, h))
             for frame in self._episode_reward_frames:
                 writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
             writer.release()
@@ -426,7 +441,7 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         """
         instruction = self._read_env_task_description()
         num_frames = len(self._episode_reward_frames)
-        fps = 2.0
+        fps = self._compute_topreward_fps()
 
         prompt_text = self._TOPREWARD_PROMPT_PREFIX
         instruction_suffix = (

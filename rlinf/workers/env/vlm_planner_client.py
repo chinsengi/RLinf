@@ -31,6 +31,10 @@ if TYPE_CHECKING:
 # rlinf.workers.vlm_planner.vlm_planner_worker.NEW_TASK_PREFIX.
 NEW_TASK_PREFIX = "NEW_TASK:"
 
+# Qwen VL default: matches the FPS constant in qwen_vl_utils and the
+# default parameter in VLMPlannerWorker.compute_top_reward.
+_TOP_REWARD_DEFAULT_FPS: float = 2.0
+
 
 @dataclass
 class _PendingTopReward:
@@ -99,7 +103,8 @@ class VLMPlannerClient:
             adaptive subtask updates after a terminal step until the pending
             TOPReward result has been resolved and episode-local state has been
             cleared.
-        _top_reward_enabled: Whether TOPReward scoring is enabled.
+        _dense_reward_method: Name of the dense reward method to use
+            (``"top_reward"`` or ``"none"``).
         _top_reward_max_frames: Maximum number of recent frames retained for a
             TOPReward planner call.
         _episode_frames: Rolling frame buffer for the current TOPReward scoring
@@ -130,7 +135,7 @@ class VLMPlannerClient:
         self._vlm_planner: "VLMPlannerWorker | None" = None
 
         self._init_subtask_params(train_cfg, slot_count)
-        self._init_top_reward_params(train_cfg, slot_count)
+        self._init_top_reward_params(train_cfg, slot_count, cfg)
         self._validate_params(slot_count)
 
     def _init_subtask_params(self, train_cfg, slot_count: int) -> None:
@@ -161,10 +166,14 @@ class VLMPlannerClient:
             str(train_cfg.get("task_description", "")) for _ in range(slot_count)
         ]
 
-    def _init_top_reward_params(self, train_cfg, slot_count: int) -> None:
-        """Initialize TOPReward parameters from config."""
-        self._top_reward_enabled: bool = bool(
-            train_cfg.get("top_reward_enabled", False)
+    @property
+    def _top_reward_enabled(self) -> bool:
+        return self._dense_reward_method == "top_reward"
+
+    def _init_top_reward_params(self, train_cfg, slot_count: int, cfg=None) -> None:
+        """Initialize dense-reward parameters from config."""
+        self._dense_reward_method: str = str(
+            train_cfg.get("dense_reward_method", "none")
         )
         self._top_reward_max_frames: int = int(
             train_cfg.get("top_reward_max_frames", 1000)
@@ -177,13 +186,33 @@ class VLMPlannerClient:
             False for _ in range(slot_count)
         ]
 
+        # TOPReward fps = control_rate_hz / reward_frame_interval.
+        self._control_rate_hz: float = float(train_cfg.get("control_rate_hz", 0.0))
+        self._reward_frame_interval: int = int(
+            train_cfg.get("reward_frame_interval", 0)
+        )
+        self._top_reward_fps: float = (
+            self._control_rate_hz / self._reward_frame_interval
+            if self._top_reward_enabled
+            else _TOP_REWARD_DEFAULT_FPS
+        )
+
     def _validate_params(self, slot_count: int) -> None:
         """Validate parameter combinations."""
         if self._top_reward_enabled and slot_count != 1:
             raise ValueError(
                 "TOPReward currently supports exactly one pipeline slot. "
                 "Set rollout.pipeline_slot_count=1 "
-                "when env.train.top_reward_enabled=true."
+                "when env.train.dense_reward_method='top_reward'."
+            )
+        if self._top_reward_enabled and self._control_rate_hz <= 0:
+            raise ValueError(
+                "dense_reward_method='top_reward' requires env.train.control_rate_hz > 0."
+            )
+        if self._top_reward_enabled and self._reward_frame_interval <= 0:
+            raise ValueError(
+                "dense_reward_method='top_reward' requires "
+                "env.train.reward_frame_interval > 0."
             )
         if self._subtask_interval > 0 and not any(self._initial_task_descriptions):
             raise ValueError(
@@ -325,7 +354,9 @@ class VLMPlannerClient:
 
         instruction = self.get_top_reward_instruction(slot_id, env_list)
         with self._worker_timer("top_reward"):
-            score_ref = self._vlm_planner.compute_top_reward.remote(images, instruction)
+            score_ref = self._vlm_planner.compute_top_reward.remote(
+                images, instruction, fps=self._top_reward_fps
+            )
             score_t = ray.get(score_ref)
         return self._seed_top_reward_baseline_state(
             slot_id, env_list, baseline_obs, score_t
@@ -351,7 +382,9 @@ class VLMPlannerClient:
 
         instruction = self.get_top_reward_instruction(slot_id, env_list)
         with self._worker_timer("top_reward"):
-            score_ref = self._vlm_planner.compute_top_reward.remote(images, instruction)
+            score_ref = self._vlm_planner.compute_top_reward.remote(
+                images, instruction, fps=self._top_reward_fps
+            )
             score_t = await score_ref
         return self._seed_top_reward_baseline_state(
             slot_id, env_list, baseline_obs, score_t
@@ -539,7 +572,7 @@ class VLMPlannerClient:
 
             instruction = self.get_top_reward_instruction(slot_id, env_list)
             score_ref = self._vlm_planner.compute_top_reward.remote(
-                self._episode_frames, instruction
+                self._episode_frames, instruction, fps=self._top_reward_fps
             )
 
         if env_output.rewards is not None:
@@ -630,7 +663,7 @@ class VLMPlannerClient:
 
             instruction = self.get_top_reward_instruction(slot_id, env_list)
             score_ref = self._vlm_planner.compute_top_reward.remote(
-                self._episode_frames, instruction
+                self._episode_frames, instruction, fps=self._top_reward_fps
             )
             score_t = ray.get(score_ref)
 

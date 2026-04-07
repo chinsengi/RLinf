@@ -31,7 +31,7 @@ This Ray actor runs on the Beaker GPU node and exposes three methods:
    trajectory frames and the current task instruction, returns
    log P("True" | frames, instruction) as a dense progress reward signal.
    Called by ``EnvWorker._compute_top_reward()`` every chunk step when
-   ``top_reward_enabled: True`` (both YAM training configs).
+   ``dense_reward_method: top_reward`` (both YAM training configs).
 
 The worker either loads a local Qwen3-VL vision-language model or performs
 local Qwen-VL preprocessing before calling an external SGLang server. In staged
@@ -47,7 +47,7 @@ Architecture (active call paths for YAM)
         │                                           │
         │  ◀── new subtask text ─────────────────   │  get_next_subtask()
         │                                           │
-        │  every chunk step (top_reward_enabled):   │
+        │  every chunk step (dense_reward_method):   │
         │  episode frames + instruction ──────────▶ │  compute_top_reward()
         │  ◀── log P("True" | frames, instr) ─────  │
 
@@ -73,10 +73,10 @@ Configuration (under ``vlm_planner`` in the top-level YAML):
         Maximum tokens to generate for reward verdicts (default: 16).
     success_threshold: float
         Confidence threshold [0, 1] above which the VLM vote counts as success.
-    top_reward_enabled: bool
-        Enable TOPReward dense progress reward (default: False).  When True,
-        ``compute_top_reward()`` scores each step via log P("True" | frames,
-        instruction).  Should match ``env.train.top_reward_enabled``.
+    dense_reward_method: str
+        Dense reward method name (default: ``"none"``).  Set to
+        ``"top_reward"`` to enable TOPReward scoring via log P("True" |
+        frames, instruction).  Should match ``env.train.dense_reward_method``.
     top_reward_max_frames: int
         Maximum trajectory frames to pass to the TOPReward VLM (default: 1000).
         Older frames are dropped when the buffer exceeds this limit.
@@ -90,7 +90,7 @@ Example YAML::
       max_new_tokens_subtask: 64
       max_new_tokens_reward: 16
       success_threshold: 0.5
-      top_reward_enabled: True
+      dense_reward_method: top_reward
       top_reward_max_frames: 1000
 """
 
@@ -254,9 +254,9 @@ class VLMPlannerWorker:
             planner_cfg.get("success_threshold", 0.5)
         )
 
-        # TOPReward configuration
-        self._top_reward_enabled: bool = bool(
-            planner_cfg.get("top_reward_enabled", False)
+        # Dense reward configuration
+        self._dense_reward_method: str = str(
+            planner_cfg.get("dense_reward_method", "none")
         )
         self._top_reward_max_frames: int = int(
             planner_cfg.get("top_reward_max_frames", 1000)
@@ -297,7 +297,7 @@ class VLMPlannerWorker:
             self._backend = "transformers"
             self._load_transformers_backend()
 
-        if self._top_reward_enabled:
+        if self._dense_reward_method == "top_reward":
             if self._backend == "transformers":
                 from rlinf.algorithms.rewards.top_reward import TOPReward
 
@@ -526,7 +526,7 @@ class VLMPlannerWorker:
             and instruction (a float, typically negative).  All preceding
             tokens are masked; only the last token of the sequence is scored.
         """
-        if not self._top_reward_enabled:
+        if self._dense_reward_method != "top_reward":
             return 0.0
 
         if self._backend == "sglang_http":

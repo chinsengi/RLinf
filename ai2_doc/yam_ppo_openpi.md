@@ -197,7 +197,7 @@ Reward / planner settings:
 ```yaml
 env:
   train:
-    top_reward_enabled: True
+    dense_reward_method: top_reward
     subtask_interval: 0
 ```
 

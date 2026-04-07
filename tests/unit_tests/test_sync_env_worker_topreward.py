@@ -90,7 +90,7 @@ class _PlannerStub:
         self.calls.append((images, main_task))
         return self.result
 
-    def _compute_top_reward(self, frames, instruction):
+    def _compute_top_reward(self, frames, instruction, **kwargs):
         return 0.0
 
 
@@ -100,7 +100,7 @@ class _TopRewardPlannerStub:
         self.calls = []
         self.compute_top_reward = SimpleNamespace(remote=self._compute_top_reward)
 
-    def _compute_top_reward(self, frames, instruction):
+    def _compute_top_reward(self, frames, instruction, **kwargs):
         self.calls.append((list(frames), instruction))
         return self.scores.pop(0)
 
@@ -132,7 +132,7 @@ def _make_adaptive_worker(
     worker._planner_client._subtask_plateau_window = plateau_window
     worker._planner_client._subtask_plateau_threshold = plateau_threshold
     worker._planner_client._subtask_score_threshold = score_threshold
-    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._dense_reward_method = "top_reward"
     worker._planner_client._prev_top_score = prev_top_score
     worker._planner_client._top_reward_has_prev_score = True
     worker._planner_client._steps_since_subtask_update = steps_since_update
@@ -159,7 +159,7 @@ def _make_top_reward_worker(scores, *, subtask_interval=0):
         )
     ]
     worker._planner_client._initial_task_descriptions = ["fold the towel"]
-    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._dense_reward_method = "top_reward"
     worker._planner_client._subtask_interval = subtask_interval
     worker._planner_client._top_reward_max_frames = 16
     worker._planner_client._episode_frames = []
@@ -184,7 +184,7 @@ def test_apply_subtask_update_does_not_raise_with_top_reward():
     worker = EnvWorker.__new__(EnvWorker)
     _attach_planner_client(worker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
-    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._dense_reward_method = "top_reward"
     worker._planner_client._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
     worker._planner_client._prev_top_score = 1.5
     worker._planner_client._recent_top_deltas = deque([0.1, 0.0], maxlen=3)
@@ -207,7 +207,7 @@ def test_apply_subtask_update_resets_when_subtask_changes():
     worker = EnvWorker.__new__(EnvWorker)
     _attach_planner_client(worker)
     worker.env_list = [SimpleNamespace(unwrapped=inner_env)]
-    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._dense_reward_method = "top_reward"
     worker._planner_client._episode_frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
     worker._planner_client._prev_top_score = 1.5
     worker._planner_client._top_reward_has_prev_score = True
@@ -407,7 +407,7 @@ def test_bootstrap_step_reuses_last_obs_when_rollout_reset_disabled():
             "actor": {"model": {"num_action_chunks": 1}},
         }
     )
-    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._dense_reward_method = "top_reward"
     worker._planner_client._prev_top_score = 1.25
     worker._planner_client._top_reward_has_prev_score = True
     worker._planner_client._recent_top_deltas = deque([0.5], maxlen=3)
@@ -454,7 +454,7 @@ def test_bootstrap_step_resets_on_first_epoch_even_when_rollout_reset_disabled()
             "actor": {"model": {"num_action_chunks": 1}},
         }
     )
-    worker._planner_client._top_reward_enabled = True
+    worker._planner_client._dense_reward_method = "top_reward"
     worker._planner_client._prev_top_score = 1.25
     worker._planner_client._top_reward_has_prev_score = True
     worker._planner_client._recent_top_deltas = deque([0.5], maxlen=3)
@@ -647,7 +647,7 @@ def test_env_interact_step_resets_subtask_counter_on_episode_done(monkeypatch):
         }
     )
     worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
-    worker._planner_client._top_reward_enabled = False
+    worker._planner_client._dense_reward_method = "none"
     worker._planner_client._vlm_planner = None
     worker._planner_client._steps_since_subtask_update = 5
     worker.env_list = [
@@ -728,7 +728,7 @@ def test_env_interact_step_applies_action_chunk_smoothing(monkeypatch):
         }
     )
     worker.worker_timer = lambda *_args, **_kwargs: nullcontext()
-    worker._planner_client._top_reward_enabled = False
+    worker._planner_client._dense_reward_method = "none"
     worker._planner_client._vlm_planner = None
     worker._planner_client._steps_since_subtask_update = 0
     worker.env_list = [SimpleNamespace(chunk_step=_chunk_step)]
@@ -852,7 +852,7 @@ def test_initial_subtask_planning_replaces_parent_task_before_first_send(monkeyp
     worker._planner_client._subtask_interval = 10
     worker._planner_client._steps_since_subtask_update = 0
     worker._planner_client._vlm_planner = _PlannerStub(result="pick up the blue one")
-    worker._planner_client._top_reward_enabled = False
+    worker._planner_client._dense_reward_method = "none"
     worker.log_info = lambda *_args, **_kwargs: None
 
     env_output = SimpleNamespace(
@@ -884,7 +884,7 @@ def test_initial_subtask_planning_skips_after_progress_has_started(monkeypatch):
     worker._planner_client._subtask_interval = 10
     worker._planner_client._steps_since_subtask_update = 3
     worker._planner_client._vlm_planner = _PlannerStub(result="pick up the blue one")
-    worker._planner_client._top_reward_enabled = False
+    worker._planner_client._dense_reward_method = "none"
     worker.log_info = lambda *_args, **_kwargs: None
 
     updated = worker._maybe_plan_initial_subtask(

@@ -70,7 +70,7 @@ skip_home_on_initial_reset: True
 return_home_on_close: True
 
 # TOPReward dense reward configuration.
-top_reward_enabled: False
+dense_reward_method: none
 top_reward_max_frames: 1000
 
 robot_cfgs:

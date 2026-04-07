@@ -53,7 +53,7 @@ class _PlannerStub:
         self.calls.append(("subtask", images, main_task))
         return self.subtask_result
 
-    def _compute_top_reward(self, frames, instruction):
+    def _compute_top_reward(self, frames, instruction, **kwargs):
         self.calls.append(("top_reward", list(frames), instruction))
         return self.scores.pop(0)
 
@@ -131,7 +131,7 @@ def test_adaptive_subtask_update_queues_and_resolves_sync():
     client._subtask_min_interval = 2
     client._subtask_plateau_window = 3
     client._subtask_plateau_threshold = 0.01
-    client._top_reward_enabled = True
+    client._dense_reward_method = "top_reward"
     client._top_reward_has_prev_score = True
     client._prev_top_score = -1.0
     client._recent_top_deltas = deque([0.0, 0.005, -0.003], maxlen=3)
@@ -181,7 +181,7 @@ def test_out_of_order_slot_resolution_keeps_both_subtask_updates():
 
 def test_subtask_switch_seeds_top_reward_baseline_for_next_chunk():
     client = _make_client()
-    client._top_reward_enabled = True
+    client._dense_reward_method = "top_reward"
     client._top_reward_max_frames = 16
     client._initial_task_descriptions = ["fold the towel"]
     client._vlm_planner = _PlannerStub(score_result=1.0)
@@ -208,7 +208,7 @@ def test_subtask_switch_seeds_top_reward_baseline_for_next_chunk():
 
 def test_submit_top_reward_is_nonblocking_until_sync_resolve():
     client = _make_client()
-    client._top_reward_enabled = True
+    client._dense_reward_method = "top_reward"
     client._top_reward_max_frames = 16
     client._initial_task_descriptions = ["fold the towel"]
     client._vlm_planner = _PlannerStub(score_result=1.25)
@@ -233,7 +233,7 @@ def test_submit_top_reward_is_nonblocking_until_sync_resolve():
 
 def test_async_resolution_awaits_refs_and_updates_state():
     client = _make_client()
-    client._top_reward_enabled = True
+    client._dense_reward_method = "top_reward"
     client._top_reward_has_prev_score = True
     client._prev_top_score = 1.5
     client._recent_top_deltas = deque(maxlen=3)
@@ -264,7 +264,7 @@ def test_async_resolution_awaits_refs_and_updates_state():
 
 def test_terminal_top_reward_blocks_adaptive_subtask_until_reset_resolves():
     client = _make_client()
-    client._top_reward_enabled = True
+    client._dense_reward_method = "top_reward"
     client._subtask_interval = 1
     client._subtask_adaptive = True
     client._subtask_min_interval = 0

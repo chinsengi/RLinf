@@ -158,8 +158,9 @@ env:
 
     # Enable TOPReward dense progress signal.
     # EnvWorker calls VLMPlannerWorker (on Beaker GPU 2) via Ray RPC.
-    top_reward_enabled: True
+    dense_reward_method: top_reward
     top_reward_max_frames: 1000
+    reward_frame_interval: 5
 
     # Fixed-task TOPReward mode. Set subtask_interval > 0 to enable
     # VLM subtask predictions and make TOPReward follow the current subtask.
@@ -187,7 +188,7 @@ vlm_planner:
   max_new_tokens_subtask: 64
   max_new_tokens_reward: 16
   success_threshold: 0.5
-  top_reward_enabled: True
+  dense_reward_method: top_reward
   top_reward_max_frames: 1000
   reward_scale: 1.0
 
@@ -233,7 +234,7 @@ actor:
       num_images_in_input: 3
       noise_level: 0.2
       noise_anneal: False
-      discrete_state_input: True
+      discrete_state_input: True  # NOTE(pi05): informational only; pi05 reads this from checkpoint config.json
       noise_method: "flow_sde"
       action_horizon: 30
       noise_params: [0.16, 0.12, 200]

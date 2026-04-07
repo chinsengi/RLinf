@@ -18,7 +18,7 @@ This script extends ``train_embodied_agent.py`` with staged-runtime features
 that are needed by VLM-planner workflows:
 
 - launch ``VLMPlannerWorker`` when ``env.train.subtask_interval > 0`` or
-  ``env.train.top_reward_enabled`` is set,
+  ``env.train.dense_reward_method`` is not ``"none"``,
 - support the remote-desktop simulation path for ``env_type: remote``,
 - keep the staged remote-disconnect handling used by the YAM/remote stack.
 

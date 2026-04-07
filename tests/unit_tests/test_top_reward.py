@@ -90,9 +90,14 @@ class _ScoringFakeModel(torch.nn.Module):
         return types.SimpleNamespace(logits=logits)
 
 
+def _fake_process_vision_info(messages, **kwargs):
+    """Qwen3-VL-style stub: returns (images, videos, video_kwargs)."""
+    return None, ["dummy-video"], {}
+
+
 def test_top_reward_matches_reference_qwen_prompt_and_video_path(monkeypatch):
     fake_qwen_utils = types.SimpleNamespace(
-        process_vision_info=lambda messages: (None, ["dummy-video"])
+        process_vision_info=_fake_process_vision_info,
     )
     monkeypatch.setitem(sys.modules, "qwen_vl_utils", fake_qwen_utils)
 
@@ -118,7 +123,7 @@ def test_top_reward_matches_reference_qwen_prompt_and_video_path(monkeypatch):
 
 def test_top_reward_scores_final_token_like_reference(monkeypatch):
     fake_qwen_utils = types.SimpleNamespace(
-        process_vision_info=lambda messages: (None, ["dummy-video"])
+        process_vision_info=_fake_process_vision_info,
     )
     monkeypatch.setitem(sys.modules, "qwen_vl_utils", fake_qwen_utils)
 
@@ -140,7 +145,7 @@ def test_top_reward_scores_final_token_like_reference(monkeypatch):
 
 def test_top_reward_trims_chat_eos_like_reference(monkeypatch):
     fake_qwen_utils = types.SimpleNamespace(
-        process_vision_info=lambda messages: (None, ["dummy-video"])
+        process_vision_info=_fake_process_vision_info,
     )
     monkeypatch.setitem(sys.modules, "qwen_vl_utils", fake_qwen_utils)
 

@@ -171,7 +171,7 @@ env:
   return_home_minutes: 0.1
   rollout_horizon_chunks: 2
   train:
-    top_reward_enabled: True
+    dense_reward_method: top_reward
     top_reward_max_frames: 16
     # Anchor TOPReward to the episode-level goal (stable across subtask changes).
     # Use "current_task" only if stage-conditioned dense reward is needed.

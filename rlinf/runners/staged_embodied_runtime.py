@@ -239,8 +239,8 @@ def _get_vlm_planner_placement(cfg) -> tuple[str, int]:
 def _launch_vlm_planner(cfg, cluster: Cluster):
     """Create a placement-backed VLMPlannerWorker Ray actor."""
     subtask_interval = cfg.env.train.get("subtask_interval", 0)
-    top_reward_enabled = cfg.env.train.get("top_reward_enabled", False)
-    if subtask_interval <= 0 and not top_reward_enabled:
+    dense_reward_method = cfg.env.train.get("dense_reward_method", "none")
+    if subtask_interval <= 0 and dense_reward_method == "none":
         return None
 
     if not hasattr(cfg, "vlm_planner"):

@@ -51,7 +51,7 @@ language subtask descriptions. The runtime split is explicit:
 > when the TOPReward plateau / score-threshold conditions fire.
 >
 > **Adaptive subtask triggering:** when `env.train.subtask_adaptive: true` and
-> `top_reward_enabled: true`, `subtask_interval` becomes a max-interval fallback
+> `dense_reward_method: top_reward`, `subtask_interval` becomes a max-interval fallback
 > instead of the only trigger. `EnvWorker` can also refresh the subtask early if
 > either (1) the last `subtask_plateau_window` TOPReward deltas all satisfy
 > `abs(delta) < subtask_plateau_threshold`, or (2) the latest TOPReward score
@@ -240,7 +240,7 @@ override the template default of 7 would silently truncate actions to single-arm
 
 1. **Episode start** — whenever the env is actually reset into a new episode (for example the first bootstrap reset, an explicit rollout-epoch env reset, or `reset_on_rollout_epoch_end`).
 2. **Episode done** — `env_interact_step()` calls `_reset_top_reward_state()` whenever `chunk_dones[:, -1].any()`.
-3. **Subtask change** — `_maybe_update_subtask()` calls `_reset_top_reward_state()` whenever the VLM generates a new subtask and `top_reward_enabled` is True. Without this reset, the first delta after a subtask change would mix log-probs from different instructions (`score_new_subtask(t+1) − score_old_subtask(t)`), which are not comparable.
+3. **Subtask change** — `_maybe_update_subtask()` calls `_reset_top_reward_state()` whenever the VLM generates a new subtask and `dense_reward_method` is `"top_reward"`. Without this reset, the first delta after a subtask change would mix log-probs from different instructions (`score_new_subtask(t+1) − score_old_subtask(t)`), which are not comparable.
 
 After either reset, the next TOPReward call seeds the new baseline and injects a reward delta of `0.0`; subsequent steps resume the usual `score_t - score_{t-1}` behavior. Rollout-epoch boundaries that continue the same episode do **not** reset the TOPReward baseline.
 

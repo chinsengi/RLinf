@@ -827,10 +827,12 @@ def validate_embodied_cfg(cfg):
 
     subtask_adaptive = bool(cfg.env.train.get("subtask_adaptive", True))
 
-    if subtask_adaptive and not cfg.env.train.get("top_reward_enabled", False):
+    dense_reward_method = cfg.env.train.get("dense_reward_method", "none")
+    if subtask_adaptive and dense_reward_method == "none":
         logging.warning(
-            "env.train.subtask_adaptive=true requires env.train.top_reward_enabled=true "
-            "for plateau and score-threshold triggers. Falling back to the fixed "
+            "env.train.subtask_adaptive=true requires "
+            "env.train.dense_reward_method='top_reward' for plateau and "
+            "score-threshold triggers. Falling back to the fixed "
             "subtask_interval cadence only."
         )
 
