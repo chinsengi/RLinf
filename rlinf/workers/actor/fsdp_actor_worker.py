@@ -1191,6 +1191,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if not isinstance(forward_inputs, dict) or not forward_inputs:
             return False
 
+        # Check that the rollout is large enough for the configured batch size.
+        per_rank_batch_size = int(self.cfg.actor.global_batch_size) // int(
+            self._world_size
+        )
+        flattened_rollout_size = int(rollout_batch["prev_logprobs"].shape[0])
+        if flattened_rollout_size < per_rank_batch_size:
+            return False
+
         return True
 
     def _validate_trainable_rollout_batch(self) -> None:
