@@ -257,7 +257,7 @@ actor:
       noise_level: 0.2
       noise_anneal: False
       discrete_state_input: True
-      noise_method: "flow_sde"
+      noise_method: "flow_cps"
       action_horizon: 30
       action_env_dim: 14
       noise_params: [0.16, 0.12, 200]

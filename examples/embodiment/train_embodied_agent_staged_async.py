@@ -34,6 +34,7 @@ config name ends in ``_async``.
 """
 
 import json
+import sys
 
 import hydra
 import torch.multiprocessing as mp
@@ -43,6 +44,18 @@ from rlinf.config import validate_cfg
 from rlinf.runners.staged_embodied_runtime import run_with_runtime
 
 mp.set_start_method("spawn", force=True)
+
+_orig_excepthook = sys.excepthook
+
+
+def _quiet_excepthook(exc_type, exc_value, exc_tb):
+    if exc_type is KeyboardInterrupt:
+        print("\nKeyboardInterrupt received. Shutting down...", file=sys.stderr)
+    else:
+        _orig_excepthook(exc_type, exc_value, exc_tb)
+
+
+sys.excepthook = _quiet_excepthook
 
 _FORCED_ASYNC_RUNTIME = True
 

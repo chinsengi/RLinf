@@ -108,6 +108,7 @@ Results are saved when training finishes or is interrupted (Ctrl+C).
 """
 
 import json
+import logging
 import os
 import sys
 import time
@@ -122,8 +123,6 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from rlinf.config import validate_cfg  # noqa: E402
-from rlinf.utils.logging import get_logger  # noqa: E402
 from tools.latency_profiler.profiler import LatencyProfiler, LayerTimer  # noqa: E402
 from tools.latency_profiler.runtime_utils import (  # noqa: E402
     backfill_worker_durations,
@@ -132,7 +131,7 @@ from tools.latency_profiler.runtime_utils import (  # noqa: E402
 
 mp.set_start_method("spawn", force=True)
 
-logger = get_logger()
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +169,17 @@ def _detect_mode(cfg) -> str:
     return "real"
 
 
+def _get_staged_runtime_helpers():
+    """Return staged-runtime helpers shared by sync and async profiling."""
+    from rlinf.envs.remote.simulated_desktop import (
+        launch_simulated_desktop_server,
+        stop_process,
+    )
+    from rlinf.runners.staged_embodied_runtime import _launch_vlm_planner
+
+    return _launch_vlm_planner, launch_simulated_desktop_server, stop_process
+
+
 # ---------------------------------------------------------------------------
 # Profiled sync runner
 # ---------------------------------------------------------------------------
@@ -177,14 +187,12 @@ def _detect_mode(cfg) -> str:
 
 def _run_sync_profiled(cfg, profiler: LatencyProfiler) -> None:
     """Run the sync EmbodiedRunner with profiling instrumentation."""
-    # Reuse the staged entry point for VLM planner + simulated desktop.
-    from examples.embodiment.train_embodied_agent_staged import (
+    # Reuse the shared staged runtime for VLM planner + simulated desktop.
+    (
         _launch_vlm_planner,
-    )
-    from rlinf.envs.remote.simulated_desktop import (
         launch_simulated_desktop_server,
         stop_process,
-    )
+    ) = _get_staged_runtime_helpers()
     from rlinf.runners.embodied_runner import EmbodiedRunner
     from rlinf.scheduler import Cluster
     from rlinf.scheduler import WorkerGroupFuncResult as Handle
@@ -341,13 +349,11 @@ def _run_sync_profiled(cfg, profiler: LatencyProfiler) -> None:
 
 def _run_async_profiled(cfg, profiler: LatencyProfiler) -> None:
     """Run the async AsyncPPOEmbodiedRunner with profiling instrumentation."""
-    from examples.embodiment.train_embodied_agent_staged import (
+    (
         _launch_vlm_planner,
-    )
-    from rlinf.envs.remote.simulated_desktop import (
         launch_simulated_desktop_server,
         stop_process,
-    )
+    ) = _get_staged_runtime_helpers()
     from rlinf.runners.async_ppo_embodied_runner import AsyncPPOEmbodiedRunner
     from rlinf.scheduler import Cluster
     from rlinf.utils.placement import HybridComponentPlacement
@@ -507,6 +513,12 @@ def _save_results(profiler: LatencyProfiler, cfg) -> None:
     config_name="yam_ppo_openpi_sync",
 )
 def main(cfg) -> None:
+    from rlinf.config import validate_cfg
+    from rlinf.utils.logging import get_logger
+
+    global logger
+    logger = get_logger()
+
     cfg = validate_cfg(cfg)
 
     # Disable the desktop return-home timer and cooldown so the profiler

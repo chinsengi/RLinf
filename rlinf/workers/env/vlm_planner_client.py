@@ -221,14 +221,35 @@ class VLMPlannerClient:
         self._top_reward_has_prev_score = False
         self._recent_top_deltas.clear()
 
-    def reset_for_env_reset(self, slot_id: int | None = None) -> None:
+    def reset_for_env_reset(
+        self,
+        slot_id: int | None = None,
+        env_list: list[Any] | None = None,
+    ) -> None:
         if slot_id is None:
             self.reset_subtask_update_state()
             self._episode_done_waiting_for_top_reward_reset = [
                 False for _ in self._episode_done_waiting_for_top_reward_reset
             ]
+            # Restore task_description to the initial value for all slots so
+            # the next maybe_plan_initial_subtask can re-prime the subtask.
+            if env_list is not None:
+                for sid in range(len(self._initial_task_descriptions)):
+                    if sid < len(env_list):
+                        inner_env = self._get_inner_env(env_list, sid)
+                        if hasattr(inner_env, "task_description"):
+                            inner_env.task_description = (
+                                self._initial_task_descriptions[sid]
+                            )
         else:
             self._episode_done_waiting_for_top_reward_reset[slot_id] = False
+            self.reset_subtask_update_state()
+            if env_list is not None and slot_id < len(env_list):
+                inner_env = self._get_inner_env(env_list, slot_id)
+                if hasattr(inner_env, "task_description"):
+                    inner_env.task_description = self._initial_task_descriptions[
+                        slot_id
+                    ]
         if self._top_reward_enabled:
             self.reset_top_reward_state()
 
@@ -427,7 +448,12 @@ class VLMPlannerClient:
         if not should_prime:
             return env_output
 
+        self._log_info(
+            f"[EnvWorker] Initial subtask planning for slot {slot_id}: "
+            f"main_task='{main_task}', calling VLM..."
+        )
         new_subtask = self.request_subtask_sync(slot_id, env_output.obs)
+        self._log_info(f"[EnvWorker] VLM returned initial subtask: '{new_subtask}'")
         if self.apply_subtask_update(slot_id, new_subtask, env_list):
             task_desc = self.get_current_task_description(slot_id, env_list)
             self.sync_subtask_into_env_output(slot_id, env_output, task_desc, env_list)
@@ -459,6 +485,14 @@ class VLMPlannerClient:
             score_triggered = bool(
                 self._top_reward_has_prev_score
                 and self._prev_top_score > self._subtask_score_threshold
+            )
+            self._log_info(
+                f"[EnvWorker] Subtask adaptive check (step "
+                f"{self._steps_since_subtask_update}): "
+                f"score={self._prev_top_score:.4f} "
+                f"(thr={self._subtask_score_threshold}), "
+                f"deltas={[round(d, 4) for d in recent_deltas]}, "
+                f"plateau={plateau_triggered}, score_trig={score_triggered}"
             )
             should_trigger = should_trigger or plateau_triggered or score_triggered
 
@@ -658,7 +692,7 @@ class VLMPlannerClient:
         env_list: list[Any],
     ) -> EnvOutput:
         if not env_output.collect_for_training:
-            self.reset_for_env_reset(slot_id)
+            self.reset_for_env_reset(slot_id, env_list=env_list)
             return env_output
 
         env_output = self.submit_top_reward(env_output, slot_id, env_list)
