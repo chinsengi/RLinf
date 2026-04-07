@@ -86,6 +86,9 @@ runner:
   weight_sync_interval: 1
 
 algorithm:
+  # Disabled: with rollout_size=2 (2 chunk steps × 1 env × 1 rollout_epoch),
+  # normalizing over only 2 values is degenerate.  Monitor
+  # actor/advantages_mean if TOPReward variance is high.
   normalize_advantages: False
   kl_penalty: kl
   group_size: 1
@@ -99,8 +102,15 @@ algorithm:
   update_epoch: 5
   adv_type: gae
   loss_type: actor_critic
+  # NOTE: With chunk_level logprobs, logprobs are summed to a scalar per
+  # sample before the loss, so "token-mean" (= masked_mean) is equivalent
+  # to the default.  Kept explicit for documentation / consistency.
   loss_agg_func: "token-mean"
 
+  # NOTE: bootstrap_type is inert for remote YAM because auto_reset is false
+  # (compute_bootstrap_rewards returns early when auto_reset=false).  Desktop
+  # RobotServer owns the restart cycle, so Beaker never performs value
+  # bootstrapping at episode boundaries.
   bootstrap_type: always
   kl_beta: 0.0    # NOTE: not used by EmbodiedFSDPActor (KL penalty only applies to reasoning tasks)
   entropy_bonus: 0.005
@@ -279,8 +289,9 @@ actor:
       joint_logprob: True
 
   optim:
-    lr: 5e-6
-    value_lr: 1.55e-4
+    lr: 5e-6           # Policy backbone LR (small); value_head uses value_lr.
+    value_lr: 1.55e-4  # Consider setting critic_warmup_steps > 0 to let the
+                       # value head converge before policy gradients depend on it.
     adam_beta1: 0.9
     adam_beta2: 0.95
     adam_eps: 1.0e-08
@@ -299,6 +310,10 @@ actor:
       reduce_dtype: ${actor.model.precision}
       buffer_dtype: ${actor.model.precision}
 
+# NOTE: reward.reward_type is a documentation label only.  Dense TOPReward
+# is computed by VLMPlannerWorker → VLMPlannerClient (env-side), NOT through
+# the abstract RewardWorker / get_reward_class registry.  No reward model
+# worker is instantiated (use_reward_model is unset / false).
 reward:
   reward_type: top_reward
 

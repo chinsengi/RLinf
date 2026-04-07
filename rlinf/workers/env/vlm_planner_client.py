@@ -527,6 +527,10 @@ class VLMPlannerClient:
                     for delta in recent_deltas[-self._subtask_plateau_window :]
                 )
             )
+            # _prev_top_score is log P("True" | frames, instruction), so
+            # higher (closer to 0) means the VLM is more confident the
+            # subtask is done.  Crossing above the threshold signals
+            # "subtask completed → advance to next."
             score_triggered = bool(
                 self._top_reward_has_prev_score
                 and self._prev_top_score > self._subtask_score_threshold

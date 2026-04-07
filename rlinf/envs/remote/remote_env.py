@@ -178,6 +178,12 @@ class RemoteEnv(gym.Env):
         channel_options = [
             ("grpc.max_send_message_length", max_msg),
             ("grpc.max_receive_message_length", max_msg),
+            # Keepalive: detect dead connections over SSH tunnels before the
+            # server-side watchdog (default 120 s) triggers safe_recover.
+            ("grpc.keepalive_time_ms", 30_000),
+            ("grpc.keepalive_timeout_ms", 10_000),
+            ("grpc.keepalive_permit_without_calls", 1),
+            ("grpc.http2.max_pings_without_data", 0),
         ]
 
         self._channel = grpc.insecure_channel(server_url, options=channel_options)
