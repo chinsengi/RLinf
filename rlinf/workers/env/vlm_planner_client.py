@@ -481,6 +481,14 @@ class VLMPlannerClient:
                 self._top_reward_has_prev_score
                 and self._prev_top_score > self._subtask_score_threshold
             )
+            self._log_info(
+                f"[EnvWorker] Subtask adaptive check (step "
+                f"{self._steps_since_subtask_update}): "
+                f"score={self._prev_top_score:.4f} "
+                f"(thr={self._subtask_score_threshold}), "
+                f"deltas={[round(d, 4) for d in recent_deltas]}, "
+                f"plateau={plateau_triggered}, score_trig={score_triggered}"
+            )
             should_trigger = should_trigger or plateau_triggered or score_triggered
 
         if not should_trigger:
