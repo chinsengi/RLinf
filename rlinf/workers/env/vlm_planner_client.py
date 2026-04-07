@@ -448,7 +448,12 @@ class VLMPlannerClient:
         if not should_prime:
             return env_output
 
+        self._log_info(
+            f"[EnvWorker] Initial subtask planning for slot {slot_id}: "
+            f"main_task='{main_task}', calling VLM..."
+        )
         new_subtask = self.request_subtask_sync(slot_id, env_output.obs)
+        self._log_info(f"[EnvWorker] VLM returned initial subtask: '{new_subtask}'")
         if self.apply_subtask_update(slot_id, new_subtask, env_list):
             task_desc = self.get_current_task_description(slot_id, env_list)
             self.sync_subtask_into_env_output(slot_id, env_output, task_desc, env_list)
