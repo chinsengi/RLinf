@@ -855,7 +855,11 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
 
     def SetTaskDescription(self, request, context):
         self._touch()
+        old_task = self._read_env_task_description()
         self._env.task_description = request.task_description
+        new_task = request.task_description
+        if new_task != old_task:
+            logger.info(f"[RobotServer] Task updated: '{old_task}' → '{new_task}'")
         return robot_env_pb2.Empty()
 
     def EnterZeroTorqueMode(self, request, context):
