@@ -257,15 +257,15 @@ actor:
       noise_level: 0.2
       noise_anneal: False
       discrete_state_input: True
-      noise_method: "flow_sde"
+      noise_method: "flow_cps"
       action_horizon: 30
       action_env_dim: 14
       noise_params: [0.16, 0.12, 200]
       joint_logprob: True
 
   optim:
-    lr: 0
-    value_lr: 0
+    lr: 5e-6
+    value_lr: 5e-5
     adam_beta1: 0.9
     adam_beta2: 0.95
     adam_eps: 1.0e-08
@@ -284,11 +284,7 @@ actor:
       reduce_dtype: ${actor.model.precision}
       buffer_dtype: ${actor.model.precision}
 
-# reward section is metadata only when use_reward_model: False.
-# TOPReward is computed inline by VLMPlannerWorker (see vlm_planner.reward_scale above).
-# reward_scale here is NOT read by TOPReward — configure it under vlm_planner instead.
 reward:
-  use_reward_model: False
   reward_type: top_reward
 
 critic:

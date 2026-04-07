@@ -60,6 +60,8 @@ def _make_timeout_env() -> tuple[YAMEnv, _FakeRobotEnvForTimeout]:
     env._reset_metrics = Mock()
     env._record_metrics = lambda reward, terminations, intervene, infos: infos
     env._wrap_obs = lambda raw_obs: raw_obs
+    env._reward_frame_interval = 0
+    env._last_chunk_reward_frames = []
     return env, robot_env
 
 
@@ -257,5 +259,6 @@ def test_chunk_step_prints_task_and_subtask_context_to_terminal():
         servicer.ChunkStep(request, None)
 
     output = stdout.getvalue()
-    assert '[RobotServer][ChunkStep 1] task="fold the towel"' in output
-    assert 'subtask="grasp the left corner"' in output
+    # SetTaskDescription overwrites env.task_description, so the chunk
+    # context line reflects the updated value, not the original one.
+    assert '[RobotServer][ChunkStep 1] task="grasp the left corner"' in output

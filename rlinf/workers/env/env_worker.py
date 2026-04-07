@@ -288,10 +288,7 @@ class EnvWorker(Worker):
         )
 
     def _resolve_pending_top_reward(self, slot_id: int) -> None:
-        self._planner_client.resolve_pending_top_reward_sync(slot_id)
-
-    def _finish_pending_top_reward(self, pending: Any, score_t: float) -> None:
-        self._planner_client.apply_resolved_top_reward(pending, score_t)
+        self._planner_client.resolve_pending_top_reward_sync(slot_id, self.env_list)
 
     async def _resolve_pending_vlm_results(self, slot_id: int) -> None:
         self._planner_client.resolve_pending_vlm_results_sync(slot_id, self.env_list)
@@ -389,36 +386,6 @@ class EnvWorker(Worker):
 
                 if self.enable_offload and hasattr(self.env_list[i], "offload"):
                     self.env_list[i].offload()
-
-    def _get_zero_dones(self) -> torch.Tensor:
-        return (
-            torch.zeros((self.train_num_envs_per_stage,), dtype=bool)
-            .unsqueeze(1)
-            .repeat(1, self.cfg.actor.model.num_action_chunks)
-        )
-
-    def _reset_envs_for_next_rollout_epoch(self) -> list[EnvOutput]:
-        env_outputs: list[EnvOutput] = []
-        dones = self._get_zero_dones()
-        terminations = dones.clone()
-        truncations = dones.clone()
-        for slot_id in range(self.slot_count):
-            self.env_list[slot_id].is_start = True
-            extracted_obs, infos = self.env_list[slot_id].reset()
-            env_outputs.append(
-                EnvOutput(
-                    obs=extracted_obs,
-                    dones=dones,
-                    terminations=terminations,
-                    truncations=truncations,
-                    final_obs=infos["final_observation"]
-                    if "final_observation" in infos
-                    else None,
-                    intervene_actions=None,
-                    intervene_flags=None,
-                )
-            )
-        return env_outputs
 
     @Worker.timer("env_interact_step")
     def env_interact_step(
@@ -788,7 +755,7 @@ class EnvWorker(Worker):
                     reset_on_rollout_epoch or len(self.last_obs_list) <= slot_id
                 )
                 if should_reset:
-                    self._planner_client.reset_for_env_reset()
+                    self._planner_client.reset_for_env_reset(env_list=self.env_list)
                     self.env_list[slot_id].is_start = True
                     extracted_obs, infos = self.env_list[slot_id].reset()
                     intervene_actions = None
@@ -842,7 +809,7 @@ class EnvWorker(Worker):
 
     def _reset_envs_for_next_rollout_epoch(self) -> list[EnvOutput]:
         env_outputs: list[EnvOutput] = []
-        self._planner_client.reset_for_env_reset()
+        self._planner_client.reset_for_env_reset(env_list=self.env_list)
         dones = self._get_zero_dones()
         terminations = dones.clone()
         truncations = dones.clone()

@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""TOPReward dense progress reward for embodied RL.
+"""TOPReward dense progress reward for embodied RL (Qwen3-VL).
 
 Computes a dense reward via the Qwen TOPReward reference implementation:
-video-conditioned prompt construction through the processor chat template,
-followed by label masking that keeps only the final token in the rendered
-sequence.
+video-conditioned prompt construction through the Qwen3-VL processor chat
+template, followed by label masking that keeps only the final token in the
+rendered sequence.
 
 The class receives the model and processor as constructor args — the
 VLMPlannerWorker owns the model lifecycle.
@@ -37,15 +37,15 @@ class TOPReward:
         config: Reward config DictConfig.  Recognised keys:
             - ``reward_scale`` (float, default 1.0): multiplicative scale
               applied to the raw TOPReward delta.
-            - ``top_reward_max_frames`` (int, default 16): max video frames.
-        model: A HuggingFace causal VLM (e.g. Qwen-VL).  None when used as
+            - ``top_reward_max_frames`` (int, default 1000): max video frames.
+        model: A HuggingFace causal VLM (Qwen3-VL).  None when used as
             a registry-only entry.
-        processor: Matching HuggingFace processor / tokenizer.
+        processor: Matching HuggingFace Qwen3-VL processor.
     """
 
     def __init__(self, config: DictConfig, model=None, processor=None):
         self.reward_scale = float(config.get("reward_scale", 1.0))
-        self.max_frames = int(config.get("top_reward_max_frames", 16))
+        self.max_frames = int(config.get("top_reward_max_frames", 1000))
         self._model = model
         self._processor = processor
 
@@ -64,7 +64,8 @@ class TOPReward:
             instruction: Task description string.
             reduction: How to aggregate per-token log-probs: ``"mean"`` or
                 ``"sum"``.
-            fps: Frames per second metadata for video input.
+            fps: Frames per second — controls the ``<X.Y seconds>``
+                timestamp tokens that Qwen3-VL prepends to each frame group.
 
         Returns:
             Log-probability of the final unmasked token in the rendered prompt,
@@ -97,11 +98,16 @@ class TOPReward:
         fps: float,
         process_vision_info,
     ):
-        """Render the multimodal prompt and convert it into model inputs."""
-        prompt_text = _PROMPT_PREFIX
+        """Render the multimodal prompt and convert it into model inputs.
+
+        Calls ``process_vision_info`` with ``return_video_kwargs=True`` and
+        ``return_video_metadata=True`` so the Qwen3-VL processor receives
+        ``video_metadata`` (which carries fps and frame indices) and can
+        compute the per-frame ``<X.Y seconds>`` timestamp tokens.
+        """
         content = [
             {"type": "video", "video": pil_frames, "fps": fps},
-            {"type": "text", "text": prompt_text},
+            {"type": "text", "text": _PROMPT_PREFIX},
         ]
         user_messages = [{"role": "user", "content": content}]
         eos_token = self._processor.tokenizer.eos_token
@@ -117,7 +123,28 @@ class TOPReward:
         if eos_token is not None:
             prompt_chat = prompt_chat.split(eos_token)[0]
         full_text = f"{prompt_chat}{instruction_suffix}"
-        image_inputs, video_inputs = process_vision_info(user_messages)
+
+        image_inputs, video_inputs, video_kwargs = process_vision_info(
+            user_messages,
+            return_video_kwargs=True,
+            return_video_metadata=True,
+        )
+
+        # Qwen3-VL returns (video_tensor, metadata) tuples — unpack them
+        # so ``video_metadata`` reaches the processor for timestamp tokens.
+        if (
+            video_inputs
+            and isinstance(video_inputs[0], tuple)
+            and len(video_inputs[0]) == 2
+        ):
+            videos = []
+            video_metadata = []
+            for video, metadata in video_inputs:
+                videos.append(video)
+                video_metadata.append(metadata)
+            video_inputs = videos
+            video_kwargs["video_metadata"] = video_metadata
+            video_kwargs.pop("fps", None)
 
         return self._processor(
             text=[full_text],
@@ -125,6 +152,7 @@ class TOPReward:
             videos=video_inputs,
             padding=True,
             return_tensors="pt",
+            **video_kwargs,
         )
 
     def _score_inputs(self, inputs, torch, F):

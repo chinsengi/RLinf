@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import json
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
@@ -120,3 +122,20 @@ def test_is_async_runtime_uses_loss_type():
 
     assert is_async_runtime(Cfg("decoupled_actor_critic")) is True
     assert is_async_runtime(Cfg("actor_critic")) is False
+
+
+def test_staged_runtime_helpers_import_from_shared_runtime():
+    run_py = Path(__file__).resolve().parents[2] / "tools/latency_profiler/run.py"
+    module = ast.parse(run_py.read_text())
+    helper_fn = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_get_staged_runtime_helpers"
+    )
+    helper_imports = {
+        node.module for node in ast.walk(helper_fn) if isinstance(node, ast.ImportFrom)
+    }
+
+    assert "rlinf.runners.staged_embodied_runtime" in helper_imports
+    assert "examples.embodiment.train_embodied_agent_staged" not in helper_imports

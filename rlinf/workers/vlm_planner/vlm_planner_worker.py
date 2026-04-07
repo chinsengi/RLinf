@@ -14,20 +14,14 @@
 
 """VLM Planner Worker for slot-indexed embodied RL.
 
-This Ray actor runs on the Beaker GPU node and exposes three methods:
+This Ray actor runs on the Beaker GPU node and exposes two methods:
 
 1. **Subtask generation** ``get_next_subtask()`` - given recent robot
    observations (images) and the episode-level main task, generates the next
    subtask instruction (e.g. "pick up the red block").
    Called by ``EnvWorker._maybe_update_subtask()`` when ``subtask_interval > 0``.
 
-2. **Subtask reward evaluation** ``evaluate_subtask()`` - given the same
-   context plus the completed subtask description, decides whether the subtask
-   succeeded (1.0) or failed (0.0).
-   **Not currently called** by EnvWorker in the YAM pipeline; available for
-   future use.
-
-3. **TOPReward scoring** ``compute_top_reward()`` - given accumulated
+2. **TOPReward scoring** ``compute_top_reward()`` - given accumulated
    trajectory frames and the current task instruction, returns
    log P("True" | frames, instruction) as a dense progress reward signal.
    Called by ``EnvWorker._compute_top_reward()`` every chunk step when
@@ -69,16 +63,12 @@ Configuration (under ``vlm_planner`` in the top-level YAML):
         Torch dtype string: "bfloat16" (default), "float16", or "float32".
     max_new_tokens_subtask: int
         Maximum tokens to generate for subtask instructions (default: 64).
-    max_new_tokens_reward: int
-        Maximum tokens to generate for reward verdicts (default: 16).
-    success_threshold: float
-        Confidence threshold [0, 1] above which the VLM vote counts as success.
     top_reward_enabled: bool
         Enable TOPReward dense progress reward (default: False).  When True,
         ``compute_top_reward()`` scores each step via log P("True" | frames,
         instruction).  Should match ``env.train.top_reward_enabled``.
     top_reward_max_frames: int
-        Maximum trajectory frames to pass to the TOPReward VLM (default: 16).
+        Maximum trajectory frames to pass to the TOPReward VLM (default: 1000).
         Older frames are dropped when the buffer exceeds this limit.
 
 Example YAML::
@@ -88,8 +78,6 @@ Example YAML::
       backend: "transformers"
       dtype: "bfloat16"
       max_new_tokens_subtask: 64
-      max_new_tokens_reward: 16
-      success_threshold: 0.5
       top_reward_enabled: True
       top_reward_max_frames: 1000
 """
@@ -110,18 +98,37 @@ from PIL import Image
 
 from rlinf.utils.logging import get_logger
 
+NEW_TASK_PREFIX = "NEW_TASK:"
+"""Prefix returned by :meth:`get_next_subtask` when the VLM judges the
+current goal achieved and proposes a new one.
+
+The :class:`~rlinf.workers.env.vlm_planner_client.VLMPlannerClient` detects
+this prefix, strips it, and rotates ``_initial_task_descriptions`` so that
+subsequent planning calls use the creative task as the new main goal.
+"""
+
 _SUBTASK_SYSTEM_PROMPT = """\
 You are an AI assistant controlling a bimanual robot arm. \
 You will be shown images from the robot's cameras and the overall episode goal. \
-Your job is to identify the single most appropriate next subtask for the robot to execute. \
-Reply with ONLY the subtask instruction as a short imperative sentence (5-15 words). \
-Do not add any explanation or formatting."""
+Your job is to identify the single most appropriate NEXT MICRO-STEP for the robot to execute. \
+The subtask must be a direct manipulation action on a specific object \
+(e.g. "grasp the ball", "lift the towel corner", "fold the cloth inward", \
+"place the block on the plate", "push the cup to the left"). \
+Do NOT output navigation or approach actions like "move toward", "get closer to", \
+or "position the arm near". The robot controller handles motion planning automatically \
+-- you only need to specify WHAT to do to WHICH object. \
+The subtask must be strictly narrower than the overall goal. \
+Do NOT restate, paraphrase, or copy the overall goal as the subtask. \
+Do NOT output broad instructions like "complete the task", "continue", or \
+"do the main task". \
+If the overall episode goal has NOT been fully achieved yet, reply with ONLY the subtask \
+instruction \
+If the overall episode goal appears to be fully achieved based on the current observation, \
+reply with "NEW TASK:" followed by a creative new task the robot can attempt next, \
+given what you see in the scene (e.g. tidying up, rearranging objects, \
+or practicing a related manipulation skill). \
+Do not add any other explanation or formatting."""
 
-_REWARD_SYSTEM_PROMPT = """\
-You are an AI evaluator for a bimanual robot arm. \
-You will be shown images from the robot's cameras and a description of the subtask that was attempted. \
-Decide whether the robot successfully completed the subtask. \
-Reply with ONLY "success" or "failure" — no other text."""
 _TOPREWARD_PROMPT_PREFIX = (
     "The above video shows a robot manipulation trajectory that completes "
     "the following task: "
@@ -233,19 +240,13 @@ class VLMPlannerWorker:
         self._max_new_tokens_subtask: int = int(
             planner_cfg.get("max_new_tokens_subtask", 64)
         )
-        self._max_new_tokens_reward: int = int(
-            planner_cfg.get("max_new_tokens_reward", 16)
-        )
-        self._success_threshold: float = float(
-            planner_cfg.get("success_threshold", 0.5)
-        )
 
         # TOPReward configuration
         self._top_reward_enabled: bool = bool(
             planner_cfg.get("top_reward_enabled", False)
         )
         self._top_reward_max_frames: int = int(
-            planner_cfg.get("top_reward_max_frames", 16)
+            planner_cfg.get("top_reward_max_frames", 1000)
         )
         self._top_reward_reward_scale: float = float(
             planner_cfg.get("reward_scale", 1.0)
@@ -404,7 +405,9 @@ class VLMPlannerWorker:
                 Required for meaningful subtask planning.
 
         Returns:
-            Subtask instruction string, e.g. "pick up the red block".
+            Subtask instruction string, e.g. ``"pick up the red block"``.
+            If the VLM judges the current goal achieved it proposes a new
+            task, returned as ``"NEW_TASK: <creative task>"``.
 
         Raises:
             ValueError: If *main_task* is empty.
@@ -417,8 +420,7 @@ class VLMPlannerWorker:
 
         user_text = (
             f"The overall episode goal is: {main_task}\n\n"
-            "Given the current observation, what is the single best next "
-            "subtask for the robot to execute?"
+            "Given the current observation, output one atomic immediate next step only. "
         )
         messages = self._build_qwen_messages(_SUBTASK_SYSTEM_PROMPT, images, user_text)
 
@@ -431,45 +433,17 @@ class VLMPlannerWorker:
             )
             subtask = ""
 
+        stripped = subtask.strip()
+        if stripped.upper().startswith("NEW TASK:"):
+            creative_task = stripped.split(":", 1)[1].strip()
+            if creative_task:
+                self._logger.info(
+                    f"[VLMPlannerWorker] Goal achieved, new task: '{creative_task}'"
+                )
+                return f"{NEW_TASK_PREFIX} {creative_task}"
+
         self._logger.info(f"[VLMPlannerWorker] Next subtask: '{subtask}'")
         return subtask
-
-    # ------------------------------------------------------------------
-    # Subtask reward evaluation
-    # ------------------------------------------------------------------
-
-    def evaluate_subtask(
-        self,
-        images: list[np.ndarray],
-        subtask: str,
-    ) -> float:
-        """Evaluate whether a subtask was completed, returning a binary reward.
-
-        Args:
-            images: List of uint8 RGB images from robot cameras (post-subtask).
-            subtask: The subtask instruction that was attempted.
-
-        Returns:
-            1.0 if the subtask was completed, 0.0 otherwise.
-        """
-        user_text = (
-            f'Subtask attempted: "{subtask}"\n\n'
-            "Did the robot successfully complete this subtask?"
-        )
-        messages = self._build_qwen_messages(_REWARD_SYSTEM_PROMPT, images, user_text)
-
-        try:
-            verdict = self._generate(messages, self._max_new_tokens_reward).lower()
-            reward = 1.0 if "success" in verdict else 0.0
-        except Exception as exc:
-            self._logger.warning(
-                f"[VLMPlannerWorker] evaluate_subtask failed: {exc}. "
-                "Returning 0.0 reward."
-            )
-            reward = 0.0
-
-        self._logger.info(f"[VLMPlannerWorker] Subtask '{subtask}' → reward={reward}")
-        return reward
 
     # ------------------------------------------------------------------
     # TOPReward: dense progress reward via True-token log-probability

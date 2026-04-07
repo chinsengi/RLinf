@@ -64,6 +64,16 @@ class RobotEnvServiceStub(object):
                 request_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.SerializeToString,
                 response_deserializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.FromString,
                 _registered_method=True)
+        self.SetEpisodeTiming = channel.unary_unary(
+                '/robot_env.RobotEnvService/SetEpisodeTiming',
+                request_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.EpisodeTimingRequest.SerializeToString,
+                response_deserializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.FromString,
+                _registered_method=True)
+        self.PushStatusInfo = channel.unary_unary(
+                '/robot_env.RobotEnvService/PushStatusInfo',
+                request_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.StatusInfoRequest.SerializeToString,
+                response_deserializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.FromString,
+                _registered_method=True)
         self.Close = channel.unary_unary(
                 '/robot_env.RobotEnvService/Close',
                 request_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.SerializeToString,
@@ -116,6 +126,23 @@ class RobotEnvServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SetEpisodeTiming(self, request, context):
+        """Push wall-clock episode timing from the training client to the server.
+        Lets Beaker override the desktop-side episode duration and cooldown
+        without restarting the RobotServer.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PushStatusInfo(self, request, context):
+        """Push a key-value status payload (e.g. TOPReward score) from the training
+        client to the server, so it can be shown in the SBS prompt.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def Close(self, request, context):
         """Close the environment.
         """
@@ -154,6 +181,16 @@ def add_RobotEnvServiceServicer_to_server(servicer, server):
             'EnterZeroTorqueMode': grpc.unary_unary_rpc_method_handler(
                     servicer.EnterZeroTorqueMode,
                     request_deserializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.FromString,
+                    response_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.SerializeToString,
+            ),
+            'SetEpisodeTiming': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetEpisodeTiming,
+                    request_deserializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.EpisodeTimingRequest.FromString,
+                    response_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.SerializeToString,
+            ),
+            'PushStatusInfo': grpc.unary_unary_rpc_method_handler(
+                    servicer.PushStatusInfo,
+                    request_deserializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.StatusInfoRequest.FromString,
                     response_serializer=rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.SerializeToString,
             ),
             'Close': grpc.unary_unary_rpc_method_handler(
@@ -323,6 +360,60 @@ class RobotEnvService(object):
             target,
             '/robot_env.RobotEnvService/EnterZeroTorqueMode',
             rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.SerializeToString,
+            rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetEpisodeTiming(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/robot_env.RobotEnvService/SetEpisodeTiming',
+            rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.EpisodeTimingRequest.SerializeToString,
+            rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PushStatusInfo(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/robot_env.RobotEnvService/PushStatusInfo',
+            rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.StatusInfoRequest.SerializeToString,
             rlinf_dot_envs_dot_remote_dot_proto_dot_robot__env__pb2.Empty.FromString,
             options,
             channel_credentials,

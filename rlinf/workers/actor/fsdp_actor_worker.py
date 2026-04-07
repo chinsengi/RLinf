@@ -1005,6 +1005,10 @@ class FSDPActor(FSDPModelManager, Worker):
         return batch
 
 
+class _CooldownTransitionError(Exception):
+    """Raised when a cooldown boundary mid-rollout produces misaligned tensors."""
+
+
 def _require_trainable_batch(skip_value=None):
     """Decorator that skips the method when the rollout batch has no trainable data."""
 
@@ -1017,7 +1021,14 @@ def _require_trainable_batch(skip_value=None):
                     "batch only contains cooldown / non-training transitions."
                 )
                 return skip_value
-            self._validate_trainable_rollout_batch()
+            try:
+                self._validate_trainable_rollout_batch()
+            except _CooldownTransitionError as exc:
+                self.log_warning(
+                    f"[ActorTrain] Skipping {func.__name__} due to cooldown "
+                    f"transition mid-rollout: {exc}"
+                )
+                return skip_value
             return func(self, *args, **kwargs)
 
         return wrapper
@@ -1180,31 +1191,54 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if not isinstance(forward_inputs, dict) or not forward_inputs:
             return False
 
+        # Check that the rollout is large enough for the configured batch size.
+        per_rank_batch_size = int(self.cfg.actor.global_batch_size) // int(
+            self._world_size
+        )
+        flattened_rollout_size = int(rollout_batch["prev_logprobs"].shape[0])
+        if flattened_rollout_size < per_rank_batch_size:
+            return False
+
         return True
 
     def _validate_trainable_rollout_batch(self) -> None:
-        """Validate tensor alignment for a non-empty embodied rollout batch."""
+        """Validate tensor alignment for a non-empty embodied rollout batch.
+
+        Raises ``_CooldownTransitionError`` for recoverable mismatches that
+        happen when a cooldown boundary falls mid-rollout, so the decorator
+        can skip training instead of crashing.
+        """
         prev_logprobs = self.rollout_batch["prev_logprobs"]
         rewards = self.rollout_batch["rewards"]
         dones = self.rollout_batch["dones"]
 
         if rewards.shape[:2] != prev_logprobs.shape[:2]:
-            raise ValueError(
+            raise _CooldownTransitionError(
                 "Embodied rollout batch has misaligned rewards and prev_logprobs: "
                 f"{rewards.shape[:2]=} vs {prev_logprobs.shape[:2]=}."
             )
 
-        if dones.shape[1:] != prev_logprobs.shape[1:]:
-            raise ValueError(
+        if dones.shape[1:] != prev_logprobs.shape[1:3]:
+            raise _CooldownTransitionError(
                 "Embodied rollout batch has misaligned dones and prev_logprobs "
-                f"batch/action dimensions: {dones.shape[1:]=} vs "
-                f"{prev_logprobs.shape[1:]=}."
+                f"batch/action-chunk dimensions: {dones.shape[1:]=} vs "
+                f"{prev_logprobs.shape[1:3]=}."
             )
         if dones.shape[0] not in (prev_logprobs.shape[0], prev_logprobs.shape[0] + 1):
-            raise ValueError(
+            raise _CooldownTransitionError(
                 "Embodied rollout batch has an unexpected dones time dimension: "
                 f"{dones.shape[0]=} for {prev_logprobs.shape[0]=}."
             )
+
+        prev_values = self.rollout_batch.get("prev_values")
+        if prev_values is not None:
+            expected_t = prev_logprobs.shape[0] + 1
+            if prev_values.shape[0] != expected_t:
+                raise _CooldownTransitionError(
+                    "Embodied rollout batch has misaligned prev_values: "
+                    f"{prev_values.shape[0]=} vs expected {expected_t} "
+                    f"(prev_logprobs.shape[0] + 1)."
+                )
 
         for key, value in self.rollout_batch["forward_inputs"].items():
             if not isinstance(value, torch.Tensor):
