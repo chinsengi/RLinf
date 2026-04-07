@@ -245,7 +245,6 @@ class RobotEnvServicer(robot_env_pb2_grpc.RobotEnvServiceServicer):
         self._step_by_step = step_by_step
         self._no_action = no_action and step_by_step
         self._first_chunk_approved = not self._verbose
-        self._request_shutdown = request_shutdown
         self._stop_event = stop_event or threading.Event()
 
         # Track last client RPC time for disconnect detection.
@@ -1059,9 +1058,6 @@ def serve(
 
     stop_event = threading.Event()
 
-    def _request_shutdown(return_home: bool) -> None:
-        stop_event.set()
-
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=4),
         options=[
@@ -1076,7 +1072,6 @@ def serve(
         verbose=verbose,
         step_by_step=step_by_step,
         no_action=no_action,
-        request_shutdown=_request_shutdown,
         stop_event=stop_event,
     )
     robot_env_pb2_grpc.add_RobotEnvServiceServicer_to_server(servicer, server)
